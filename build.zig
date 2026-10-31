@@ -146,6 +146,10 @@ fn addE2eTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 /// Runs both test binaries under kcov, merges the reports, and fails unless
 /// every measured line is covered.
 ///
+/// The process boundary is excluded by name, not by accident: `tui/src/launch.zig`
+/// (raw mode, alternate screen, session lifecycle) and `tui/src/main.zig` (three
+/// lines of wiring) are executed by the end-to-end PTY test, not by unit tests.
+///
 /// kcov is provided by nix-shell because kcov is a development tool, not a
 /// project dependency (zero dependencies, apart from the Zig toolchain).
 fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) void {
@@ -174,8 +178,10 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         \\mkdir -p .coverage
         \\export CORE_BIN="$1" TUI_BIN="$2" REPORT_BIN="$3"
         \\nix-shell --quiet -p kcov --run '
-        \\  kcov --include-pattern="core/src,tui/src" .coverage/core "$CORE_BIN" &&
-        \\  kcov --include-pattern="core/src,tui/src" .coverage/tui "$TUI_BIN" &&
+        \\  PATTERN="core/src,tui/src"
+        \\  SKIP="tui/src/launch.zig,tui/src/main.zig"
+        \\  kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/core "$CORE_BIN" &&
+        \\  kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/tui "$TUI_BIN" &&
         \\  kcov --merge coverage .coverage/core .coverage/tui
         \\'
         \\exec "$REPORT_BIN" coverage

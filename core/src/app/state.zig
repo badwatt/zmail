@@ -45,6 +45,8 @@ pub const State = struct {
     help_return: View = .list,
 
     status: Text(limits.status_max) = .{},
+    /// Errors are shown with the alert style; plain confirmations are not.
+    status_alert: bool = false,
     quit: bool = false,
 
     /// Recomputes the visible rows from the store. Called after any mutation
@@ -120,6 +122,17 @@ pub const State = struct {
 
     pub fn set_status(self: *State, comptime fmt: []const u8, args: anytype) void {
         self.status.set_fmt(fmt, args);
+        self.status_alert = false;
+    }
+
+    pub fn set_alert(self: *State, comptime fmt: []const u8, args: anytype) void {
+        self.status.set_fmt(fmt, args);
+        self.status_alert = true;
+    }
+
+    pub fn clear_status(self: *State) void {
+        self.status.clear();
+        self.status_alert = false;
     }
 };
 
@@ -278,6 +291,18 @@ test "set_status formats and truncates like every other text" {
     var state: State = .{};
     state.set_status("Filter: {s}", .{"invoice"});
     try testing.expectEqualStrings("Filter: invoice", state.status.slice());
+    try testing.expect(!state.status_alert);
+
+    state.set_alert("Could not reach the server", .{});
+    try testing.expect(state.status_alert);
+
+    state.set_status("Archived", .{});
+    try testing.expect(!state.status_alert);
+
+    state.set_alert("again", .{});
+    state.clear_status();
+    try testing.expect(state.status.is_empty());
+    try testing.expect(!state.status_alert);
 
     const long: [200]u8 = @splat('x');
     state.set_status("{s}", .{long});

@@ -22,7 +22,7 @@ const View = @import("state.zig").View;
 
 pub fn apply(state: *State, store: *Store, command: Command) Effects {
     var effects: Effects = .{};
-    if (command.clears_status()) state.status.clear();
+    if (command.clears_status()) state.clear_status();
 
     switch (command) {
         .noop => {},
@@ -30,9 +30,9 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .move => |move| apply_move(state, move),
         .open_selected => apply_open(state, store, &effects),
         .dismiss => apply_dismiss(state, store),
-        .next_mailbox => switch_mailbox(state, store, state.mailbox.next()),
-        .previous_mailbox => switch_mailbox(state, store, state.mailbox.previous()),
-        .select_mailbox => |mailbox| switch_mailbox(state, store, mailbox),
+        .next_mailbox => switch_mailbox(state, store, state.mailbox.next(), &effects),
+        .previous_mailbox => switch_mailbox(state, store, state.mailbox.previous(), &effects),
+        .select_mailbox => |mailbox| switch_mailbox(state, store, mailbox, &effects),
         .toggle_unread => toggle_unread(state, store, &effects),
         .toggle_flag => toggle_flag(state, store, &effects),
         .archive_selected => move_selected(state, store, .archive, "Archived", &effects),
@@ -131,10 +131,11 @@ fn apply_dismiss(state: *State, store: *Store) void {
     }
 }
 
-fn switch_mailbox(state: *State, store: *Store, mailbox: Mailbox) void {
+fn switch_mailbox(state: *State, store: *Store, mailbox: Mailbox, effects: *Effects) void {
     if (state.mailbox == mailbox) return;
 
     state.mailbox = mailbox;
+    effects.add(.{ .refresh = mailbox });
     state.query.clear();
     state.draft.clear();
     state.mode = .normal;
@@ -513,13 +514,14 @@ test "dismiss: cancel search, close help, leave the reader, then quit" {
     try testing.expect(fixture.state.quit);
 }
 
-test "next and previous mailbox cycle through the fixed set" {
+test "next and previous mailbox cycle and ask the adapter to load them" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
 
-    _ = apply(&fixture.state, &fixture.store, .next_mailbox);
+    const effects = apply(&fixture.state, &fixture.store, .next_mailbox);
     try testing.expectEqual(Mailbox.sent, fixture.state.mailbox);
     try testing.expectEqual(@as(u32, 1), fixture.state.visible_len);
+    try expect_effects(&effects, &.{.{ .refresh = .sent }});
 
     _ = apply(&fixture.state, &fixture.store, .previous_mailbox);
     try testing.expectEqual(Mailbox.inbox, fixture.state.mailbox);
@@ -540,8 +542,9 @@ test "switching mailbox clears the filter, closes the reader, and resets the cur
     _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
     try testing.expectEqual(Mailbox.inbox, fixture.state.mailbox);
 
-    _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .drafts });
+    const effects = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .drafts });
     try testing.expectEqual(Mailbox.drafts, fixture.state.mailbox);
+    try expect_effects(&effects, &.{.{ .refresh = .drafts }});
     try testing.expectEqual(View.list, fixture.state.view);
     try testing.expectEqual(.normal, fixture.state.mode);
     try testing.expect(fixture.state.query.is_empty());

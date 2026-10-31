@@ -36,6 +36,23 @@ pub fn relative(buffer: []u8, now_unix: i64, timestamp_unix: i64) []const u8 {
     return std.fmt.bufPrint(buffer, "{d}/{d}", .{ date.month, date.day }) catch "now";
 }
 
+/// Abbreviated month name for `full_date` and the reader header.
+pub fn month_abbrev(month: u8) []const u8 {
+    const names = [_][]const u8{
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    };
+    assert(month >= 1);
+    assert(month <= 12);
+    return names[month - 1];
+}
+
+/// Writes "14 Nov 2023" into `buffer` (12 bytes is enough).
+pub fn full_date(buffer: []u8, timestamp_unix: i64) []const u8 {
+    const date = civil_from_unix(timestamp_unix);
+    return std.fmt.bufPrint(buffer, "{d} {s} {d}", .{ date.day, month_abbrev(date.month), date.year }) catch "";
+}
+
 /// Converts a Unix timestamp to a UTC calendar date.
 ///
 /// Uses Howard Hinnant's `civil_from_days`, which is exact for all positive and
@@ -101,6 +118,26 @@ test "civil_from_unix: the day after a non-leap February" {
 test "civil_from_unix: a date before the epoch" {
     // -86400 = 1969-12-31.
     try expect_date(-86_400, 1969, 12, 31);
+}
+
+test "month_abbrev names every month" {
+    var month: u8 = 1;
+    while (month <= 12) : (month += 1) {
+        try testing.expectEqual(@as(usize, 3), month_abbrev(month).len);
+    }
+    try testing.expectEqualStrings("Jan", month_abbrev(1));
+    try testing.expectEqualStrings("Dec", month_abbrev(12));
+}
+
+test "full_date renders a readable date" {
+    var buffer: [16]u8 = undefined;
+    // 2023-11-14T22:13:20Z.
+    try testing.expectEqualStrings("14 Nov 2023", full_date(&buffer, 1_700_000_000));
+}
+
+test "full_date degrades to empty when the buffer is too small" {
+    var buffer: [4]u8 = undefined;
+    try testing.expectEqualStrings("", full_date(&buffer, 1_700_000_000));
 }
 
 test "relative: under a minute is now" {

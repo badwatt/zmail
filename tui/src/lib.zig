@@ -13,9 +13,30 @@
 const std = @import("std");
 
 pub const cli = @import("cli.zig");
-pub const run = @import("run.zig");
+pub const screen = @import("screen.zig");
+pub const theme = @import("theme.zig");
+pub const wrap = @import("wrap.zig");
+pub const layout = @import("layout.zig");
+pub const input = @import("input.zig");
+pub const keymap = @import("keymap.zig");
+pub const render = @import("render.zig");
+pub const system = @import("system.zig");
+pub const os = @import("os.zig");
 pub const session = @import("session.zig");
+pub const launch = @import("launch.zig");
+pub const run = @import("run.zig");
 
 test {
     _ = @import("cli.zig");
+    _ = @import("screen.zig");
+    _ = @import("theme.zig");
+    _ = @import("wrap.zig");
+    _ = @import("layout.zig");
+    _ = @import("input.zig");
+    _ = @import("keymap.zig");
+    _ = @import("render.zig");
+    _ = @import("system.zig");
+    _ = @import("os.zig");
+    _ = @import("session.zig");
+    _ = @import("run.zig");
 }

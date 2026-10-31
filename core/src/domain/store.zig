@@ -77,6 +77,11 @@ pub const Store = struct {
         return self.at(index);
     }
 
+    pub fn get_const(self: *const Store, id: MessageId) ?*const Message {
+        const index = self.index_of(id) orelse return null;
+        return self.at_const(index);
+    }
+
     /// Removes and returns the message, shifting the tail down and zeroing the
     /// vacated slot.
     pub fn remove_by_id(self: *Store, id: MessageId) ?Message {
@@ -214,6 +219,8 @@ test "Store: index_of and get find by id, and miss cleanly" {
     try testing.expectEqual(@as(u32, 0), store.get(MessageId.from_int(5)).?.id.to_int() - 5);
     try testing.expect(store.index_of(MessageId.from_int(6)) == null);
     try testing.expect(store.get(MessageId.from_int(6)) == null);
+    try testing.expect(store.get_const(MessageId.from_int(5)) != null);
+    try testing.expect(store.get_const(MessageId.from_int(6)) == null);
 }
 
 test "Store: remove_by_id shifts the tail down and zeroes the slot" {

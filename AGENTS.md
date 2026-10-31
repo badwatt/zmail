@@ -2,32 +2,53 @@
 
 ## Workflow
 
-- **TDD mandatory**: every change requires failing test first, then passing code, then refactor.
+- **TDD mandatory**: every change requires a failing test first, then passing code, then refactor.
 - **Commit freely**: commit anytime without asking.
 - **Push requires approval**: never push. always ask first.
-- **Coverage**: 100% line coverage via kcov. no exceptions.
+- **Coverage**: 100% line coverage via kcov, no exceptions inside the gate.
+  The only excluded files are the process boundary, by name and for a stated
+  reason: `tui/src/launch.zig` and `tui/src/main.zig`. Both are executed by the
+  end-to-end pty test. See `docs/ARCHITECTURE.md`.
 
 ## Verification Steps
 
 1. Write failing test.
 2. Make test pass with minimal code.
 3. Refactor.
-4. Run `zig build test` → all pass (unit + integration).
+4. Run `zig build test` → all pass (core, TUI, build helpers, e2e on a real pty).
 5. Run `zig build coverage` → 100.00%.
 6. Commit.
 
 ## Technical Constraints
 
-- Zig 0.17.0+
-- Dependency injection via the `Deps` struct (CommandRunner + UserIo ports).
+- Zig 0.17.0+.
+- **The dependency arrow points inward.** `core/` must not import `tui/`, and
+  must not perform I/O, read the clock, or know about terminals. Adapters depend
+  on the core; the core depends on nothing.
+- **All behaviour lives in `core/app/update.zig`.** Front ends translate input
+  into `core.command.Command` and execute `core.effect.Effect`. If a rule needs
+  to exist for a future GUI too, it goes in the update function, not in the TUI.
+- Dependency injection via `tui/src/system.zig` (terminal) and
+  `core/src/ports/mail.zig` (mail). Tests use `system.Fake` and
+  `adapters/memory_mail.zig`; never the real terminal or network.
 - External commands run as argv lists, never through a shell.
-- No hardcoded stdout/stdin.
-- `use_llvm = true` on test binary for kcov.
+- No hardcoded stdout/stdin: the session writes through the `System` port;
+  `cli`/`run` take writers. Output is never written from library code.
+- `use_llvm = true` on the test binaries for kcov.
+- Bounded everything: no allocation after startup, no unbounded copies, no
+  unbounded loops. Mail content is attacker-controlled; treat it as such.
+- `build.zig.zon` is the single source of truth for the app name and version.
+  Never hardcode either anywhere else.
+
+## Style
+
+- Follow `docs/TIGER_STYLE.md`: snake_case functions, explicit integer widths,
+  assertions for programmer errors (including the negative space), functions
+  under 70 lines, no recursion, comments that explain *why*.
+- 100-column lines, 4-space indent, `zig fmt`.
+- Sanitization happens on ingress (`core/src/domain/text.zig`), not on render.
 
 ## Questions?
 
-Ask before uncertain decisions.
-
-## Style Guide
-
-See [`docs/TIGER_STYLE.md`](docs/TIGER_STYLE.md) for TigerBeetle coding style guidelines.
+Ask before uncertain decisions. Prefer stating assumptions in the commit
+message over silently picking one.

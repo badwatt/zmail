@@ -18,6 +18,7 @@ const Entry = struct {
     subject: []const u8,
     snippet: []const u8,
     age_seconds: i64,
+    size_bytes: u32,
     unread: bool = false,
     flagged: bool = false,
 };
@@ -32,6 +33,7 @@ const entries = [_]Entry{
         .subject = "Re: design tokens review",
         .snippet = "The palette reads calmer now. Two nits on contrast, both in the dark theme.",
         .age_seconds = 95,
+        .size_bytes = 6_842,
         .unread = true,
     },
     .{
@@ -41,6 +43,7 @@ const entries = [_]Entry{
         .subject = "Zig 0.17 release notes",
         .snippet = "Async I/O landed. Worth a read before we commit to the port.",
         .age_seconds = 14 * 60,
+        .size_bytes = 12_480,
         .unread = true,
         .flagged = true,
     },
@@ -51,6 +54,7 @@ const entries = [_]Entry{
         .subject = "[amail] TUI skeleton merged (#42)",
         .snippet = "A small, tested foundation: bounded text, typed ids, and a screen buffer.",
         .age_seconds = 2 * 3600,
+        .size_bytes = 1_536,
     },
     .{
         .id = 4,
@@ -59,6 +63,7 @@ const entries = [_]Entry{
         .subject = "NixOS Weekly #312",
         .snippet = "Reproducible builds, one more time. Plus: a terminal mail client in Zig.",
         .age_seconds = 5 * 3600,
+        .size_bytes = 18_944,
     },
     .{
         .id = 5,
@@ -67,6 +72,7 @@ const entries = [_]Entry{
         .subject = "Invoice for October",
         .snippet = "Attached: invoice-2024-10.pdf. Due in 14 days, no rush.",
         .age_seconds = 26 * 3600,
+        .size_bytes = 4_096,
         .unread = true,
         .flagged = true,
     },
@@ -77,6 +83,7 @@ const entries = [_]Entry{
         .subject = "Your week in review",
         .snippet = "12 issues closed, 3 in progress, 1 waiting on review.",
         .age_seconds = 3 * 86_400,
+        .size_bytes = 7_168,
     },
     .{
         .id = 7,
@@ -85,6 +92,7 @@ const entries = [_]Entry{
         .subject = "The best of last week",
         .snippet = "Why terminals are back, and four other links worth your coffee.",
         .age_seconds = 9 * 86_400,
+        .size_bytes = 11_264,
     },
     .{
         .id = 8,
@@ -93,6 +101,7 @@ const entries = [_]Entry{
         .subject = "Re: design tokens review",
         .snippet = "Agreed on both nits. Pushed the contrast fix and a screenshot.",
         .age_seconds = 30 * 60,
+        .size_bytes = 2_048,
     },
     .{
         .id = 9,
@@ -101,6 +110,7 @@ const entries = [_]Entry{
         .subject = "Re: Zig 0.17 release notes",
         .snippet = "Reading tonight. The new Io model is a lot to absorb.",
         .age_seconds = 2 * 3600,
+        .size_bytes = 1_536,
     },
     .{
         .id = 10,
@@ -109,6 +119,7 @@ const entries = [_]Entry{
         .subject = "Draft: notes on hexagonal mail",
         .snippet = "Core does not know what a terminal is. That is the whole trick.",
         .age_seconds = 10 * 60,
+        .size_bytes = 512,
     },
     .{
         .id = 11,
@@ -117,6 +128,7 @@ const entries = [_]Entry{
         .subject = "Conference talk accepted",
         .snippet = "See you in Berlin. Slides due two weeks before.",
         .age_seconds = 12 * 86_400,
+        .size_bytes = 3_584,
     },
 };
 
@@ -128,6 +140,7 @@ pub fn seed(mail: *MemoryMail, now_unix: i64) !void {
             .mailbox = entry.mailbox,
             .from = try Address.init(entry.from),
             .timestamp_unix = now_unix - entry.age_seconds,
+            .size_bytes = entry.size_bytes,
             .flags = .{ .unread = entry.unread, .flagged = entry.flagged },
         };
         message.subject.set(entry.subject);
