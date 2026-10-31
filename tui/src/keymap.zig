@@ -23,7 +23,7 @@ pub fn translate(key: Key, context: Context) ?Command {
     if (context.mode == .search) return search_key(key);
     if (context.view == .help) {
         return switch (key) {
-            .ctrl => |letter| if (letter == 'c') .quit else .toggle_help,
+            .ctrl => |letter| if (letter == 'c' or letter == 'q') .quit else .toggle_help,
             else => .toggle_help,
         };
     }
@@ -32,7 +32,7 @@ pub fn translate(key: Key, context: Context) ?Command {
 
 fn normal_key(key: Key, view: View) ?Command {
     return switch (key) {
-        .char => |codepoint| char_command(codepoint),
+        .char => |codepoint| char_command(codepoint, view),
         .enter => .open_selected,
         .tab => .next_mailbox,
         .back_tab => .previous_mailbox,
@@ -42,9 +42,8 @@ fn normal_key(key: Key, view: View) ?Command {
         .end => .{ .move = .bottom },
         .page_up => .{ .move = .page_up },
         .page_down => .{ .move = .page_down },
-        .left => if (view == .list) null else .dismiss,
+        .left, .escape => if (view == .list) null else .dismiss,
         .right => if (view == .list) .open_selected else null,
-        .escape => .dismiss,
         .backspace => null,
         .delete => .delete_selected,
         .insert, .unknown, .mouse => null,
@@ -52,14 +51,14 @@ fn normal_key(key: Key, view: View) ?Command {
     };
 }
 
-fn char_command(codepoint: u21) ?Command {
+fn char_command(codepoint: u21, view: View) ?Command {
     return switch (codepoint) {
         'j' => .{ .move = .down },
         'k' => .{ .move = .up },
         'g' => .{ .move = .top },
         'G' => .{ .move = .bottom },
         'l', 'o' => .open_selected,
-        'h', 'q' => .dismiss,
+        'h', 'q' => if (view == .list) null else .dismiss,
         'u' => .toggle_unread,
         's', '*' => .toggle_flag,
         'd' => .archive_selected,
@@ -76,7 +75,7 @@ fn char_command(codepoint: u21) ?Command {
 
 fn ctrl_command(letter: u8) ?Command {
     return switch (letter) {
-        'c' => .quit,
+        'c', 'q' => .quit,
         'd' => .{ .move = .half_page_down },
         'u' => .{ .move = .half_page_up },
         'f' => .{ .move = .page_down },
@@ -156,7 +155,7 @@ test "control keys page and move" {
         .{ .key = .{ .ctrl = 'n' }, .expected = .{ .move = .down } },
         .{ .key = .{ .ctrl = 'p' }, .expected = .{ .move = .up } },
         .{ .key = .{ .ctrl = 'c' }, .expected = .quit },
-        .{ .key = .{ .ctrl = 'q' }, .expected = null },
+        .{ .key = .{ .ctrl = 'q' }, .expected = .quit },
     };
     for (cases) |case| try check(case);
 }
@@ -167,18 +166,21 @@ test "opening and dismissing" {
         .{ .key = .{ .char = 'l' }, .expected = .open_selected },
         .{ .key = .{ .char = 'o' }, .expected = .open_selected },
         .{ .key = .right, .expected = .open_selected },
-        .{ .key = .escape, .expected = .dismiss },
-        .{ .key = .{ .char = 'q' }, .expected = .dismiss },
-        .{ .key = .{ .char = 'h' }, .expected = .dismiss },
+        .{ .key = .escape, .expected = null },
+        .{ .key = .{ .char = 'q' }, .expected = null },
+        .{ .key = .{ .char = 'h' }, .expected = null },
         .{ .key = .{ .char = 'x' }, .expected = null },
     };
     for (cases) |case| try check(case);
 }
 
-test "in the reader, left goes back and right does nothing" {
+test "in the reader, escape, left, h and q go back; right does nothing" {
     const reader: Context = .{ .view = .reader };
     try check(.{ .key = .left, .context = reader, .expected = .dismiss });
     try check(.{ .key = .right, .context = reader, .expected = null });
+    try check(.{ .key = .escape, .context = reader, .expected = .dismiss });
+    try check(.{ .key = .{ .char = 'h' }, .context = reader, .expected = .dismiss });
+    try check(.{ .key = .{ .char = 'q' }, .context = reader, .expected = .dismiss });
     try check(.{ .key = .{ .char = 'j' }, .context = reader, .expected = .{ .move = .down } });
 }
 
@@ -215,11 +217,12 @@ test "actions: unread, flag, archive, delete, search, help, refresh" {
     for (cases) |case| try check(case);
 }
 
-test "help closes on any key, but Ctrl+C still quits" {
+test "help closes on any key, but Ctrl+C and Ctrl+Q still quit" {
     const help: Context = .{ .view = .help };
     try check(.{ .key = .{ .char = 'j' }, .context = help, .expected = .toggle_help });
     try check(.{ .key = .escape, .context = help, .expected = .toggle_help });
     try check(.{ .key = .{ .ctrl = 'c' }, .context = help, .expected = .quit });
+    try check(.{ .key = .{ .ctrl = 'q' }, .context = help, .expected = .quit });
 }
 
 test "search mode types, edits, and commits" {

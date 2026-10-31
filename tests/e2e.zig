@@ -129,8 +129,8 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
     try testing.expect(std.mem.indexOf(u8, frame[0..total], "amail") != null);
     try testing.expect(std.mem.indexOf(u8, frame[0..total], "Inbox") != null);
 
-    // `q` at the top level quits; the process must exit cleanly.
-    const written = std.c.write(terminal.master, "q", 1);
+    // Ctrl+Q at the top level quits; the process must exit cleanly.
+    const written = std.c.write(terminal.master, "\x11", 1);
     try testing.expectEqual(@as(isize, 1), written);
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
 }

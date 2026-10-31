@@ -25,7 +25,7 @@ decision below serves one of those, in that order.
 zig build run        # opens the demo inbox: no account, no network, no config
 ```
 
-`q` quits. `?` shows every key.
+`Ctrl+Q` (or `Ctrl+C`) quits. `?` shows every key.
 
 ```sh
 zig build test       # unit + integration + a real pseudo-terminal session

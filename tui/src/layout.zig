@@ -11,7 +11,10 @@ pub const min_columns: u16 = 40;
 pub const min_rows: u16 = 10;
 
 pub const tab_start: u16 = 8;
-pub const tab_width: u16 = 11;
+/// The count is drawn right after the title, left-aligned in this many cells,
+/// so it always reads as part of its own mailbox ("Inbox 3", never "3  Sent").
+pub const tab_count_width: u16 = 3;
+pub const tab_gap: u16 = 2;
 
 pub const Layout = struct {
     columns: u16 = 0,
@@ -58,7 +61,7 @@ pub const Layout = struct {
         layout.list_rows = layout.body_height;
         layout.reader_rows = layout.bottom_rule_y -| layout.reader_body_y;
         layout.reader_text_width = columns - 2;
-        layout.show_tabs = columns >= tab_start + Mailbox.all.len * tab_width + 2;
+        layout.show_tabs = columns >= tab_start + tabs_width() + 1;
 
         layout.sender_width = @max(10, @min(24, columns / 4));
         layout.subject_x = layout.sender_x + layout.sender_width + 1;
@@ -71,19 +74,50 @@ pub const Layout = struct {
 
     pub fn tab_x(self: Layout, mailbox: Mailbox) u16 {
         assert(self.show_tabs);
-        return tab_start + @as(u16, mailbox.index()) * tab_width;
+        var x: u16 = tab_start;
+        for (Mailbox.all, 0..) |candidate, index| {
+            if (index == mailbox.index()) break;
+            x += tab_span(candidate);
+        }
+        return x;
     }
 
-    /// Which mailbox tab is at column `x`, if any.
+    /// First cell of the count that belongs to `mailbox`.
+    pub fn tab_count_x(self: Layout, mailbox: Mailbox) u16 {
+        return self.tab_x(mailbox) + title_width(mailbox) + 1;
+    }
+
+    /// Which mailbox tab is at column `x`, if any. The gap after a tab belongs
+    /// to no mailbox, so a click there does nothing.
     pub fn mailbox_at(self: Layout, x: u16) ?Mailbox {
         if (!self.show_tabs) return null;
-        if (x < tab_start) return null;
-        const offset = x - tab_start;
-        const position = offset / tab_width;
-        if (position >= Mailbox.all.len) return null;
-        return Mailbox.from_index(@intCast(position));
+        for (Mailbox.all) |mailbox| {
+            const start = self.tab_x(mailbox);
+            if (x >= start and x < start + tab_hit_width(mailbox)) return mailbox;
+        }
+        return null;
     }
 };
+
+pub fn title_width(mailbox: Mailbox) u16 {
+    return @intCast(mailbox.title().len);
+}
+
+/// Cells one tab occupies: title, one space, the count area, and a gap.
+pub fn tab_span(mailbox: Mailbox) u16 {
+    return title_width(mailbox) + 1 + tab_count_width + tab_gap;
+}
+
+/// Cells that respond to a click: the title and its count, not the gap.
+pub fn tab_hit_width(mailbox: Mailbox) u16 {
+    return title_width(mailbox) + 1 + tab_count_width;
+}
+
+pub fn tabs_width() u16 {
+    var total: u16 = 0;
+    for (Mailbox.all) |mailbox| total += tab_span(mailbox);
+    return total;
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -120,7 +154,7 @@ test "compute keeps the list columns inside the screen" {
 }
 
 test "compute hides tabs on narrow terminals and shows them when they fit" {
-    const narrow = Layout.compute(70, 24);
+    const narrow = Layout.compute(74, 24);
     try testing.expect(!narrow.show_tabs);
     try testing.expect(narrow.mailbox_at(10) == null);
 
@@ -128,16 +162,25 @@ test "compute hides tabs on narrow terminals and shows them when they fit" {
     try testing.expect(wide.show_tabs);
 }
 
-test "tab hit boxes tile the header exactly" {
+test "tab geometry puts each count right after its own title" {
     const layout = Layout.compute(120, 30);
-    for (Mailbox.all, 0..) |mailbox, position| {
-        const x = tab_start + @as(u16, @intCast(position)) * tab_width;
-        try testing.expectEqual(x, layout.tab_x(mailbox));
-        try testing.expectEqual(mailbox, layout.mailbox_at(x).?);
-        try testing.expectEqual(mailbox, layout.mailbox_at(x + tab_width - 1).?);
+
+    try testing.expectEqual(@as(u16, 8), layout.tab_x(.inbox));
+    try testing.expectEqual(@as(u16, 14), layout.tab_count_x(.inbox));
+    try testing.expectEqual(@as(u16, 19), layout.tab_x(.sent));
+    try testing.expectEqual(@as(u16, 29), layout.tab_x(.drafts));
+    try testing.expectEqual(@as(u16, 41), layout.tab_x(.archive));
+    try testing.expectEqual(@as(u16, 54), layout.tab_x(.trash));
+    try testing.expectEqual(@as(u16, 65), layout.tab_x(.junk));
+
+    for (Mailbox.all) |mailbox| {
+        const start = layout.tab_x(mailbox);
+        try testing.expectEqual(mailbox, layout.mailbox_at(start).?);
+        try testing.expectEqual(mailbox, layout.mailbox_at(start + tab_hit_width(mailbox) - 1).?);
+        try testing.expect(layout.mailbox_at(start + tab_hit_width(mailbox)) == null);
     }
     try testing.expect(layout.mailbox_at(tab_start - 1) == null);
-    try testing.expect(layout.mailbox_at(tab_start + Mailbox.all.len * tab_width) == null);
+    try testing.expect(layout.mailbox_at(tab_start + tabs_width()) == null);
 }
 
 test "reader geometry uses the full screen and leaves room for the body" {

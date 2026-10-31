@@ -71,31 +71,45 @@ fn render_tabs(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     _ = out.put_text(1, lay.header_y, name, 6, inputs.theme.accent.with_bold());
 
     if (!lay.show_tabs) {
-        // Narrow terminal: one tab, plus the count. Tab/Shift+Tab still switch.
+        // Narrow terminal: the active mailbox and its count, right next to each
+        // other. Tab/Shift+Tab still switch.
         const x: u16 = 1 + screen.text_columns(name) + 2;
         _ = out.put_text(x, lay.header_y, inputs.state.mailbox.title(), 16, inputs.theme.accent.with_bold());
-        const unread = inputs.store.unread_in(inputs.state.mailbox);
-        if (unread > 0) {
-            var buffer: [4]u8 = undefined;
-            const count = std.fmt.bufPrint(&buffer, "{d}", .{unread}) catch "";
-            put_right(out, x + 16, lay.header_y, count, inputs.theme.accent);
-        }
+        render_unread_count(
+            inputs,
+            lay.header_y,
+            x + layout_mod.title_width(inputs.state.mailbox) + 1,
+            inputs.state.mailbox,
+            out,
+        );
         return;
     }
 
     for (Mailbox.all) |mailbox| {
         const x = lay.tab_x(mailbox);
         const active = mailbox == inputs.state.mailbox;
-        const title_style = if (active) inputs.theme.accent.with_bold() else inputs.theme.dim;
-        _ = out.put_text(x, lay.header_y, mailbox.title(), layout_mod.tab_width - 4, title_style);
-
-        const unread = inputs.store.unread_in(mailbox);
-        if (unread == 0) continue;
-        var buffer: [4]u8 = undefined;
-        const count = std.fmt.bufPrint(&buffer, "{d}", .{@min(unread, 999)}) catch "";
-        const count_style = if (active) title_style else inputs.theme.accent;
-        put_right(out, x + layout_mod.tab_width - 2, lay.header_y, count, count_style);
+        const title_style = if (active)
+            inputs.theme.accent.with_bold().with_underline()
+        else
+            inputs.theme.dim;
+        _ = out.put_text(x, lay.header_y, mailbox.title(), layout_mod.title_width(mailbox), title_style);
+        render_unread_count(inputs, lay.header_y, lay.tab_count_x(mailbox), mailbox, out);
     }
+}
+
+/// The count sits one space after its mailbox title, left-aligned in the
+/// reserved count area. "Inbox 3" reads as one thing; a right-aligned count
+/// floating between tabs reads as part of the next one.
+fn render_unread_count(inputs: Inputs, y: u16, x: u16, mailbox: Mailbox, out: *Screen) void {
+    const unread = inputs.store.unread_in(mailbox);
+    if (unread == 0) return;
+
+    var buffer: [4]u8 = undefined;
+    const count = if (unread > 99)
+        "99+"
+    else
+        std.fmt.bufPrint(&buffer, "{d}", .{unread}) catch "";
+    _ = out.put_text(x, y, count, layout_mod.tab_count_width, inputs.theme.accent.with_bold());
 }
 
 fn render_search_bar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
@@ -360,7 +374,7 @@ const help_rows = [_]Hint{
     .{ .keys = "Ctrl+D / U", .action = "half page" },
     .{ .keys = "PageDown / Up", .action = "page" },
     .{ .keys = "Enter / l / o", .action = "open message" },
-    .{ .keys = "h / q / Esc", .action = "back, or quit" },
+    .{ .keys = "h / q / Esc", .action = "back, close" },
     .{ .keys = "u", .action = "read / unread" },
     .{ .keys = "s / *", .action = "star" },
     .{ .keys = "d", .action = "archive" },
@@ -369,7 +383,7 @@ const help_rows = [_]Hint{
     .{ .keys = "Tab / [ ]", .action = "next mailbox" },
     .{ .keys = "1 - 6", .action = "jump to mailbox" },
     .{ .keys = "R", .action = "refresh" },
-    .{ .keys = "Ctrl+C", .action = "quit" },
+    .{ .keys = "Ctrl+Q / C", .action = "quit" },
 };
 
 fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
@@ -512,8 +526,7 @@ test "frame draws the app name, tabs with unread counts, and mail rows" {
     frame(f.inputs(100, 24), &out);
 
     try row_contains(&out, 0, "amail");
-    try row_contains(&out, 0, "Inbox");
-    try row_contains(&out, 0, "2");
+    try row_contains(&out, 0, "Inbox 2");
     try row_contains(&out, 2, "Alice Rivera");
     try row_contains(&out, 2, "Re: design tokens review");
     try row_contains(&out, 3, "Bob Chen");
@@ -747,8 +760,7 @@ test "a narrow terminal keeps one mailbox title and hides tabs" {
     frame(f.inputs(60, 24), &out);
 
     try row_contains(&out, 0, "amail");
-    try row_contains(&out, 0, "Inbox");
-    try row_contains(&out, 0, "2");
+    try row_contains(&out, 0, "Inbox 2");
 }
 
 test "monochrome rendering never emits color codes" {

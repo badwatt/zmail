@@ -126,7 +126,8 @@ fn apply_dismiss(state: *State, store: *Store) void {
                 state.view = .list;
                 state.reader_scroll = 0;
             },
-            .list => state.quit = true,
+            // The list is the top level: only Ctrl+Q / Ctrl+C close the app.
+            .list => {},
         },
     }
 }
@@ -488,7 +489,7 @@ test "open while already reading does nothing" {
     try testing.expect(effects.is_empty());
 }
 
-test "dismiss: cancel search, close help, leave the reader, then quit" {
+test "dismiss: cancel search, close help, leave the reader, but never quit" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
 
@@ -511,6 +512,17 @@ test "dismiss: cancel search, close help, leave the reader, then quit" {
     try testing.expectEqual(@as(u32, 0), fixture.state.reader_scroll);
 
     _ = apply(&fixture.state, &fixture.store, .dismiss);
+    try testing.expect(!fixture.state.quit);
+    try testing.expectEqual(View.list, fixture.state.view);
+}
+
+test "quit is the only way out, and it sets the flag" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    try testing.expect(!fixture.state.quit);
+    const effects = apply(&fixture.state, &fixture.store, .quit);
+    try testing.expect(effects.is_empty());
     try testing.expect(fixture.state.quit);
 }
 

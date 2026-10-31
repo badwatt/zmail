@@ -223,11 +223,14 @@ pub const Screen = struct {
     /// are separated, which lets the session stream a frame row by row.
     pub fn encode_row(self: *const Screen, row: u16, writer: *std.Io.Writer, colored: bool) std.Io.Writer.Error!void {
         assert(row < self.rows);
-        var current: Style = .{};
+        // The terminal keeps its attributes across rows, so the first cell of a
+        // row must always emit an SGR: starting from `Style{}` and comparing
+        // would let a selected row bleed into the next one.
+        var current: ?Style = null;
         var column: u16 = 0;
         while (column < self.columns) : (column += 1) {
             const cell = self.cells[row][column];
-            if (!cell.style.eql(current)) {
+            if (current == null or !cell.style.eql(current.?)) {
                 try write_sgr(writer, cell.style, colored);
                 current = cell.style;
             }
@@ -480,6 +483,21 @@ test "Screen: write_frame replaces a codepoint that cannot be encoded" {
     var writer = std.Io.Writer.fixed(&buffer);
     try screen.write_frame(&writer, true);
     try testing.expect(std.mem.endsWith(u8, writer.buffered(), "?\x1b[0m"));
+}
+
+test "Screen: each row opens with an SGR so styles never bleed across rows" {
+    var screen = Screen.init(4, 2);
+    // Row 0 is a fully painted selection; row 1 is plain.
+    screen.fill_rect(.{ .x = 0, .y = 0, .width = 4, .height = 1 }, ' ', .{ .bg = .{ .ansi256 = 237 } });
+    _ = screen.put_text(0, 1, "next", 4, .{});
+
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try screen.write_frame(&writer, true);
+    const output = writer.buffered();
+
+    const second_row = std.mem.indexOf(u8, output, "\r\n") orelse return error.TestExpectedRows;
+    try testing.expect(std.mem.startsWith(u8, output[second_row + 2 ..], "\x1b[0m"));
 }
 
 test "Screen: write_frame omits colors in monochrome mode" {

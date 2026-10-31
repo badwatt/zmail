@@ -416,7 +416,7 @@ test "j and k move the cursor and redraw" {
     try testing.expectEqual(@as(u32, 0), rig.session.state.cursor);
 }
 
-test "a lone escape after a timeout dismisses and then quits" {
+test "escape in the list does nothing, not even after the timeout resolves it" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -425,17 +425,29 @@ test "a lone escape after a timeout dismisses and then quits" {
     rig.send("\x1b");
     // A lone ESC is ambiguous until the next read times out.
     _ = rig.session.step();
-    try testing.expect(rig.session.state.quit);
+    try testing.expect(!rig.session.state.quit);
+    try testing.expectEqual(core.state.View.list, rig.session.state.view);
 }
 
-test "q quits and step returns false" {
+test "Ctrl+Q quits from the list" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
 
-    rig.fake_system.push_input("q");
+    rig.fake_system.push_input("\x11");
     try testing.expect(!rig.session.step());
+    try testing.expect(rig.session.state.quit);
+}
+
+test "q alone never quits" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.send("q");
+    try testing.expect(!rig.session.state.quit);
 }
 
 test "closed stdin ends the session" {
@@ -752,7 +764,7 @@ test "loop runs until quit" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
-    rig.fake_system.push_input("q");
+    rig.fake_system.push_input("\x11");
     rig.session.loop();
     try testing.expect(rig.session.state.quit);
 }

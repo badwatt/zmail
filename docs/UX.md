@@ -39,6 +39,10 @@ still switches.
  ● Ana Torres           Invoice for October                                 1d ★
 ```
 
+The unread count belongs to its own tab: it sits one space after the title
+(`Inbox 3`), left-aligned in a reserved three-cell area, so it can never be
+mistaken for the next mailbox's badge. The active tab is underlined.
+
 - `●` unread (accent), nothing when read.
 - Sender: normal when unread, dim when read. Truncated with an ellipsis.
 - Subject: bold when unread, normal when read.
@@ -73,7 +77,7 @@ and disappears on the next action.
 | `Ctrl+D` / `Ctrl+U` | half page down / up |
 | `Ctrl+F` / `Ctrl+B`, `PageDown` / `PageUp` | page down / up |
 | `Enter` `l` `o` `→` | open the selected message |
-| `h` `q` `Esc` `←` | back one layer, or quit from the list |
+| `h` `q` `Esc` `←` | back one layer (nothing at the top level) |
 | `u` | toggle read / unread |
 | `s` `*` | star / unstar |
 | `d` | archive |
@@ -84,7 +88,7 @@ and disappears on the next action.
 | `1`–`6` | jump to Inbox, Sent, Drafts, Archive, Trash, Junk |
 | `R` | refresh from the server |
 | `?` | help |
-| `Ctrl+C` | quit immediately |
+| `Ctrl+Q` `Ctrl+C` | quit. The top level never closes on `Esc`, `q`, or `h` |
 
 Search is live: typing filters as you go, `Enter` keeps the filter, `Esc`
 cancels it. `↑`/`↓` still move the cursor while typing.
