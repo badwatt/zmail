@@ -50,6 +50,30 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .toggle_help => toggle_help(state),
         .refresh => apply_refresh(state, &effects),
         .set_viewport => |viewport| apply_viewport(state, viewport),
+        .compose_new => start_compose(state),
+        .compose_reply => start_reply(state, store),
+        .compose_send => send_compose(state, &effects),
+        .compose_cancel => cancel_compose(state),
+        .compose_char => |codepoint| {
+            if (state.view == .compose) state.compose.append(codepoint);
+        },
+        .compose_newline => {
+            if (state.view == .compose) state.compose.append_newline();
+        },
+        .compose_backspace => {
+            if (state.view == .compose) state.compose.backspace();
+        },
+        .compose_next_field => {
+            if (state.view == .compose) state.compose.next_field();
+        },
+        .compose_previous_field => {
+            if (state.view == .compose) state.compose.previous_field();
+        },
+        .compose_clear_field => {
+            if (state.view == .compose) state.compose.clear_field();
+        },
+        .send_succeeded => compose_sent(state),
+        .send_failed => compose_failed(state),
     }
     return effects;
 }
@@ -58,7 +82,7 @@ fn apply_move(state: *State, move: Move) void {
     switch (state.view) {
         .list => move_cursor(state, move),
         .reader => scroll_reader(state, move),
-        .help => {},
+        .help, .compose => {},
     }
 }
 
@@ -135,6 +159,7 @@ fn apply_dismiss(state: *State, store: *Store) void {
                 state.view = .list;
                 state.reader_scroll = 0;
             },
+            .compose => cancel_compose(state),
             // `q` at the top level quits. Esc never reaches this branch: the
             // key map does not translate it to `dismiss` in the list.
             .list => state.quit = true,
@@ -256,6 +281,73 @@ fn search_cancel(state: *State, store: *Store) void {
     state.rebuild(store);
 }
 
+fn start_compose(state: *State) void {
+    state.compose.reset();
+    state.view = .compose;
+}
+
+fn start_reply(state: *State, store: *Store) void {
+    const message = state.selected(store) orelse {
+        state.set_status("No message selected", .{});
+        return;
+    };
+
+    state.compose.reset();
+    var address_buffer: [limits.address_max]u8 = undefined;
+    state.compose.to.set(message.from.addr_spec(&address_buffer));
+
+    const subject = message.subject.slice();
+    if (startsWithIgnoreCase(subject, "re:")) {
+        state.compose.subject.set(subject);
+    } else {
+        state.compose.subject.set_fmt("Re: {s}", .{subject});
+    }
+
+    state.compose.in_reply_to = message.id;
+    state.compose.field = .body;
+    state.view = .compose;
+}
+
+fn send_compose(state: *State, effects: *Effects) void {
+    if (state.view != .compose) return;
+
+    const recipient = state.compose.recipient() orelse {
+        state.set_alert("That address does not look right", .{});
+        return;
+    };
+
+    effects.add(.{ .send = .{
+        .from = state.from_address,
+        .to = recipient,
+        .subject = state.compose.subject,
+        .body = state.compose.body_slice(),
+        .in_reply_to = state.compose.in_reply_to,
+    } });
+}
+
+fn cancel_compose(state: *State) void {
+    if (state.view != .compose) return;
+    state.compose.active = false;
+    state.compose.field = .to;
+    state.view = .list;
+}
+
+fn compose_sent(state: *State) void {
+    state.compose.active = false;
+    state.compose.field = .to;
+    state.view = .list;
+    state.set_status("Message sent", .{});
+}
+
+fn compose_failed(state: *State) void {
+    state.set_alert("Could not send; the draft is still here", .{});
+}
+
+fn startsWithIgnoreCase(text: []const u8, prefix: []const u8) bool {
+    if (text.len < prefix.len) return false;
+    return std.ascii.eqlIgnoreCase(text[0..prefix.len], prefix);
+}
+
 fn begin_help_search(state: *State) void {
     if (state.view != .help) return;
     state.mode = .help_search;
@@ -323,6 +415,7 @@ comptime {
 const testing = std.testing;
 const Text = @import("../domain/text.zig").Text;
 const MessageId = @import("../domain/id.zig").MessageId;
+const Address = @import("../domain/address.zig").Address;
 
 fn message_with(id: u64, subject: []const u8, mailbox: Mailbox, timestamp_unix: i64) Message {
     var message = Message{
@@ -925,6 +1018,140 @@ test "opening help clears a previous filter" {
     _ = apply(&fixture.state, &fixture.store, .toggle_help);
     _ = apply(&fixture.state, &fixture.store, .toggle_help);
     try testing.expect(fixture.state.help_filter.is_empty());
+}
+
+test "compose_new opens an empty draft at the recipient" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    try testing.expectEqual(View.compose, fixture.state.view);
+    try testing.expect(fixture.state.compose.active);
+    try testing.expectEqual(.to, fixture.state.compose.field);
+}
+
+test "compose_reply prefills the recipient and subject" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_reply);
+    try testing.expectEqual(View.compose, fixture.state.view);
+    try testing.expectEqual(.body, fixture.state.compose.field);
+    // The fixture's first message has no sender, so the address is just "@".
+    try testing.expectEqualStrings("@", fixture.state.compose.to.slice());
+    // The subject still gets the Re: prefix.
+    try testing.expectEqualStrings("Re: Invoice for October", fixture.state.compose.subject.slice());
+    try testing.expectEqual(MessageId.from_int(1), fixture.state.compose.in_reply_to);
+}
+
+test "compose_reply does not double the Re: prefix" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.store.at(0).subject.set("Re: lunch");
+    fixture.state.rebuild(&fixture.store);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_reply);
+    try testing.expectEqualStrings("Re: lunch", fixture.state.compose.subject.slice());
+}
+
+test "compose_reply with no selection explains itself" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.mailbox = .junk;
+    fixture.state.rebuild(&fixture.store);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_reply);
+    try testing.expectEqual(View.list, fixture.state.view);
+    try testing.expectEqualStrings("No message selected", fixture.state.status.slice());
+}
+
+test "compose_send validates the recipient and emits the message" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.from_address = try Address.init("Me <me@amail.local>");
+
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    var effects = apply(&fixture.state, &fixture.store, .compose_send);
+    try testing.expect(effects.is_empty());
+    try testing.expectEqualStrings("That address does not look right", fixture.state.status.slice());
+
+    fixture.state.compose.to.set("alice@example.com");
+    fixture.state.compose.subject.set("Hello");
+    fixture.state.compose.field = .body;
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_char = 'b' });
+    effects = apply(&fixture.state, &fixture.store, .compose_send);
+    try testing.expectEqual(@as(usize, 1), effects.slice().len);
+
+    const outgoing = effects.slice()[0].send;
+    try testing.expectEqualStrings("alice", outgoing.to.local.slice());
+    try testing.expectEqualStrings("Hello", outgoing.subject.slice());
+    try testing.expectEqualStrings("b", outgoing.body);
+    try testing.expectEqualStrings("me", outgoing.from.local.slice());
+}
+
+test "compose editing commands are ignored outside the compose view" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_char = 'x' });
+    _ = apply(&fixture.state, &fixture.store, .compose_newline);
+    _ = apply(&fixture.state, &fixture.store, .compose_backspace);
+    _ = apply(&fixture.state, &fixture.store, .compose_next_field);
+    _ = apply(&fixture.state, &fixture.store, .compose_previous_field);
+    _ = apply(&fixture.state, &fixture.store, .compose_clear_field);
+    try testing.expect(fixture.state.compose.to.is_empty());
+    try testing.expectEqual(.to, fixture.state.compose.field);
+}
+
+test "compose_send outside compose does nothing" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    const effects = apply(&fixture.state, &fixture.store, .compose_send);
+    try testing.expect(effects.is_empty());
+}
+
+test "dismiss cancels compose and keeps the list intact" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_char = 'a' });
+
+    _ = apply(&fixture.state, &fixture.store, .dismiss);
+    try testing.expectEqual(View.list, fixture.state.view);
+    try testing.expect(!fixture.state.compose.active);
+    try testing.expect(!fixture.state.quit);
+}
+
+test "compose_cancel closes the draft without quitting" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_cancel);
+    try testing.expectEqual(View.list, fixture.state.view);
+    try testing.expect(!fixture.state.compose.active);
+    try testing.expect(!fixture.state.quit);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_cancel);
+    try testing.expectEqual(View.list, fixture.state.view);
+}
+
+test "a successful send closes the draft; a failure keeps it and alerts" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_char = 'a' });
+
+    _ = apply(&fixture.state, &fixture.store, .send_failed);
+    try testing.expectEqual(View.compose, fixture.state.view);
+    try testing.expect(fixture.state.compose.active);
+    try testing.expectEqualStrings("a", fixture.state.compose.to.slice());
+    try testing.expect(fixture.state.status_alert);
+
+    _ = apply(&fixture.state, &fixture.store, .send_succeeded);
+    try testing.expectEqual(View.list, fixture.state.view);
+    try testing.expect(!fixture.state.compose.active);
+    try testing.expectEqualStrings("Message sent", fixture.state.status.slice());
 }
 
 test "refresh asks for the current mailbox and says so" {

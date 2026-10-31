@@ -50,6 +50,15 @@ pub fn Text(comptime capacity: u32) type {
             self.len += 1;
         }
 
+        /// Appends one codepoint as UTF-8. Silently stops at the capacity.
+        pub fn append_codepoint(self: *Self, codepoint: u21) void {
+            var encoded: [4]u8 = undefined;
+            const length = std.unicode.utf8Encode(codepoint, &encoded) catch return;
+            if (self.len + length > capacity) return;
+            @memcpy(self.buffer[self.len..][0..length], encoded[0..length]);
+            self.len += length;
+        }
+
         /// Removes the last codepoint. Multi-byte codepoints are removed whole,
         /// so the buffer never holds a dangling continuation byte.
         pub fn pop_codepoint(self: *Self) void {

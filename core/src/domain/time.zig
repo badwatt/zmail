@@ -36,6 +36,28 @@ pub fn relative(buffer: []u8, now_unix: i64, timestamp_unix: i64) []const u8 {
     return std.fmt.bufPrint(buffer, "{d}/{d}", .{ date.month, date.day }) catch "now";
 }
 
+/// RFC 5322 date header: "Tue, 14 Nov 2023 22:13:20 +0000". UTC only.
+pub fn rfc5322_date(buffer: []u8, timestamp_unix: i64) []const u8 {
+    const date = civil_from_unix(timestamp_unix);
+    const weekday = weekday_name(timestamp_unix);
+    const seconds_of_day = @mod(timestamp_unix, seconds_per_day);
+    const hour: u8 = @intCast(@divFloor(seconds_of_day, seconds_per_hour));
+    const minute: u8 = @intCast(@divFloor(@mod(seconds_of_day, seconds_per_hour), seconds_per_minute));
+    const second: u8 = @intCast(@mod(seconds_of_day, seconds_per_minute));
+    return std.fmt.bufPrint(
+        buffer,
+        "{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +0000",
+        .{ weekday, date.day, month_abbrev(date.month), date.year, hour, minute, second },
+    ) catch "";
+}
+
+/// 1970-01-01 was a Thursday.
+pub fn weekday_name(timestamp_unix: i64) []const u8 {
+    const days = @divFloor(timestamp_unix, seconds_per_day);
+    const names = [_][]const u8{ "Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed" };
+    return names[@intCast(@mod(days, 7))];
+}
+
 /// Abbreviated month name for `full_date` and the reader header.
 pub fn month_abbrev(month: u8) []const u8 {
     const names = [_][]const u8{
@@ -199,6 +221,18 @@ test "unix_from_parts applies the timezone offset" {
         @as(i64, 1_699_992_800),
         unix_from_parts(2023, 11, 14, 22, 13, 20, 7200),
     );
+}
+
+test "rfc5322_date formats a UTC header with the right weekday" {
+    var buffer: [40]u8 = undefined;
+    try testing.expectEqualStrings("Tue, 14 Nov 2023 22:13:20 +0000", rfc5322_date(&buffer, 1_700_000_000));
+    try testing.expectEqualStrings("Thu, 1 Jan 1970 00:00:00 +0000", rfc5322_date(&buffer, 0));
+    try testing.expectEqualStrings("Wed, 31 Dec 1969 23:59:59 +0000", rfc5322_date(&buffer, -1));
+}
+
+test "rfc5322_date degrades to empty when the buffer is too small" {
+    var buffer: [4]u8 = undefined;
+    try testing.expectEqualStrings("", rfc5322_date(&buffer, 1_700_000_000));
 }
 
 test "month_abbrev names every month" {

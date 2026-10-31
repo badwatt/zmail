@@ -22,8 +22,27 @@ pub const Context = struct {
 pub fn translate(key: Key, context: Context) ?Command {
     if (context.mode == .search) return search_key(key);
     if (context.mode == .help_search) return help_search_key(key);
+    if (context.view == .compose) return compose_key(key);
     if (context.view == .help) return help_key(key);
     return normal_key(key, context.view);
+}
+
+fn compose_key(key: Key) ?Command {
+    return switch (key) {
+        .char => |codepoint| .{ .compose_char = codepoint },
+        .enter => .compose_newline,
+        .tab => .compose_next_field,
+        .back_tab => .compose_previous_field,
+        .backspace => .compose_backspace,
+        .escape => .dismiss,
+        .ctrl => |letter| switch (letter) {
+            's' => .compose_send,
+            'u' => .compose_clear_field,
+            'c', 'q' => .quit,
+            else => null,
+        },
+        .up, .down, .page_up, .page_down, .home, .end, .left, .right, .delete, .insert, .mouse, .unknown => null,
+    };
 }
 
 fn help_key(key: Key) ?Command {
@@ -77,6 +96,8 @@ fn char_command(codepoint: u21, view: View) ?Command {
         'G' => .{ .move = .bottom },
         'l', 'o' => .open_selected,
         'q' => .dismiss,
+        'c' => .compose_new,
+        'r' => .compose_reply,
         'h' => if (view == .list) null else .dismiss,
         'u' => .toggle_unread,
         's', '*' => .toggle_flag,
@@ -285,6 +306,32 @@ test "search mode types, edits, and commits" {
         .{ .key = .{ .char = 'j' }, .context = search, .expected = .{ .search_char = 'j' } },
     };
     for (cases) |case| try check(case);
+}
+
+test "c composes and r replies from the list and the reader" {
+    try check(.{ .key = .{ .char = 'c' }, .expected = .compose_new });
+    try check(.{ .key = .{ .char = 'r' }, .expected = .compose_reply });
+    const reader: Context = .{ .view = .reader };
+    try check(.{ .key = .{ .char = 'r' }, .context = reader, .expected = .compose_reply });
+}
+
+test "compose mode: typing, fields, send, cancel" {
+    const writing: Context = .{ .view = .compose };
+    try check(.{ .key = .{ .char = 'a' }, .context = writing, .expected = .{ .compose_char = 'a' } });
+    try check(.{ .key = .{ .char = 0xe9 }, .context = writing, .expected = .{ .compose_char = 0xe9 } });
+    try check(.{ .key = .{ .char = ' ' }, .context = writing, .expected = .{ .compose_char = ' ' } });
+    try check(.{ .key = .enter, .context = writing, .expected = .compose_newline });
+    try check(.{ .key = .tab, .context = writing, .expected = .compose_next_field });
+    try check(.{ .key = .back_tab, .context = writing, .expected = .compose_previous_field });
+    try check(.{ .key = .backspace, .context = writing, .expected = .compose_backspace });
+    try check(.{ .key = .escape, .context = writing, .expected = .dismiss });
+    try check(.{ .key = .{ .ctrl = 's' }, .context = writing, .expected = .compose_send });
+    try check(.{ .key = .{ .ctrl = 'u' }, .context = writing, .expected = .compose_clear_field });
+    try check(.{ .key = .{ .ctrl = 'c' }, .context = writing, .expected = .quit });
+    try check(.{ .key = .{ .ctrl = 'q' }, .context = writing, .expected = .quit });
+    try check(.{ .key = .{ .ctrl = 'd' }, .context = writing, .expected = null });
+    try check(.{ .key = .left, .context = writing, .expected = null });
+    try check(.{ .key = .{ .char = 'j' }, .context = writing, .expected = .{ .compose_char = 'j' } });
 }
 
 test "mouse and unknown keys are resolved elsewhere or ignored" {

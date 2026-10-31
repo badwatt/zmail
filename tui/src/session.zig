@@ -33,9 +33,12 @@ pub fn fixed_now() i64 {
 
 pub const Deps = struct {
     mail: core.mail_port.Mail,
+    outbox: ?core.outbox_port.Outbox = null,
     system: System,
     theme: theme_mod.Theme = theme_mod.Theme.dark(),
     now: Now = fixed_now,
+    /// The account's own address, used as the sender of composed mail.
+    from_address: core.address.Address = .{},
 };
 
 pub const Session = struct {
@@ -77,6 +80,7 @@ pub const Session = struct {
         errdefer gpa.free(self.scratch);
 
         self.state = .{};
+        self.state.from_address = deps.from_address;
         self.parser = .{};
         self.body_loaded = false;
         self.body_len = 0;
@@ -210,6 +214,7 @@ pub const Session = struct {
                 .sync_flags => |args| self.sync_flags(args.id, args.flags),
                 .move_message => |args| self.move_message(args.id, args.to),
                 .refresh => |mailbox| self.reload(mailbox),
+                .send => |outgoing| self.send(&outgoing),
             }
         }
     }
@@ -236,6 +241,19 @@ pub const Session = struct {
         self.deps.mail.move_message(id, to) catch {
             self.state.set_alert("Could not move the message", .{});
         };
+    }
+
+    fn send(self: *Session, outgoing: *const core.outgoing.Outgoing) void {
+        const outbox = self.deps.outbox orelse {
+            _ = core.update.apply(&self.state, &self.store, .send_failed);
+            return;
+        };
+        outbox.send(outgoing) catch {
+            _ = core.update.apply(&self.state, &self.store, .send_failed);
+            return;
+        };
+        _ = core.update.apply(&self.state, &self.store, .send_succeeded);
+        self.needs_render = true;
     }
 
     fn reload(self: *Session, mailbox: Mailbox) void {
@@ -500,6 +518,72 @@ test "a failed body fetch becomes an alert, not a crash" {
     try testing.expectEqual(@as(u32, 0), rig.session.body_len);
     try testing.expectEqualStrings("Could not load this message", rig.session.state.status.slice());
     try testing.expect(rig.session.state.status_alert);
+}
+
+const RecordingOutbox = struct {
+    sent: u32 = 0,
+    failure: ?core.outbox_port.Error = null,
+
+    fn outbox(self: *RecordingOutbox) core.outbox_port.Outbox {
+        return .{ .context = self, .vtable = &.{ .send = sendThunk } };
+    }
+
+    fn sendThunk(context: *anyopaque, message: *const core.outgoing.Outgoing) core.outbox_port.Error!void {
+        const self: *RecordingOutbox = @ptrCast(@alignCast(context));
+        if (self.failure) |err| return err;
+        _ = message;
+        self.sent += 1;
+    }
+};
+
+test "composing and sending with a working outbox closes the draft" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    var outbox: RecordingOutbox = .{};
+    rig.session.deps.outbox = outbox.outbox();
+    _ = rig.session.step();
+
+    rig.send("c");
+    rig.send("alice@example.com");
+    rig.send("\t");
+    rig.send("Hi");
+    rig.send("\t\thello");
+    rig.send("\x13"); // Ctrl+S
+
+    try testing.expectEqual(@as(u32, 1), outbox.sent);
+    try testing.expectEqual(core.state.View.list, rig.session.state.view);
+    try testing.expectEqualStrings("Message sent", rig.session.state.status.slice());
+}
+
+test "sending without an outbox keeps the draft and alerts" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.send("c");
+    rig.send("alice@example.com");
+    rig.send("\x13");
+    try testing.expectEqual(core.state.View.compose, rig.session.state.view);
+    try testing.expect(rig.session.state.compose.active);
+    try testing.expect(rig.session.state.status_alert);
+}
+
+test "a failing outbox keeps the draft and alerts" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    var outbox: RecordingOutbox = .{ .failure = error.Rejected };
+    rig.session.deps.outbox = outbox.outbox();
+    _ = rig.session.step();
+
+    rig.send("c");
+    rig.send("alice@example.com");
+    rig.send("\x13");
+    try testing.expectEqual(core.state.View.compose, rig.session.state.view);
+    try testing.expect(rig.session.state.compose.active);
+    try testing.expectEqualStrings("Could not send; the draft is still here", rig.session.state.status.slice());
 }
 
 test "a failed flag sync becomes an alert" {

@@ -47,10 +47,12 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
         .help => {
             switch (inputs.state.help_return) {
                 .reader => render_reader(inputs, lay, out),
+                .compose => render_compose(inputs, lay, out),
                 else => render_list(inputs, lay, out),
             }
             render_help(inputs, lay, out);
         },
+        .compose => render_compose(inputs, lay, out),
     }
     render_footer(inputs, lay, out);
 }
@@ -210,6 +212,60 @@ fn render_empty(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     }
 }
 
+const compose_rows = 3;
+
+fn render_compose(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    const state = inputs.state;
+    render_compose_field(inputs, lay, 0, "To", state.compose.to.slice(), .to, out);
+    render_compose_field(inputs, lay, 1, "Subject", state.compose.subject.slice(), .subject, out);
+    out.hline(0, 2, lay.columns, '─', inputs.theme.border);
+    render_compose_body(inputs, lay, out);
+    out.hline(0, lay.bottom_rule_y, lay.columns, '─', inputs.theme.border);
+}
+
+fn render_compose_field(
+    inputs: Inputs,
+    lay: layout_mod.Layout,
+    y: u16,
+    label: []const u8,
+    value: []const u8,
+    field: core.compose.Field,
+    out: *Screen,
+) void {
+    _ = out.put_text(1, y, label, 8, inputs.theme.dim);
+    const active = inputs.state.compose.field == field;
+    const style = if (active) inputs.theme.text.with_bold() else inputs.theme.text;
+    const x = @as(u16, 10) + out.put_text(10, y, value, lay.columns -| 12, style);
+    if (active) out.put(x, y, ' ', inputs.theme.text.with_reverse());
+}
+
+fn render_compose_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    const rows = lay.bottom_rule_y -| compose_rows;
+    if (rows == 0) return;
+
+    const body = inputs.state.compose.body_slice();
+    const width = lay.columns -| 2;
+    var wrapped: wrap.Wrapped = .{};
+    wrap.wrap(body, width, &wrapped);
+
+    // Keep the end of the draft visible: typing happens at the end.
+    const first = if (wrapped.len > rows) wrapped.len - rows else 0;
+    var row: u16 = 0;
+    while (row < rows) : (row += 1) {
+        const index = first + row;
+        if (index >= wrapped.len) break;
+        _ = out.put_text(1, compose_rows + row, wrapped.at(index, body), width, inputs.theme.text);
+    }
+
+    if (inputs.state.compose.field != .body) return;
+
+    const visible = wrapped.len -| first;
+    const last_line = if (visible > 0) wrapped.at(first + visible - 1, body) else "";
+    const cursor_row: u16 = compose_rows + @as(u16, @intCast(visible -| 1));
+    if (cursor_row >= lay.bottom_rule_y) return;
+    out.put(1 + screen.text_columns(last_line), cursor_row, ' ', inputs.theme.text.with_reverse());
+}
+
 fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const message = inputs.store.get_const(inputs.state.opened) orelse {
         put_centered(out, lay.reader_body_y + lay.reader_rows / 2, "Message unavailable", inputs.theme.alert);
@@ -298,6 +354,13 @@ const help_hints = [_]Hint{
     .{ .keys = "/", .action = "filter" },
 };
 
+const compose_hints = [_]Hint{
+    .{ .keys = "Tab", .action = "next field" },
+    .{ .keys = "Ctrl+S", .action = "send" },
+    .{ .keys = "Ctrl+U", .action = "clear field" },
+    .{ .keys = "Esc", .action = "cancel" },
+};
+
 const help_search_hints = [_]Hint{
     .{ .keys = "type", .action = "filter" },
     .{ .keys = "Enter", .action = "apply" },
@@ -311,6 +374,7 @@ fn hints_for(state: *const State) []const Hint {
         .list => &list_hints,
         .reader => &reader_hints,
         .help => &help_hints,
+        .compose => &compose_hints,
     };
 }
 
@@ -334,6 +398,7 @@ fn position_text(state: *const State, buffer: []u8) []const u8 {
     if (state.view == .reader) {
         return std.fmt.bufPrint(buffer, "{d}%", .{reader_percent(state)}) catch "";
     }
+    if (state.view == .compose) return "";
     return std.fmt.bufPrint(buffer, "{d}/{d}", .{ list_position(state), state.visible_len }) catch "";
 }
 
@@ -742,6 +807,82 @@ test "frame keeps the reader under the help overlay" {
     frame(f.inputs(100, 24), &out);
     // The reader header is still drawn to the left of the card.
     try row_contains(&out, 0, "Re: design");
+    try row_contains(&out, 1, "Keys");
+}
+
+test "frame renders the compose view: fields, rule, and body" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .compose;
+    f.state.compose.reset();
+    f.state.compose.to.set("alice@example.com");
+    f.state.compose.subject.set("Re: design tokens");
+    f.state.compose.field = .body;
+    _ = f.state.compose.append('h');
+    _ = f.state.compose.append('i');
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+
+    try row_contains(&out, 0, "To");
+    try row_contains(&out, 0, "alice@example.com");
+    try row_contains(&out, 1, "Subject");
+    try row_contains(&out, 1, "Re: design tokens");
+    try row_contains(&out, 3, "hi");
+    try row_contains(&out, 23, "Ctrl+S");
+    try row_contains(&out, 23, "send");
+}
+
+test "the active compose field shows a cursor at its end" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .compose;
+    f.state.compose.reset();
+    f.state.compose.to.set("ab");
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+    try testing.expect(out.cells[0][12].style.attrs.reverse);
+
+    f.state.compose.next_field();
+    frame(f.inputs(100, 24), &out);
+    try testing.expect(!out.cells[0][12].style.attrs.reverse);
+    try testing.expect(out.cells[1][10].style.attrs.reverse);
+}
+
+test "the compose body scrolls to keep the end visible and puts the cursor there" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .compose;
+    f.state.compose.reset();
+    f.state.compose.field = .body;
+    var line: u32 = 0;
+    while (line < 40) : (line += 1) {
+        _ = f.state.compose.append('x');
+        f.state.compose.append_newline();
+    }
+    _ = f.state.compose.append('z');
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+
+    // 41 lines, 18 visible: the last body row holds the "z" line.
+    try row_contains(&out, 20, "z");
+    try testing.expect(out.cells[20][2].style.attrs.reverse);
+}
+
+test "the help overlay can open above compose" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .compose;
+    f.state.compose.reset();
+    f.state.compose.to.set("alice@example.com");
+    f.state.help_return = .compose;
+    f.state.view = .help;
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+    try row_contains(&out, 0, "alice@example.com");
     try row_contains(&out, 1, "Keys");
 }
 

@@ -18,10 +18,13 @@ pub const Config = struct {
     address: Address = .{},
     username: Text(limits.username_max) = .{},
     imap: account.Server = .{},
+    /// Optional: without SMTP the client can read but not send.
+    smtp: ?account.Server = null,
     policy: account.Policy = .{},
 
     pub fn validate(self: *const Config) account.RuleError!void {
         try account.validate_server(&self.imap, self.policy);
+        if (self.smtp) |smtp| try account.validate_server(&smtp, self.policy);
     }
 };
 
@@ -42,6 +45,9 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
     var seen_port = false;
     var seen_security = false;
     var seen_username = false;
+    var seen_smtp_host = false;
+    var seen_smtp_port = false;
+    var seen_smtp_security = false;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
@@ -71,6 +77,15 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
         } else if (std.mem.eql(u8, key, "imap_security")) {
             config.imap.security = parseSecurity(value) orelse return error.InvalidValue;
             seen_security = true;
+        } else if (std.mem.eql(u8, key, "smtp_host")) {
+            smtp_server(&config).host.set(value);
+            seen_smtp_host = true;
+        } else if (std.mem.eql(u8, key, "smtp_port")) {
+            smtp_server(&config).port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue;
+            seen_smtp_port = true;
+        } else if (std.mem.eql(u8, key, "smtp_security")) {
+            smtp_server(&config).security = parseSecurity(value) orelse return error.InvalidValue;
+            seen_smtp_security = true;
         } else if (std.mem.eql(u8, key, "allow_plaintext")) {
             config.policy.allow_plaintext = parseBool(value) orelse return error.InvalidValue;
         } else if (std.mem.eql(u8, key, "password")) {
@@ -86,10 +101,21 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
     if (!seen_port) return error.MissingKey;
     if (!seen_security) return error.MissingKey;
     if (!seen_username) return error.MissingKey;
+
+    const smtp_seen = @as(u8, @intFromBool(seen_smtp_host)) +
+        @as(u8, @intFromBool(seen_smtp_port)) +
+        @as(u8, @intFromBool(seen_smtp_security));
+    if (smtp_seen != 0 and smtp_seen != 3) return error.MissingKey;
+
     if (config.label.is_empty()) config.label.set("account");
 
     try config.validate();
     return config;
+}
+
+fn smtp_server(config: *Config) *account.Server {
+    if (config.smtp == null) config.smtp = .{};
+    return &config.smtp.?;
 }
 
 fn parseSecurity(value: []const u8) ?account.Security {
@@ -177,6 +203,67 @@ test "plaintext is refused without an explicit opt-in" {
         \\imap_security = plain
     ;
     try testing.expectError(error.PlaintextForbidden, parse(text));
+}
+
+test "SMTP is optional, but a partial SMTP group is an error" {
+    const with_smtp =
+        \\address = alice@example.com
+        \\username = alice
+        \\imap_host = imap.example.com
+        \\imap_port = 993
+        \\imap_security = tls
+        \\smtp_host = smtp.example.com
+        \\smtp_port = 465
+        \\smtp_security = tls
+    ;
+    const config = try parse(with_smtp);
+    try testing.expectEqualStrings("smtp.example.com", config.smtp.?.host.slice());
+    try testing.expectEqual(@as(u16, 465), config.smtp.?.port);
+    try testing.expectEqual(account.Security.tls, config.smtp.?.security);
+
+    try testing.expectError(error.MissingKey, parse(
+        \\address = alice@example.com
+        \\username = alice
+        \\imap_host = imap.example.com
+        \\imap_port = 993
+        \\imap_security = tls
+        \\smtp_host = smtp.example.com
+    ));
+
+    try testing.expectError(error.InvalidValue, parse(
+        \\address = alice@example.com
+        \\username = alice
+        \\imap_host = imap.example.com
+        \\imap_port = 993
+        \\imap_security = tls
+        \\smtp_host = smtp.example.com
+        \\smtp_port = bad
+        \\smtp_security = tls
+    ));
+
+    try testing.expectError(error.InvalidValue, parse(
+        \\address = alice@example.com
+        \\username = alice
+        \\imap_host = imap.example.com
+        \\imap_port = 993
+        \\imap_security = tls
+        \\smtp_host = smtp.example.com
+        \\smtp_port = 465
+        \\smtp_security = maybe
+    ));
+}
+
+test "plaintext SMTP follows the same opt-in rule" {
+    try testing.expectError(error.PlaintextForbidden, parse(
+        \\address = alice@example.com
+        \\username = alice
+        \\imap_host = imap.example.com
+        \\imap_port = 993
+        \\imap_security = tls
+        \\smtp_host = smtp.example.com
+        \\smtp_port = 25
+        \\smtp_security = plain
+    ));
 }
 
 test "a password in the config is refused by name" {

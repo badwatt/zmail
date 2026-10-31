@@ -47,15 +47,20 @@ The port exists; this milestone fills it in.
 - The adapter maps server errors onto the port's `Unavailable` / `NotFound` /
   `Rejected` so the application code does not change.
 
-## M3 — writing mail (SMTP) and threads
+## M3 — writing mail (done: M3.1, next: M3.2)
 
-- SMTP with TLS/STARTTLS, `MAIL FROM`/`RCPT TO`/`DATA`, `8BITMIME`.
-- Compose view: `To`, `Cc`, `Subject`, body, attachments later. Drafts persisted
-  locally and synced to the Drafts mailbox.
-- Reply / reply-all / forward, with quoting.
-- Threading by `Message-ID` / `References`, displayed as a flat “conversation”
-  in the reader (no new pane).
-- Local outbox: writes are queued, never lost if the network drops.
+- **SMTP over TLS (done).** `core/src/protocol/smtp/`: reply parsing, commands,
+  AUTH PLAIN, a streaming client with CRLF normalization and dot-stuffing, and
+  `adapters/smtp_outbox.zig` behind the `Outbox` port. The demo has a memory
+  outbox that appends to Sent.
+- **Compose and reply (done).** Full-screen composer with three fields, UTF-8
+  body, validation, `Ctrl+S` to send, a draft that survives a failed send, and
+  `r` prefilling recipient and subject. Demo mode sends into Sent.
+- **M3.2 next.** Quote the original in replies; `Cc`/`Bcc` and multiple
+  recipients; RFC 2047 encoding for non-ASCII subjects; drafts persisted in the
+  Drafts mailbox; reply-all and forward; threading by `Message-ID`.
+- **Later.** STARTTLS for 587, `8BITMIME`/`SIZE` negotiation, a local queue that
+  survives a dropped network.
 
 ## M4 — self-hosted credentials
 

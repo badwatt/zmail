@@ -75,6 +75,10 @@ milestone. There is no analytics, no update check, and no crash reporting.
 - **No password on disk.** The config file is refused if it contains a
   `password` key (by name, with an actionable error). Today the password comes
   from `AMAIL_PASSWORD`; the environment is a bridge, not the destination.
+- **SMTP AUTH PLAIN only inside TLS.** The credentials are base64-encoded in the
+  command (as SMTP requires) and only sent after the TLS handshake. Plaintext
+  SMTP follows the same `allow_plaintext` rule as IMAP. The encoded payload is
+  never logged.
 - **Bounded protocol.** Commands have a fixed maximum size and are refused
   rather than truncated; responses have a fixed frame budget; timeouts bound
   every wait.

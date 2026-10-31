@@ -57,12 +57,27 @@ pub const Command = union(enum) {
     toggle_help,
     refresh,
     set_viewport: Viewport,
+    compose_new,
+    compose_reply,
+    compose_send,
+    compose_cancel,
+    compose_char: u21,
+    compose_newline,
+    compose_backspace,
+    compose_next_field,
+    compose_previous_field,
+    compose_clear_field,
+    /// Internal: the outbox accepted the message.
+    send_succeeded,
+    /// Internal: the outbox refused it; the draft stays.
+    send_failed,
 
     /// Status text is a response to a user action, so the next action clears it.
     /// Viewport updates arrive on every resize and must not erase it.
     pub fn clears_status(self: Command) bool {
         return switch (self) {
-            .noop, .set_viewport => false,
+            // These set their own status message.
+            .noop, .set_viewport, .send_succeeded, .send_failed => false,
             else => true,
         };
     }
@@ -101,9 +116,21 @@ test "every command is classified for status clearing" {
         .{ .command = .help_search_cancel, .clears = true },
         .{ .command = .toggle_help, .clears = true },
         .{ .command = .refresh, .clears = true },
+        .{ .command = .compose_new, .clears = true },
+        .{ .command = .compose_reply, .clears = true },
+        .{ .command = .compose_send, .clears = true },
+        .{ .command = .compose_cancel, .clears = true },
+        .{ .command = .{ .compose_char = 'a' }, .clears = true },
+        .{ .command = .compose_newline, .clears = true },
+        .{ .command = .compose_backspace, .clears = true },
+        .{ .command = .compose_next_field, .clears = true },
+        .{ .command = .compose_previous_field, .clears = true },
+        .{ .command = .compose_clear_field, .clears = true },
+        .{ .command = .send_succeeded, .clears = false },
+        .{ .command = .send_failed, .clears = false },
     };
     for (commands) |case| {
         try testing.expectEqual(case.clears, case.command.clears_status());
     }
-    try testing.expectEqual(@as(usize, 25), commands.len);
+    try testing.expectEqual(@as(usize, 37), commands.len);
 }

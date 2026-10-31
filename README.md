@@ -40,6 +40,11 @@ username    = alice
 imap_host   = imap.example.com
 imap_port   = 993
 imap_security = tls
+
+# Optional. Without SMTP, reading works and compose reports that it cannot send.
+smtp_host   = smtp.example.com
+smtp_port   = 465
+smtp_security = tls
 ```
 
 The password is **never** in the file; it is read from `AMAIL_PASSWORD`:
@@ -48,9 +53,14 @@ The password is **never** in the file; it is read from `AMAIL_PASSWORD`:
 AMAIL_PASSWORD='...' amail --live
 ```
 
-Only implicit TLS (`imap_port = 993`) is supported today. Certificate
-verification is mandatory and uses the system CA bundle. STARTTLS and a real
-secret store (OS keyring, encrypted file, self-hosted sync) are next.
+Only implicit TLS is supported today (IMAP 993, SMTP 465). Certificate
+verification is mandatory and uses the system CA bundle. Sending authenticates
+with AUTH PLAIN inside that TLS connection. STARTTLS and a real secret store
+(OS keyring, encrypted file, self-hosted sync) are next.
+
+Writing mail: `c` composes, `r` replies, `Tab` moves between fields, `Ctrl+S`
+sends, `Esc` cancels. The first version edits at the end of the active field
+(`Ctrl+U` clears it), sends to one recipient, and does not quote the original.
 
 ```sh
 zig build test       # unit + integration + a real pseudo-terminal session
@@ -64,7 +74,7 @@ development tool, not a dependency).
 ## What it is today
 
 - A complete TUI over a local cache: mailbox tabs, unread counts, message list,
-  reader, live search, help overlay, status line, mouse support.
+  reader, compose/reply, live search, help overlay, status line, mouse support.
 - Vim keys **and** arrows/Home/PageUp **and** the mouse. Nothing is
   keyboard-only or mouse-only.
 - The demo account is seeded relative to the clock, so it looks alive on first

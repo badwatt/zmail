@@ -53,16 +53,27 @@ fn run_demo(gpa: std.mem.Allocator, system: SessionSystem) ?Failure {
     var mail = core.memory_mail.MemoryMail.init();
     core.demo.seed(&mail, os.now_unix()) catch
         return .{ .message = "Could not seed the demo account" };
-    return run_session(gpa, system, mail.mail());
+
+    var outbox = core.memory_outbox.MemoryOutbox.init(&mail, os.now_unix());
+    const from = core.address.Address.init("Me <me@amail.local>") catch core.address.Address{};
+    return run_session(gpa, system, mail.mail(), outbox.outbox(), from);
 }
 
-fn run_session(gpa: std.mem.Allocator, system: SessionSystem, mail: core.mail_port.Mail) ?Failure {
+fn run_session(
+    gpa: std.mem.Allocator,
+    system: SessionSystem,
+    mail: core.mail_port.Mail,
+    outbox: ?core.outbox_port.Outbox,
+    from: core.address.Address,
+) ?Failure {
     var session: session_mod.Session = undefined;
     session.init(gpa, .{
         .mail = mail,
+        .outbox = outbox,
         .system = system,
         .theme = theme_for_environment(),
         .now = os.now_unix,
+        .from_address = from,
     }) catch return .{ .message = "Not enough memory to start" };
     defer session.deinit();
 
@@ -108,7 +119,31 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
     ) catch |err| return .{ .message = login_message(err) };
     defer imap.close();
 
-    return run_session(gpa, system, imap.mail());
+    // Sending needs a second connection; without it the client still reads and
+    // compose reports that it cannot send.
+    var smtp_transport: net.tls.TlsTransport = undefined;
+    var smtp_outbox: core.smtp_outbox.SmtpOutbox = undefined;
+    var smtp_ready = false;
+    if (config.smtp) |smtp| {
+        if (smtp.security != .tls) {
+            return .{ .message = "Only implicit TLS for SMTP (smtp_port = 465) is supported today" };
+        }
+        smtp_transport.open(gpa, io, smtp.host.slice(), smtp.port) catch
+            return .{ .message = "Could not connect to the SMTP server over TLS" };
+        smtp_outbox = core.smtp_outbox.SmtpOutbox.connect(
+            smtp_transport.transport(),
+            "localhost",
+            config.username.slice(),
+            password,
+            os.now_unix,
+        ) catch return .{ .message = "SMTP login failed: check username and AMAIL_PASSWORD" };
+        smtp_ready = true;
+    }
+    defer if (smtp_ready) smtp_transport.deinit();
+    defer if (smtp_ready) smtp_outbox.close();
+
+    const outbox: ?core.outbox_port.Outbox = if (smtp_ready) smtp_outbox.outbox() else null;
+    return run_session(gpa, system, imap.mail(), outbox, config.address);
 }
 
 fn read_file(io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {

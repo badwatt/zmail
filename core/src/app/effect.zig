@@ -11,12 +11,15 @@ const limits = @import("../limits.zig");
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
 const MessageId = @import("../domain/id.zig").MessageId;
 const Flags = @import("../domain/message.zig").Flags;
+const Outgoing = @import("../domain/outgoing.zig").Outgoing;
 
 pub const Effect = union(enum) {
     sync_flags: struct { id: MessageId, flags: Flags },
     move_message: struct { id: MessageId, to: Mailbox },
     fetch_body: MessageId,
     refresh: Mailbox,
+    /// Hand the message to the outbox. The body is borrowed from compose state.
+    send: Outgoing,
 };
 
 pub const Effects = struct {

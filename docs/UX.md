@@ -89,6 +89,8 @@ and disappears on the next action.
 | `1`–`6` | jump to Inbox, Sent, Drafts, Archive, Trash, Junk |
 | `R` | refresh from the server |
 | `?` | help (`/` filters the key list) |
+| `c` | compose a new message |
+| `r` | reply to the selected message |
 | `Ctrl+Q` `Ctrl+C` | quit. The top level never closes on `Esc`, `q`, or `h` |
 
 Search is live: typing filters as you go, `Enter` keeps the filter, `Esc`
@@ -98,6 +100,34 @@ cancels it. `↑`/`↓` still move the cursor while typing. Inside the help over
 
 `Esc` is never a quit key. The only ways out are `q` from the list (never from a
 text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
+
+## Writing mail
+
+`c` (or `r`) opens a full-screen composer:
+
+```
+ To       alice@example.com▏
+ Subject  Re: design tokens
+────────────────────────────────────────────────────────
+ Looks good to me.
+ See you Monday.
+────────────────────────────────────────────────────────
+ Tab next field  ·  Ctrl+S send  ·  Ctrl+U clear field  ·  Esc cancel
+```
+
+| Key | Action |
+|-----|--------|
+| any character | type into the active field |
+| `Enter` | newline in the body; next field in the headers |
+| `Tab` / `Shift+Tab` | next / previous field |
+| `Backspace` | delete the last character of the active field |
+| `Ctrl+U` | clear the active field |
+| `Ctrl+S` | send (validates the recipient first) |
+| `Esc` | cancel the draft |
+
+A reply prefills the recipient and `Re: <subject>` and starts in the body. The
+draft survives a failed send. Non-ASCII text is sent as UTF-8; a subject with
+non-ASCII characters will need MIME encoding in a later version.
 
 ## Mouse
 
