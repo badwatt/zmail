@@ -55,6 +55,17 @@ pub const Address = struct {
         return address;
     }
 
+    /// Builds an address from parts the server already split (IMAP ENVELOPE).
+    /// No validation: the parts come from the mail store, and the UI only
+    /// displays them. `Text` still truncates and neutralizes control bytes.
+    pub fn from_parts(name: []const u8, local: []const u8, domain: []const u8) Address {
+        var address: Address = .{};
+        address.name.set(name);
+        address.local.set(local);
+        address.domain.set(domain);
+        return address;
+    }
+
     /// `local@domain`, written into `buffer`. Returns an empty slice if the
     /// buffer cannot hold it (the caller sizes it with `limits.address_max`).
     pub fn addr_spec(self: *const Address, buffer: []u8) []const u8 {
@@ -226,6 +237,19 @@ test "Address: eql compares every component" {
     const c = try Address.init("Alice <alice@example.org>");
     try testing.expect(a.eql(&b));
     try testing.expect(!a.eql(&c));
+}
+
+test "Address: from_parts sanitizes and truncates like the parser" {
+    const address = Address.from_parts("\x1b[2JEvil", "alice", "example.com");
+    try testing.expectEqualStrings(" [2JEvil", address.name.slice());
+    try testing.expectEqualStrings(" [2JEvil", address.label());
+
+    const long_name: [limits.name_max + 10]u8 = @splat('a');
+    const truncated = Address.from_parts(&long_name, "x", "y.z");
+    try testing.expectEqual(limits.name_max, truncated.name.len);
+
+    const bare = Address.from_parts("", "bob", "example.com");
+    try testing.expectEqualStrings("bob", bare.label());
 }
 
 test "Address: rejects empty and whitespace-only input" {

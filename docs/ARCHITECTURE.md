@@ -45,8 +45,23 @@ adapter, or a test double must satisfy.
   `fetch_body`, `sync_flags`, `move_message`, `refresh`.
 
 **Adapters.** `adapters/memory_mail.zig` is the demo account and the tests'
-server double. It holds the "server side" in a fixed array and implements the
-same port the network adapter will, so the boundary is exercised from day one.
+server double. `adapters/imap_mail.zig` implements the same port over the real
+protocol client; it is tested with a scripted server, not a network. The TLS
+transport is the only adapter still missing, and it plugs into the `Transport`
+port without touching either adapter.
+
+**Protocol (`core/src/protocol/imap`).** Pure functions over byte buffers:
+
+| File | Responsibility |
+|------|----------------|
+| `tokenizer.zig` | atoms, quoted strings with escapes, literals |
+| `framing.zig` | response framing: a response may contain CRLF-bearing literals |
+| `command.zig` | commands rendered into bounded buffers, with quoting |
+| `response.zig` | tagged/untagged classification, counts, FETCH + ENVELOPE |
+| `client.zig` | the conversation: send, pump untagged, turn tags into results |
+
+`client.zig` talks to `ports/transport.zig` (`read`/`write`/`close`), never to a
+socket, so a whole IMAP conversation is a unit test with a scripted peer.
 
 ## The TUI
 

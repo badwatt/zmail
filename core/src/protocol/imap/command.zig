@@ -119,7 +119,7 @@ pub fn fetch_envelopes(buffer: []u8, tag: []const u8, first_sequence: u32, last_
     render.number(first_sequence);
     render.byte(':');
     render.number(last_sequence);
-    render.text(" (UID FLAGS INTERNALDATE RFC822.SIZE)");
+    render.text(" (UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE)");
     return render.finish();
 }
 
@@ -209,7 +209,7 @@ test "select quotes the mailbox" {
 test "fetch_envelopes asks only for envelope attributes" {
     var buffer: [128]u8 = undefined;
     try expect_command(
-        "a3 FETCH 1:50 (UID FLAGS INTERNALDATE RFC822.SIZE)\r\n",
+        "a3 FETCH 1:50 (UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE)\r\n",
         fetch_envelopes(&buffer, "a3", 1, 50),
     );
 }

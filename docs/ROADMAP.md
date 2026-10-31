@@ -21,10 +21,18 @@ The port exists; this milestone fills it in.
   status, `EXISTS`/`RECENT`/`EXPUNGE`, capabilities, and `FETCH` attributes
   (`UID`, `FLAGS`, `RFC822.SIZE`, `INTERNALDATE`). 100% line coverage, no
   sockets involved. `ENVELOPE` parsing lands with the adapter.
-- **Transport (next).** Bounded line reader over `std.crypto.tls.Client`,
-  timeouts, and a scripted-conversation test that drives a fake server.
-- **The adapter.** Implements `ports/mail.Mail` on top of the codec and the
-  transport, mapping errors onto `Unavailable` / `NotFound` / `Rejected`.
+- **Framing and client (done: M2.2).** `framing.zig` understands literals, so a
+  body with CRLF is one response; `client.zig` sends a command, pumps untagged
+  responses, and turns the tagged one into a result or an error. Timeouts are
+  bounded (100 × 100 ms), and the command buffer is capped.
+- **The adapter (done: M2.2).** `adapters/imap_mail.zig` implements
+  `ports/mail.Mail` on top of the client, selecting a mailbox once and mapping
+  every protocol error onto `Unavailable` / `NotFound` / `Rejected`.
+- **Transport (next).** `std.crypto.tls.Client` over a socket behind
+  `ports/transport.zig`: certificate verification mandatory, bounded reads,
+  STARTTLS, and the same scripted-conversation tests at the boundary.
+- **Account setup.** A config file (host, port, security, username) plus the
+  `SecretStore` port for the password; then `amail --live` instead of the demo.
 - **TLS adapter.** `std.crypto.tls.Client` with certificate verification
   mandatory. STARTTLS upgrade. A bounded, line-oriented transport with
   timeouts.

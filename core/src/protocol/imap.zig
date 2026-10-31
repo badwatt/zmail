@@ -8,9 +8,13 @@ const std = @import("std");
 pub const tokenizer = @import("imap/tokenizer.zig");
 pub const command = @import("imap/command.zig");
 pub const response = @import("imap/response.zig");
+pub const framing = @import("imap/framing.zig");
+pub const client = @import("imap/client.zig");
 
 test {
     _ = @import("imap/tokenizer.zig");
     _ = @import("imap/command.zig");
     _ = @import("imap/response.zig");
+    _ = @import("imap/framing.zig");
+    _ = @import("imap/client.zig");
 }

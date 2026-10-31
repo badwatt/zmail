@@ -48,8 +48,10 @@ development tool, not a dependency).
 - `core/` holds the domain and the application state machine and performs no
   I/O at all. `tui/` is one adapter on top of it. A GUI can be a second adapter.
 
-The real IMAP/SMTP adapter is the next milestone (`docs/ROADMAP.md`). The port
-it will implement is already the one the demo implements.
+The IMAP protocol layer is in place and tested end to end against a scripted
+server: framing (literals included), commands, responses, the client loop, and
+the `Mail` adapter on top. The remaining piece for live mail is the TLS/socket
+transport behind the `Transport` port (`docs/ROADMAP.md`).
 
 ## Why this shape
 

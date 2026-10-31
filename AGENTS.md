@@ -28,9 +28,10 @@
 - **All behaviour lives in `core/app/update.zig`.** Front ends translate input
   into `core.command.Command` and execute `core.effect.Effect`. If a rule needs
   to exist for a future GUI too, it goes in the update function, not in the TUI.
-- Dependency injection via `tui/src/system.zig` (terminal) and
-  `core/src/ports/mail.zig` (mail). Tests use `system.Fake` and
-  `adapters/memory_mail.zig`; never the real terminal or network.
+- Dependency injection via `tui/src/system.zig` (terminal),
+  `core/src/ports/mail.zig` (mail), and `core/src/ports/transport.zig`
+  (network). Tests use `system.Fake`, `adapters/memory_mail.zig`, and
+  `ports/transport.zig`'s `Scripted` peer; never the real terminal or network.
 - External commands run as argv lists, never through a shell.
 - No hardcoded stdout/stdin: the session writes through the `System` port;
   `cli`/`run` take writers. Output is never written from library code.

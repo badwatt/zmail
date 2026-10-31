@@ -22,6 +22,15 @@ pub const Tagged = struct {
     text: []const u8,
 };
 
+/// IMAP ENVELOPE, only the fields the list and the reader need.
+pub const Envelope = struct {
+    date: ?[]const u8 = null,
+    subject: ?[]const u8 = null,
+    from_name: ?[]const u8 = null,
+    from_mailbox: ?[]const u8 = null,
+    from_host: ?[]const u8 = null,
+};
+
 pub const Fetch = struct {
     sequence: u32 = 0,
     uid: ?u32 = null,
@@ -29,6 +38,9 @@ pub const Fetch = struct {
     /// Unix seconds from INTERNALDATE, or null when absent.
     internal_date: ?i64 = null,
     size_bytes: ?u32 = null,
+    envelope: ?Envelope = null,
+    /// Payload of a `BODY[...]` attribute, borrowed from the response buffer.
+    body: ?[]const u8 = null,
 };
 
 pub const Untagged = union(enum) {
@@ -123,6 +135,9 @@ fn sequenceResponse(sequence: u32, tail: []const u8) Error!Untagged {
 fn parseFetch(sequence: u32, text: []const u8) Error!Fetch {
     var result = Fetch{ .sequence = sequence };
     var tokens = tokenizer.Tokenizer.init(text);
+    // Unescaped envelope strings live here for the lifetime of the response.
+    var string_buffer: [1024]u8 = undefined;
+    var string_len: usize = 0;
 
     const open = try next(&tokens);
     if (open != .open_paren) return error.Malformed;
@@ -140,6 +155,10 @@ fn parseFetch(sequence: u32, text: []const u8) Error!Fetch {
                     result.internal_date = try nextDate(&tokens);
                 } else if (std.ascii.eqlIgnoreCase(key, "FLAGS")) {
                     result.flags = try parseFlags(&tokens);
+                } else if (std.ascii.eqlIgnoreCase(key, "ENVELOPE")) {
+                    result.envelope = try parseEnvelope(&tokens, &string_buffer, &string_len);
+                } else if (startsWithIgnoreCase(key, "BODY")) {
+                    result.body = try parseBodyValue(&tokens);
                 } else {
                     try skipValue(&tokens);
                 }
@@ -194,12 +213,126 @@ fn parseFlags(tokens: *tokenizer.Tokenizer) Error!Flags {
     }
 }
 
+fn startsWithIgnoreCase(text: []const u8, prefix: []const u8) bool {
+    if (text.len < prefix.len) return false;
+    return std.ascii.eqlIgnoreCase(text[0..prefix.len], prefix);
+}
+
+fn parseBodyValue(tokens: *tokenizer.Tokenizer) Error!?[]const u8 {
+    const token = try next(tokens);
+    return switch (token) {
+        .literal => |payload| payload,
+        .quoted => |value| value,
+        .atom => null,
+        .open_paren => {
+            try skipGroup(tokens, 1);
+            return null;
+        },
+        .close_paren => error.Malformed,
+    };
+}
+
+/// Reads an nstring: NIL, an atom, a quoted string (unescaped into scratch), or
+/// a literal.
+fn readNString(tokens: *tokenizer.Tokenizer, scratch: []u8, scratch_len: *usize) Error!?[]const u8 {
+    const token = try next(tokens);
+    return switch (token) {
+        .atom => |atom| if (std.ascii.eqlIgnoreCase(atom, "NIL")) null else atom,
+        .quoted => |quoted| blk: {
+            const unescaped = tokenizer.unescape(quoted, scratch[scratch_len.*..]) catch
+                return error.Malformed;
+            scratch_len.* += unescaped.len;
+            break :blk unescaped;
+        },
+        .literal => |payload| payload,
+        else => error.Malformed,
+    };
+}
+
+const AddressParts = struct {
+    name: ?[]const u8 = null,
+    mailbox: ?[]const u8 = null,
+    host: ?[]const u8 = null,
+};
+
+fn parseAddress(tokens: *tokenizer.Tokenizer, scratch: []u8, scratch_len: *usize) Error!AddressParts {
+    const name = try readNString(tokens, scratch, scratch_len);
+    _ = try readNString(tokens, scratch, scratch_len); // at-domain-list, unused
+    const mailbox = try readNString(tokens, scratch, scratch_len);
+    const host = try readNString(tokens, scratch, scratch_len);
+    if (try next(tokens) != .close_paren) return error.Malformed;
+    return .{ .name = name, .mailbox = mailbox, .host = host };
+}
+
+/// Parses an address list and returns the first address, or null for NIL/empty.
+fn parseAddressList(tokens: *tokenizer.Tokenizer, scratch: []u8, scratch_len: *usize) Error!?AddressParts {
+    const open = try next(tokens);
+    switch (open) {
+        .atom => |atom| {
+            if (std.ascii.eqlIgnoreCase(atom, "NIL")) return null;
+            return error.Malformed;
+        },
+        .open_paren => {},
+        else => return error.Malformed,
+    }
+
+    var first: ?AddressParts = null;
+    while (true) {
+        const token = try next(tokens);
+        switch (token) {
+            .close_paren => return first,
+            .open_paren => {
+                const parts = try parseAddress(tokens, scratch, scratch_len);
+                if (first == null) first = parts;
+            },
+            else => return error.Malformed,
+        }
+    }
+}
+
+fn parseEnvelope(tokens: *tokenizer.Tokenizer, scratch: []u8, scratch_len: *usize) Error!?Envelope {
+    const open = try next(tokens);
+    switch (open) {
+        .atom => |atom| {
+            if (std.ascii.eqlIgnoreCase(atom, "NIL")) return null;
+            return error.Malformed;
+        },
+        .open_paren => {},
+        else => return error.Malformed,
+    }
+
+    var envelope = Envelope{};
+    envelope.date = try readNString(tokens, scratch, scratch_len);
+    envelope.subject = try readNString(tokens, scratch, scratch_len);
+
+    if (try parseAddressList(tokens, scratch, scratch_len)) |from| {
+        envelope.from_name = from.name;
+        envelope.from_mailbox = from.mailbox;
+        envelope.from_host = from.host;
+    }
+
+    // sender, reply-to, to, cc, bcc.
+    var index: u32 = 0;
+    while (index < 5) : (index += 1) {
+        _ = try parseAddressList(tokens, scratch, scratch_len);
+    }
+
+    _ = try readNString(tokens, scratch, scratch_len); // in-reply-to
+    _ = try readNString(tokens, scratch, scratch_len); // message-id
+
+    if (try next(tokens) != .close_paren) return error.Malformed;
+    return envelope;
+}
+
 /// Consumes one value: a single token, or a balanced parenthesized group.
 fn skipValue(tokens: *tokenizer.Tokenizer) Error!void {
     const token = try next(tokens);
     if (token != .open_paren) return;
+    try skipGroup(tokens, 1);
+}
 
-    var depth: u32 = 1;
+fn skipGroup(tokens: *tokenizer.Tokenizer, depth_start: u32) Error!void {
+    var depth = depth_start;
     while (depth > 0) {
         const inner = try next(tokens);
         if (inner == .open_paren) depth += 1;
@@ -355,8 +488,72 @@ test "FETCH with empty flags means unread and unflagged" {
 }
 
 test "FETCH skips unknown attributes, including nested lists" {
-    const fetch = (try parse("* 3 FETCH (ENVELOPE (NIL NIL) UID 11 X-UNKNOWN \"x\")")).untagged.fetch;
+    const fetch = (try parse("* 3 FETCH (X-UNKNOWN (NIL NIL) UID 11 X-OTHER \"x\")")).untagged.fetch;
     try testing.expectEqual(@as(u32, 11), fetch.uid.?);
+}
+
+test "FETCH parses ENVELOPE: subject unescaped, first from address" {
+    const line = "* 1 FETCH (UID 42 ENVELOPE (\"Tue, 14 Nov 2023 22:13:20 +0000\" " ++
+        "\"Hello \\\"world\\\"\" " ++
+        "((\"Alice Rivera\" NIL \"alice\" \"example.com\")) " ++
+        "((\"Alice Rivera\" NIL \"alice\" \"example.com\")) " ++
+        "((\"Alice Rivera\" NIL \"alice\" \"example.com\")) " ++
+        "((\"Bob\" NIL \"bob\" \"example.com\")) NIL NIL NIL \"<id@example.com>\") " ++
+        "FLAGS (\\Seen) RFC822.SIZE 4096 INTERNALDATE \"14-Nov-2023 22:13:20 +0000\")";
+    const fetch = (try parse(line)).untagged.fetch;
+
+    const envelope = fetch.envelope.?;
+    try testing.expectEqualStrings("Hello \"world\"", envelope.subject.?);
+    try testing.expectEqualStrings("Tue, 14 Nov 2023 22:13:20 +0000", envelope.date.?);
+    try testing.expectEqualStrings("Alice Rivera", envelope.from_name.?);
+    try testing.expectEqualStrings("alice", envelope.from_mailbox.?);
+    try testing.expectEqualStrings("example.com", envelope.from_host.?);
+    try testing.expectEqual(@as(i64, 1_700_000_000), fetch.internal_date.?);
+    try testing.expect(!fetch.flags.?.unread);
+}
+
+test "FETCH with a NIL envelope and an empty address list" {
+    const nil = (try parse("* 1 FETCH (UID 1 ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL))")).untagged.fetch;
+    try testing.expect(nil.envelope.?.subject == null);
+    try testing.expect(nil.envelope.?.from_mailbox == null);
+
+    const empty = (try parse("* 1 FETCH (UID 2 ENVELOPE (NIL NIL () () () () () NIL NIL NIL))")).untagged.fetch;
+    try testing.expect(empty.envelope.?.from_name == null);
+}
+
+test "FETCH captures a body literal" {
+    const fetch = (try parse("* 1 FETCH (UID 7 BODY[TEXT] {11}\r\nhello world)")).untagged.fetch;
+    try testing.expectEqual(@as(u32, 7), fetch.uid.?);
+    try testing.expectEqualStrings("hello world", fetch.body.?);
+}
+
+test "FETCH captures a quoted body and ignores NIL" {
+    const quoted = (try parse("* 1 FETCH (BODY[] \"tiny\")")).untagged.fetch;
+    try testing.expectEqualStrings("tiny", quoted.body.?);
+
+    const nil = (try parse("* 1 FETCH (BODY[] NIL UID 3)")).untagged.fetch;
+    try testing.expect(nil.body == null);
+    try testing.expectEqual(@as(u32, 3), nil.uid.?);
+}
+
+test "a body value that is a group is skipped, and ENVELOPE NIL is accepted" {
+    const grouped = (try parse("* 1 FETCH (BODY[] (NIL) UID 3)")).untagged.fetch;
+    try testing.expect(grouped.body == null);
+    try testing.expectEqual(@as(u32, 3), grouped.uid.?);
+
+    const nil = (try parse("* 2 FETCH (UID 4 ENVELOPE NIL)")).untagged.fetch;
+    try testing.expect(nil.envelope == null);
+}
+
+test "an ENVELOPE that is neither a list nor NIL is malformed" {
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE \"x\")"));
+}
+
+test "malformed envelopes are refused" {
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL NIL))"));
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL NIL 5 NIL NIL NIL NIL NIL NIL NIL))"));
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL NIL (NIL) NIL NIL NIL NIL NIL NIL NIL))"));
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL NIL ((NIL)) NIL NIL NIL NIL NIL NIL NIL))"));
 }
 
 test "FETCH tolerates a literal value" {

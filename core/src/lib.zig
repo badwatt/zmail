@@ -19,7 +19,9 @@ pub const store = @import("domain/store.zig");
 pub const time = @import("domain/time.zig");
 
 pub const mail_port = @import("ports/mail.zig");
+pub const transport_port = @import("ports/transport.zig");
 pub const memory_mail = @import("adapters/memory_mail.zig");
+pub const imap_mail = @import("adapters/imap_mail.zig");
 
 pub const command = @import("app/command.zig");
 pub const effect = @import("app/effect.zig");
@@ -47,6 +49,7 @@ test {
     _ = @import("domain/time.zig");
     _ = @import("ports/mail.zig");
     _ = @import("adapters/memory_mail.zig");
+    _ = @import("adapters/imap_mail.zig");
     _ = @import("app/command.zig");
     _ = @import("app/effect.zig");
     _ = @import("app/state.zig");
