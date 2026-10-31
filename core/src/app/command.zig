@@ -1,0 +1,99 @@
+//! User intents, expressed without a keyboard, a mouse, or a screen.
+//!
+//! The TUI and (later) the GUI both translate their input into these commands.
+//! `update` is the only place that decides what a command means, so the two
+//! front ends cannot drift apart.
+
+const std = @import("std");
+const Mailbox = @import("../domain/mailbox.zig").Mailbox;
+
+pub const Move = enum {
+    up,
+    down,
+    top,
+    bottom,
+    page_up,
+    page_down,
+    half_page_up,
+    half_page_down,
+};
+
+/// Geometry the front end reports so paging and scrolling have bounds.
+pub const Viewport = struct {
+    /// Rows available to the message list.
+    list_rows: u16 = 1,
+    /// Rows available to the message body.
+    reader_rows: u16 = 1,
+    /// Total wrapped lines of the open body, as measured by the renderer.
+    body_rows: u32 = 0,
+};
+
+pub const Command = union(enum) {
+    /// Nothing happened. Useful for a render tick.
+    noop,
+    quit,
+    move: Move,
+    open_selected,
+    /// `q`/`Esc`: leaves the current layer (search, help, reader) or quits from
+    /// the top level.
+    dismiss,
+    next_mailbox,
+    previous_mailbox,
+    select_mailbox: Mailbox,
+    toggle_unread,
+    toggle_flag,
+    archive_selected,
+    delete_selected,
+    begin_search,
+    search_char: u8,
+    search_backspace,
+    search_commit,
+    search_cancel,
+    toggle_help,
+    refresh,
+    set_viewport: Viewport,
+
+    /// Status text is a response to a user action, so the next action clears it.
+    /// Viewport updates arrive on every resize and must not erase it.
+    pub fn clears_status(self: Command) bool {
+        return switch (self) {
+            .noop, .set_viewport => false,
+            else => true,
+        };
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "every command is classified for status clearing" {
+    const commands = [_]struct { command: Command, clears: bool }{
+        .{ .command = .noop, .clears = false },
+        .{ .command = .{ .set_viewport = .{} }, .clears = false },
+        .{ .command = .quit, .clears = true },
+        .{ .command = .{ .move = .down }, .clears = true },
+        .{ .command = .open_selected, .clears = true },
+        .{ .command = .dismiss, .clears = true },
+        .{ .command = .next_mailbox, .clears = true },
+        .{ .command = .previous_mailbox, .clears = true },
+        .{ .command = .{ .select_mailbox = .sent }, .clears = true },
+        .{ .command = .toggle_unread, .clears = true },
+        .{ .command = .toggle_flag, .clears = true },
+        .{ .command = .archive_selected, .clears = true },
+        .{ .command = .delete_selected, .clears = true },
+        .{ .command = .begin_search, .clears = true },
+        .{ .command = .{ .search_char = 'a' }, .clears = true },
+        .{ .command = .search_backspace, .clears = true },
+        .{ .command = .search_commit, .clears = true },
+        .{ .command = .search_cancel, .clears = true },
+        .{ .command = .toggle_help, .clears = true },
+        .{ .command = .refresh, .clears = true },
+    };
+    for (commands) |case| {
+        try testing.expectEqual(case.clears, case.command.clears_status());
+    }
+    try testing.expectEqual(@as(usize, 20), commands.len);
+}

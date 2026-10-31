@@ -139,20 +139,26 @@ pub fn main() !u8 {
     defer threaded.deinit();
     const io = threaded.io();
 
+    return run(gpa, io, report_path);
+}
+
+/// Reads, checks, and reports on `path`. Split from `main` so the failure
+/// branches (missing file, unreadable file, malformed report) are testable.
+pub fn run(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !u8 {
     var buffer: [8 * 1024 * 1024]u8 = undefined;
-    const file = std.Io.Dir.cwd().openFile(io, report_path, .{}) catch |err| {
-        std.debug.print("coverage: cannot open {s}: {t}\n", .{ report_path, err });
+    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| {
+        std.debug.print("coverage: cannot open {s}: {t}\n", .{ path, err });
         return 1;
     };
     defer file.close(io);
 
     const bytes_read = file.readPositionalAll(io, &buffer, 0) catch |err| {
-        std.debug.print("coverage: cannot read {s}: {t}\n", .{ report_path, err });
+        std.debug.print("coverage: cannot read {s}: {t}\n", .{ path, err });
         return 1;
     };
 
     var report = parse_report(gpa, buffer[0..bytes_read]) catch |err| {
-        std.debug.print("coverage: cannot parse {s}: {t}\n", .{ report_path, err });
+        std.debug.print("coverage: cannot parse {s}: {t}\n", .{ path, err });
         return 1;
     };
     defer report.deinit(gpa);

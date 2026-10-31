@@ -162,8 +162,47 @@ test "print_report reports a perfect score" {
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "coverage: 100.00% (20/20 lines)") != null);
 }
 
-test "main fails when the report file is missing" {
-    // The coverage step runs from the build root; this test guarantees the
-    // error path returns a failing exit code instead of a crash.
-    try testing.expectEqual(@as(u8, 1), try coverage.main());
+test "run fails cleanly when the report file is missing" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    try testing.expectEqual(
+        @as(u8, 1),
+        try coverage.run(testing.allocator, threaded.io(), "build/testdata/does-not-exist.json"),
+    );
+}
+
+test "run fails cleanly when the report cannot be read" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    try testing.expectEqual(
+        @as(u8, 1),
+        try coverage.run(testing.allocator, threaded.io(), "build/testdata"),
+    );
+}
+
+test "run rejects a malformed report" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    try testing.expectEqual(
+        @as(u8, 1),
+        try coverage.run(testing.allocator, threaded.io(), "build/testdata/malformed.json"),
+    );
+}
+
+test "run accepts a complete report" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    try testing.expectEqual(
+        @as(u8, 0),
+        try coverage.run(testing.allocator, threaded.io(), "build/testdata/complete.json"),
+    );
+}
+
+test "run rejects a report with gaps" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    try testing.expectEqual(
+        @as(u8, 1),
+        try coverage.run(testing.allocator, threaded.io(), "build/testdata/incomplete.json"),
+    );
 }

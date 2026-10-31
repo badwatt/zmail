@@ -18,6 +18,17 @@ pub const account = @import("domain/account.zig");
 pub const store = @import("domain/store.zig");
 pub const time = @import("domain/time.zig");
 
+pub const mail_port = @import("ports/mail.zig");
+pub const memory_mail = @import("adapters/memory_mail.zig");
+
+pub const command = @import("app/command.zig");
+pub const effect = @import("app/effect.zig");
+pub const state = @import("app/state.zig");
+pub const update = @import("app/update.zig");
+pub const sync = @import("app/sync.zig");
+
+pub const demo = @import("demo.zig");
+
 // Referenced from the module root's test block so `zig build test` includes
 // every submodule's tests.
 test {
@@ -32,4 +43,12 @@ test {
     _ = @import("domain/account.zig");
     _ = @import("domain/store.zig");
     _ = @import("domain/time.zig");
+    _ = @import("ports/mail.zig");
+    _ = @import("adapters/memory_mail.zig");
+    _ = @import("app/command.zig");
+    _ = @import("app/effect.zig");
+    _ = @import("app/state.zig");
+    _ = @import("app/update.zig");
+    _ = @import("app/sync.zig");
+    _ = @import("demo.zig");
 }

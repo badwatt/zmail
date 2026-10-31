@@ -92,6 +92,23 @@ pub const Store = struct {
         return removed;
     }
 
+    /// Removes every message in `mailbox`, compacting in one pass. Returns how
+    /// many were removed. Used when a mailbox is refreshed from the server.
+    pub fn remove_in(self: *Store, mailbox: Mailbox) u32 {
+        var read: u32 = 0;
+        var write: u32 = 0;
+        while (read < self.len) : (read += 1) {
+            if (self.messages[read].mailbox == mailbox) continue;
+            if (write != read) self.messages[write] = self.messages[read];
+            write += 1;
+        }
+        const removed = self.len - write;
+        @memset(self.messages[write..self.len], std.mem.zeroes(Message));
+        self.len = write;
+        assert(self.len <= self.capacity());
+        return removed;
+    }
+
     pub fn set_flags(self: *Store, id: MessageId, flags: Flags) bool {
         const message = self.get(id) orelse return false;
         message.flags = flags;
