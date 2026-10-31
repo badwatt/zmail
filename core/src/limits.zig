@@ -41,14 +41,8 @@ pub const status_max: u32 = 64;
 /// Maximum bytes of an account label ("work").
 pub const label_max: u32 = 24;
 
-/// Maximum bytes of a username sent to an IMAP/SMTP server.
-pub const username_max: u32 = 128;
-
 /// Maximum bytes of a secret (password or token) held in memory.
 pub const secret_max: u32 = 512;
 
 /// Maximum number of actions a single user command may produce.
 pub const actions_max: u32 = 8;
-
-/// Maximum number of open actions the store keeps queued (reserved for M2).
-pub const toasts_max: u32 = 4;

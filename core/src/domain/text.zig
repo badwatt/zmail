@@ -108,9 +108,6 @@ pub fn Text(comptime capacity: u32) type {
     };
 }
 
-/// The largest text type used by the domain (a subject line).
-pub const Subject = Text(@import("../limits.zig").subject_max);
-
 /// Copies `source` into `dest`, truncating at a UTF-8 boundary and replacing
 /// control characters with a space. Returns the number of bytes written.
 pub fn copy_sanitized(dest: []u8, source: []const u8) u32 {

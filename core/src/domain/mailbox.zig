@@ -54,14 +54,6 @@ pub const Mailbox = enum(u8) {
         const position: usize = @backingInt(self);
         return from_index(@intCast((position + all.len - 1) % all.len));
     }
-
-    /// Mailboxes the user writes into, as opposed to read-only views.
-    pub fn is_outgoing(self: Mailbox) bool {
-        return switch (self) {
-            .inbox, .archive, .trash, .junk => false,
-            .sent, .drafts => true,
-        };
-    }
 };
 
 comptime {
@@ -105,13 +97,4 @@ test "next cycles forward through every mailbox and wraps" {
 test "previous cycles backward through every mailbox and wraps" {
     try testing.expectEqual(Mailbox.junk, Mailbox.inbox.previous());
     try testing.expectEqual(Mailbox.inbox, Mailbox.sent.previous());
-}
-
-test "outgoing mailboxes are the ones the user writes into" {
-    try testing.expect(Mailbox.sent.is_outgoing());
-    try testing.expect(Mailbox.drafts.is_outgoing());
-    try testing.expect(!Mailbox.inbox.is_outgoing());
-    try testing.expect(!Mailbox.archive.is_outgoing());
-    try testing.expect(!Mailbox.trash.is_outgoing());
-    try testing.expect(!Mailbox.junk.is_outgoing());
 }
