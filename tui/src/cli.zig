@@ -33,13 +33,13 @@ pub fn parse(args: []const []const u8) Action {
             seen_demo = true;
             continue;
         }
-        if (isFlag(arg)) return .{ .usage_error = .{ .unknown_flag = arg } };
+        if (is_flag(arg)) return .{ .usage_error = .{ .unknown_flag = arg } };
         return .{ .usage_error = .{ .unexpected_argument = arg } };
     }
     return .launch;
 }
 
-fn isFlag(arg: []const u8) bool {
+fn is_flag(arg: []const u8) bool {
     return arg.len > 1 and arg[0] == '-';
 }
 

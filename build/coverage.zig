@@ -13,7 +13,7 @@ pub const FileCoverage = struct {
     covered: u64,
     total: u64,
 
-    pub fn isComplete(self: FileCoverage) bool {
+    pub fn is_complete(self: FileCoverage) bool {
         return self.covered == self.total;
     }
 };
@@ -29,23 +29,23 @@ pub const Report = struct {
         self.* = undefined;
     }
 
-    pub fn incompleteCount(self: *const Report) u32 {
+    pub fn incomplete_count(self: *const Report) u32 {
         var count: u32 = 0;
         for (self.files) |file| {
-            if (!file.isComplete()) count += 1;
+            if (!file.is_complete()) count += 1;
         }
         return count;
     }
 
     /// The gate: every measured line covered, and the report is not empty.
-    pub fn isComplete(self: *const Report) bool {
+    pub fn is_complete(self: *const Report) bool {
         if (self.files.len == 0) return false;
         if (self.total == 0) return false;
         return self.covered == self.total;
     }
 
     /// Basis points, so 100.00% is printed without floating point.
-    pub fn percentBasisPoints(self: *const Report) u32 {
+    pub fn percent_basis_points(self: *const Report) u32 {
         if (self.total == 0) return 0;
         const scaled = self.covered * 10_000;
         return @intCast(scaled / self.total);
@@ -54,7 +54,7 @@ pub const Report = struct {
 
 /// Error set is inferred: `std.json`'s error set is generic over the target type,
 /// and naming it here would couple this helper to a std internal.
-pub fn parseReport(gpa: std.mem.Allocator, json: []const u8) !Report {
+pub fn parse_report(gpa: std.mem.Allocator, json: []const u8) !Report {
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
     defer parsed.deinit();
 
@@ -86,8 +86,8 @@ pub fn parseReport(gpa: std.mem.Allocator, json: []const u8) !Report {
             .string => |string| string,
             else => return error.MalformedReport,
         };
-        const file_covered = try countValue(entry.get("covered_lines") orelse return error.MalformedReport);
-        const file_total = try countValue(entry.get("total_lines") orelse return error.MalformedReport);
+        const file_covered = try count_value(entry.get("covered_lines") orelse return error.MalformedReport);
+        const file_total = try count_value(entry.get("total_lines") orelse return error.MalformedReport);
         if (file_covered > file_total) return error.MalformedReport;
         // The JSON tree owns `path`; dupe it so the report outlives the parse.
         files[index] = .{ .path = try gpa.dupe(u8, path), .covered = file_covered, .total = file_total };
@@ -99,7 +99,7 @@ pub fn parseReport(gpa: std.mem.Allocator, json: []const u8) !Report {
     return .{ .files = files, .covered = covered, .total = total };
 }
 
-fn countValue(value: std.json.Value) !u64 {
+fn count_value(value: std.json.Value) !u64 {
     return switch (value) {
         .integer => |number| if (number < 0) error.MalformedReport else @intCast(number),
         .string => |text| std.fmt.parseInt(u64, text, 10) catch error.MalformedReport,
@@ -109,15 +109,15 @@ fn countValue(value: std.json.Value) !u64 {
 
 /// Writes the per-file table and the summary. Only the summary verdict matters
 /// to the gate, but the table is what tells a human where the gap is.
-pub fn printReport(report: *const Report, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+pub fn print_report(report: *const Report, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     for (report.files) |file| {
-        if (file.isComplete()) {
+        if (file.is_complete()) {
             try writer.print("  ok    {s} ({d} lines)\n", .{ file.path, file.total });
         } else {
             try writer.print("  GAP   {s} ({d}/{d} lines)\n", .{ file.path, file.covered, file.total });
         }
     }
-    const basis_points = report.percentBasisPoints();
+    const basis_points = report.percent_basis_points();
     try writer.print(
         "coverage: {d}.{d:0>2}% ({d}/{d} lines), {d} file(s) with gaps\n",
         .{
@@ -125,7 +125,7 @@ pub fn printReport(report: *const Report, writer: *std.Io.Writer) std.Io.Writer.
             basis_points % 100,
             report.covered,
             report.total,
-            report.incompleteCount(),
+            report.incomplete_count(),
         },
     );
 }
@@ -151,7 +151,7 @@ pub fn main() !u8 {
         return 1;
     };
 
-    var report = parseReport(gpa, buffer[0..bytes_read]) catch |err| {
+    var report = parse_report(gpa, buffer[0..bytes_read]) catch |err| {
         std.debug.print("coverage: cannot parse {s}: {t}\n", .{ report_path, err });
         return 1;
     };
@@ -159,8 +159,8 @@ pub fn main() !u8 {
 
     var output_buffer: [64 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output_buffer);
-    printReport(&report, &writer) catch {};
+    print_report(&report, &writer) catch {};
     std.debug.print("{s}", .{writer.buffered()});
 
-    return if (report.isComplete()) 0 else 1;
+    return if (report.is_complete()) 0 else 1;
 }

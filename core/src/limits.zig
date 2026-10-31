@@ -20,8 +20,8 @@ pub const name_max: u32 = 48;
 /// Maximum bytes of the local part of an address, per RFC 5321.
 pub const local_max: u32 = 64;
 
-/// Maximum bytes of a domain, per RFC 5321.
-pub const domain_max: u32 = 128;
+/// Maximum bytes of a domain, per RFC 1035.
+pub const domain_max: u32 = 255;
 
 /// Maximum bytes of an addr-spec (`local@domain`), per RFC 5321.
 pub const address_max: u32 = 254;

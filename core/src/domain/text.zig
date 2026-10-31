@@ -42,7 +42,7 @@ pub fn Text(comptime capacity: u32) type {
 
         /// Appends one printable ASCII byte. Anything else is a programmer bug:
         /// the caller (a key decoder) only forwards printable keys.
-        pub fn appendAscii(self: *Self, byte: u8) void {
+        pub fn append_ascii(self: *Self, byte: u8) void {
             assert(byte >= 0x20);
             assert(byte <= 0x7e);
             if (self.len == capacity) return;
@@ -52,7 +52,7 @@ pub fn Text(comptime capacity: u32) type {
 
         /// Removes the last codepoint. Multi-byte codepoints are removed whole,
         /// so the buffer never holds a dangling continuation byte.
-        pub fn popCodepoint(self: *Self) void {
+        pub fn pop_codepoint(self: *Self) void {
             assert(self.len <= capacity);
             if (self.len == 0) return;
 
@@ -75,7 +75,7 @@ pub fn Text(comptime capacity: u32) type {
 
         /// Formats into the buffer. If the result does not fit it is truncated at
         /// a codepoint boundary, matching every other ingress path.
-        pub fn setFmt(self: *Self, comptime fmt: []const u8, args: anytype) void {
+        pub fn set_fmt(self: *Self, comptime fmt: []const u8, args: anytype) void {
             // One spare byte so a result that exactly fills `capacity` is not
             // mistaken for an overflow, and the writer reports the valid prefix
             // instead of leaving uninitialized bytes in the buffer.
@@ -90,16 +90,16 @@ pub fn Text(comptime capacity: u32) type {
             return self.buffer[0..self.len];
         }
 
-        pub fn isEmpty(self: *const Self) bool {
+        pub fn is_empty(self: *const Self) bool {
             return self.len == 0;
         }
 
-        pub fn eqlBytes(self: *const Self, bytes: []const u8) bool {
+        pub fn eql_bytes(self: *const Self, bytes: []const u8) bool {
             return std.mem.eql(u8, self.slice(), bytes);
         }
 
         pub fn eql(self: *const Self, other: *const Self) bool {
-            return self.eqlBytes(other.slice());
+            return self.eql_bytes(other.slice());
         }
 
         pub fn format(self: *const Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -197,14 +197,14 @@ test "Text: init copies, slice round-trips, capacity is exact" {
     const text = Tiny.init("hello");
     try testing.expectEqualStrings("hello", text.slice());
     try testing.expectEqual(@as(u32, 5), text.len);
-    try testing.expect(!text.isEmpty());
+    try testing.expect(!text.is_empty());
 }
 
 test "Text: empty input yields an empty slice" {
     const Tiny = Text(8);
     const text = Tiny.init("");
     try testing.expectEqualStrings("", text.slice());
-    try testing.expect(text.isEmpty());
+    try testing.expect(text.is_empty());
 }
 
 test "Text: truncates at the capacity" {
@@ -280,52 +280,52 @@ test "Text: clear zeroes the buffer" {
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 0, 0, 0, 0, 0 }, &text.buffer);
 }
 
-test "Text: appendAscii appends printable bytes and stops at capacity" {
+test "Text: append_ascii appends printable bytes and stops at capacity" {
     const Tiny = Text(3);
     var text = Tiny.init("");
-    text.appendAscii('a');
-    text.appendAscii('b');
-    text.appendAscii('c');
-    text.appendAscii('d');
+    text.append_ascii('a');
+    text.append_ascii('b');
+    text.append_ascii('c');
+    text.append_ascii('d');
     try testing.expectEqualStrings("abc", text.slice());
 }
 
-test "Text: popCodepoint removes one ASCII byte at a time" {
+test "Text: pop_codepoint removes one ASCII byte at a time" {
     const Tiny = Text(8);
     var text = Tiny.init("abc");
-    text.popCodepoint();
+    text.pop_codepoint();
     try testing.expectEqualStrings("ab", text.slice());
-    text.popCodepoint();
-    text.popCodepoint();
-    text.popCodepoint();
-    try testing.expect(text.isEmpty());
+    text.pop_codepoint();
+    text.pop_codepoint();
+    text.pop_codepoint();
+    try testing.expect(text.is_empty());
 }
 
-test "Text: popCodepoint removes a whole multibyte codepoint" {
+test "Text: pop_codepoint removes a whole multibyte codepoint" {
     const Tiny = Text(8);
     var text = Tiny.init("aé");
-    text.popCodepoint();
+    text.pop_codepoint();
     try testing.expectEqualStrings("a", text.slice());
 }
 
-test "Text: setFmt writes formatted output" {
+test "Text: set_fmt writes formatted output" {
     const Tiny = Text(16);
     var text = Tiny.init("");
-    text.setFmt("{d} unread", .{@as(u32, 3)});
+    text.set_fmt("{d} unread", .{@as(u32, 3)});
     try testing.expectEqualStrings("3 unread", text.slice());
 }
 
-test "Text: setFmt truncates when the output does not fit" {
+test "Text: set_fmt truncates when the output does not fit" {
     const Tiny = Text(4);
     var text = Tiny.init("");
-    text.setFmt("abcdef", .{});
+    text.set_fmt("abcdef", .{});
     try testing.expectEqualStrings("abcd", text.slice());
 }
 
-test "Text: setFmt output that exactly fills capacity is kept whole" {
+test "Text: set_fmt output that exactly fills capacity is kept whole" {
     const Tiny = Text(4);
     var text = Tiny.init("");
-    text.setFmt("abcd", .{});
+    text.set_fmt("abcd", .{});
     try testing.expectEqualStrings("abcd", text.slice());
 }
 
@@ -339,11 +339,11 @@ test "Text: format propagates a full writer" {
     try testing.expectError(error.WriteFailed, text.format(&writer));
 }
 
-test "Text: eqlBytes and eql compare contents" {
+test "Text: eql_bytes and eql compare contents" {
     const Tiny = Text(8);
     const text = Tiny.init("same");
-    try testing.expect(text.eqlBytes("same"));
-    try testing.expect(!text.eqlBytes("other"));
+    try testing.expect(text.eql_bytes("same"));
+    try testing.expect(!text.eql_bytes("other"));
     var other = Tiny.init("same");
     try testing.expect(text.eql(&other));
     other.set("diff");

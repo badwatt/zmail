@@ -171,7 +171,7 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     kcov.addArg(
         \\set -e
         \\rm -rf .coverage coverage
-\\mkdir -p .coverage
+        \\mkdir -p .coverage
         \\export CORE_BIN="$1" TUI_BIN="$2" REPORT_BIN="$3"
         \\nix-shell --quiet -p kcov --run '
         \\  kcov --include-pattern="core/src,tui/src" .coverage/core "$CORE_BIN" &&
