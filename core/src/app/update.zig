@@ -336,7 +336,7 @@ fn compose_sent(state: *State) void {
     state.compose.active = false;
     state.compose.field = .to;
     state.view = .list;
-    state.set_status("Message sent", .{});
+    state.set_status("Message sent · 2 opens Sent", .{});
 }
 
 fn compose_failed(state: *State) void {
@@ -1151,7 +1151,7 @@ test "a successful send closes the draft; a failure keeps it and alerts" {
     _ = apply(&fixture.state, &fixture.store, .send_succeeded);
     try testing.expectEqual(View.list, fixture.state.view);
     try testing.expect(!fixture.state.compose.active);
-    try testing.expectEqualStrings("Message sent", fixture.state.status.slice());
+    try testing.expectEqualStrings("Message sent · 2 opens Sent", fixture.state.status.slice());
 }
 
 test "refresh asks for the current mailbox and says so" {

@@ -553,7 +553,7 @@ test "composing and sending with a working outbox closes the draft" {
 
     try testing.expectEqual(@as(u32, 1), outbox.sent);
     try testing.expectEqual(core.state.View.list, rig.session.state.view);
-    try testing.expectEqualStrings("Message sent", rig.session.state.status.slice());
+    try testing.expectEqualStrings("Message sent · 2 opens Sent", rig.session.state.status.slice());
 }
 
 test "sending without an outbox keeps the draft and alerts" {

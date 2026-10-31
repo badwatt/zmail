@@ -57,7 +57,7 @@ mistaken for the next mailbox's badge. The active tab is underlined.
 Hints are two-tone: the key in the accent color, the action dim. They are
 contextual, not a static manual:
 
-- list: `j/k move · Enter open · / search · d archive · ? help`
+- list: `j/k move · Enter open · c compose · r reply · / search · ? help`
 - reader: `j/k scroll · Space page · q back · u unread · d archive`
 - search: `type filter · Enter apply · Esc cancel`
 - help: `any key close help`
@@ -128,6 +128,11 @@ text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
 A reply prefills the recipient and `Re: <subject>` and starts in the body. The
 draft survives a failed send. Non-ASCII text is sent as UTF-8; a subject with
 non-ASCII characters will need MIME encoding in a later version.
+
+Empty fields show a dim hint (`someone@example.com`, `(no subject)`, `Write your
+message.`), and the cursor sits in the first free cell. In demo mode, sending
+appends the message to Sent and the status line says so: `Message sent · 2 opens
+Sent`.
 
 ## Mouse
 

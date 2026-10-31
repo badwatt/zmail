@@ -234,6 +234,25 @@ fn render_compose_field(
 ) void {
     _ = out.put_text(1, y, label, 8, inputs.theme.dim);
     const active = inputs.state.compose.field == field;
+
+    if (value.len == 0) {
+        const placeholder = switch (field) {
+            .to => "someone@example.com",
+            .subject => "(no subject)",
+            .body => "",
+        };
+        if (active) {
+            // The cursor cell stays free, so the hint reads after it.
+            out.put(10, y, ' ', inputs.theme.text.with_reverse());
+            if (placeholder.len > 0) {
+                _ = out.put_text(11, y, placeholder, lay.columns -| 13, inputs.theme.dim);
+            }
+        } else if (placeholder.len > 0) {
+            _ = out.put_text(10, y, placeholder, lay.columns -| 12, inputs.theme.dim);
+        }
+        return;
+    }
+
     const style = if (active) inputs.theme.text.with_bold() else inputs.theme.text;
     const x = @as(u16, 10) + out.put_text(10, y, value, lay.columns -| 12, style);
     if (active) out.put(x, y, ' ', inputs.theme.text.with_reverse());
@@ -247,6 +266,12 @@ fn render_compose_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) voi
     const width = lay.columns -| 2;
     var wrapped: wrap.Wrapped = .{};
     wrap.wrap(body, width, &wrapped);
+
+    if (body.len == 0) {
+        // Leave the cursor cell free so the hint is not overwritten.
+        const hint_x: u16 = if (inputs.state.compose.field == .body) 2 else 1;
+        _ = out.put_text(hint_x, compose_rows, "Write your message.", width -| (hint_x - 1), inputs.theme.dim);
+    }
 
     // Keep the end of the draft visible: typing happens at the end.
     const first = if (wrapped.len > rows) wrapped.len - rows else 0;
@@ -330,17 +355,18 @@ const Hint = struct {
 const list_hints = [_]Hint{
     .{ .keys = "j/k", .action = "move" },
     .{ .keys = "Enter", .action = "open" },
+    .{ .keys = "c", .action = "compose" },
+    .{ .keys = "r", .action = "reply" },
     .{ .keys = "/", .action = "search" },
-    .{ .keys = "d", .action = "archive" },
     .{ .keys = "?", .action = "help" },
 };
 
 const reader_hints = [_]Hint{
     .{ .keys = "j/k", .action = "scroll" },
     .{ .keys = "Space", .action = "page" },
+    .{ .keys = "r", .action = "reply" },
     .{ .keys = "q", .action = "back" },
     .{ .keys = "u", .action = "unread" },
-    .{ .keys = "d", .action = "archive" },
 };
 
 const search_hints = [_]Hint{
@@ -447,6 +473,8 @@ const help_rows = [_]Hint{
     .{ .keys = "Ctrl+D / U", .action = "half page" },
     .{ .keys = "PageDown / Up", .action = "page" },
     .{ .keys = "Enter / l / o", .action = "open message" },
+    .{ .keys = "c", .action = "compose new" },
+    .{ .keys = "r", .action = "reply" },
     .{ .keys = "h / q / Esc", .action = "back, close" },
     .{ .keys = "u", .action = "read / unread" },
     .{ .keys = "s / *", .action = "star" },
@@ -810,6 +838,25 @@ test "frame keeps the reader under the help overlay" {
     try row_contains(&out, 1, "Keys");
 }
 
+test "the composer shows placeholders for empty fields" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .compose;
+    f.state.compose.reset();
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+    try row_contains(&out, 0, "someone@example.com");
+    try row_contains(&out, 1, "(no subject)");
+    try row_contains(&out, 3, "Write your message.");
+
+    // In the body, the cursor takes the first cell and the hint moves right.
+    f.state.compose.field = .body;
+    frame(f.inputs(100, 24), &out);
+    try testing.expect(out.cells[3][1].style.attrs.reverse);
+    try row_contains(&out, 3, "Write your message.");
+}
+
 test "frame renders the compose view: fields, rule, and body" {
     var f = try fixture();
     defer f.deinit();
@@ -946,6 +993,8 @@ test "frame shows contextual hints and the list position" {
 
     try row_contains(&out, 23, "j/k");
     try row_contains(&out, 23, "move");
+    try row_contains(&out, 23, "compose");
+    try row_contains(&out, 23, "reply");
     try row_contains(&out, 23, "2/3");
 }
 
