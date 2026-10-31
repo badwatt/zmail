@@ -164,7 +164,7 @@ fn isControl(codepoint: u21) bool {
 /// ASCII case-insensitive substring search. Non-ASCII bytes are compared
 /// exactly: we do not attempt Unicode case folding (and must not, for search
 /// correctness on attacker-supplied text). An empty needle matches.
-pub fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+pub fn contains_ignore_case(haystack: []const u8, needle: []const u8) bool {
     if (needle.len == 0) return true;
     if (needle.len > haystack.len) return false;
     var start: usize = 0;
@@ -390,23 +390,23 @@ test "isControl: covers C0, DEL, C1 and the printable boundary" {
     try testing.expect(!isControl(0xa0));
 }
 
-test "containsIgnoreCase: matches ignoring ASCII case" {
-    try testing.expect(containsIgnoreCase("Zig Release", "zig"));
-    try testing.expect(containsIgnoreCase("Zig Release", "RELEASE"));
-    try testing.expect(!containsIgnoreCase("Zig Release", "rust"));
+test "contains_ignore_case: matches ignoring ASCII case" {
+    try testing.expect(contains_ignore_case("Zig Release", "zig"));
+    try testing.expect(contains_ignore_case("Zig Release", "RELEASE"));
+    try testing.expect(!contains_ignore_case("Zig Release", "rust"));
 }
 
-test "containsIgnoreCase: empty needle matches, oversized needle does not" {
-    try testing.expect(containsIgnoreCase("abc", ""));
-    try testing.expect(!containsIgnoreCase("ab", "abc"));
+test "contains_ignore_case: empty needle matches, oversized needle does not" {
+    try testing.expect(contains_ignore_case("abc", ""));
+    try testing.expect(!contains_ignore_case("ab", "abc"));
 }
 
-test "containsIgnoreCase: matches at the final possible offset" {
-    try testing.expect(containsIgnoreCase("xxabc", "abc"));
-    try testing.expect(!containsIgnoreCase("xxab", "abc"));
+test "contains_ignore_case: matches at the final possible offset" {
+    try testing.expect(contains_ignore_case("xxabc", "abc"));
+    try testing.expect(!contains_ignore_case("xxab", "abc"));
 }
 
-test "containsIgnoreCase: non-ASCII bytes compare exactly" {
-    try testing.expect(containsIgnoreCase("olé", "olé"));
-    try testing.expect(!containsIgnoreCase("olé", "OLE"));
+test "contains_ignore_case: non-ASCII bytes compare exactly" {
+    try testing.expect(contains_ignore_case("olé", "olé"));
+    try testing.expect(!contains_ignore_case("olé", "OLE"));
 }

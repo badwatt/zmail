@@ -15,12 +15,16 @@ the coverage gate stays at 100%.
 
 The port exists; this milestone fills it in.
 
-- **Protocol codec, pure and tested.** IMAP response parsing (tagged, untagged,
-  literals, `FETCH` attributes, `ENVELOPE`, `FLAGS`, `INTERNALDATE`) as a
-  function from bytes to values, in `core/src/protocol/`. No sockets in the
-  parser, so it is 100% testable like the rest of the core.
-- **Commands as data.** `LOGIN`, `SELECT`, `FETCH`, `STORE`, `MOVE`, `SEARCH`,
-  `LOGOUT`, each rendered into a bounded buffer.
+- **Protocol codec, pure and tested (done: M2.1).** `core/src/protocol/imap/`:
+  a tokenizer (atoms, quoted strings, literals), commands rendered into bounded
+  buffers with quoting and tag validation, and response parsing for tagged
+  status, `EXISTS`/`RECENT`/`EXPUNGE`, capabilities, and `FETCH` attributes
+  (`UID`, `FLAGS`, `RFC822.SIZE`, `INTERNALDATE`). 100% line coverage, no
+  sockets involved. `ENVELOPE` parsing lands with the adapter.
+- **Transport (next).** Bounded line reader over `std.crypto.tls.Client`,
+  timeouts, and a scripted-conversation test that drives a fake server.
+- **The adapter.** Implements `ports/mail.Mail` on top of the codec and the
+  transport, mapping errors onto `Unavailable` / `NotFound` / `Rejected`.
 - **TLS adapter.** `std.crypto.tls.Client` with certificate verification
   mandatory. STARTTLS upgrade. A bounded, line-oriented transport with
   timeouts.

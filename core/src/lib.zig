@@ -27,6 +27,8 @@ pub const state = @import("app/state.zig");
 pub const update = @import("app/update.zig");
 pub const sync = @import("app/sync.zig");
 
+pub const imap = @import("protocol/imap.zig");
+
 pub const demo = @import("demo.zig");
 
 // Referenced from the module root's test block so `zig build test` includes
@@ -50,5 +52,6 @@ test {
     _ = @import("app/state.zig");
     _ = @import("app/update.zig");
     _ = @import("app/sync.zig");
+    _ = @import("protocol/imap.zig");
     _ = @import("demo.zig");
 }

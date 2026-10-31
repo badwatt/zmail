@@ -440,14 +440,20 @@ test "Ctrl+Q quits from the list" {
     try testing.expect(rig.session.state.quit);
 }
 
-test "q alone never quits" {
+test "q quits from the list but not from the search field" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
 
+    rig.send("/");
     rig.send("q");
     try testing.expect(!rig.session.state.quit);
+    try testing.expectEqualStrings("q", rig.session.state.query.slice());
+    rig.send("\x1b");
+
+    rig.send("q");
+    try testing.expect(rig.session.state.quit);
 }
 
 test "closed stdin ends the session" {

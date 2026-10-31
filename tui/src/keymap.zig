@@ -21,13 +21,31 @@ pub const Context = struct {
 
 pub fn translate(key: Key, context: Context) ?Command {
     if (context.mode == .search) return search_key(key);
-    if (context.view == .help) {
-        return switch (key) {
-            .ctrl => |letter| if (letter == 'c' or letter == 'q') .quit else .toggle_help,
-            else => .toggle_help,
-        };
-    }
+    if (context.mode == .help_search) return help_search_key(key);
+    if (context.view == .help) return help_key(key);
     return normal_key(key, context.view);
+}
+
+fn help_key(key: Key) ?Command {
+    return switch (key) {
+        .ctrl => |letter| if (letter == 'c' or letter == 'q') .quit else .toggle_help,
+        .char => |codepoint| if (codepoint == '/') .begin_help_search else .toggle_help,
+        else => .toggle_help,
+    };
+}
+
+fn help_search_key(key: Key) ?Command {
+    return switch (key) {
+        .char => |codepoint| if (codepoint >= 0x20 and codepoint <= 0x7e)
+            .{ .help_search_char = @intCast(codepoint) }
+        else
+            null,
+        .backspace => .help_search_backspace,
+        .enter => .help_search_commit,
+        .escape => .help_search_cancel,
+        .ctrl => |letter| if (letter == 'c' or letter == 'q') .quit else null,
+        else => null,
+    };
 }
 
 fn normal_key(key: Key, view: View) ?Command {
@@ -58,7 +76,8 @@ fn char_command(codepoint: u21, view: View) ?Command {
         'g' => .{ .move = .top },
         'G' => .{ .move = .bottom },
         'l', 'o' => .open_selected,
-        'h', 'q' => if (view == .list) null else .dismiss,
+        'q' => .dismiss,
+        'h' => if (view == .list) null else .dismiss,
         'u' => .toggle_unread,
         's', '*' => .toggle_flag,
         'd' => .archive_selected,
@@ -167,7 +186,7 @@ test "opening and dismissing" {
         .{ .key = .{ .char = 'o' }, .expected = .open_selected },
         .{ .key = .right, .expected = .open_selected },
         .{ .key = .escape, .expected = null },
-        .{ .key = .{ .char = 'q' }, .expected = null },
+        .{ .key = .{ .char = 'q' }, .expected = .dismiss },
         .{ .key = .{ .char = 'h' }, .expected = null },
         .{ .key = .{ .char = 'x' }, .expected = null },
     };
@@ -217,12 +236,36 @@ test "actions: unread, flag, archive, delete, search, help, refresh" {
     for (cases) |case| try check(case);
 }
 
-test "help closes on any key, but Ctrl+C and Ctrl+Q still quit" {
+test "help closes on any key, / starts a filter, and Ctrl+C/Ctrl+Q quit" {
     const help: Context = .{ .view = .help };
     try check(.{ .key = .{ .char = 'j' }, .context = help, .expected = .toggle_help });
+    try check(.{ .key = .{ .char = 'q' }, .context = help, .expected = .toggle_help });
     try check(.{ .key = .escape, .context = help, .expected = .toggle_help });
+    try check(.{ .key = .{ .char = '/' }, .context = help, .expected = .begin_help_search });
     try check(.{ .key = .{ .ctrl = 'c' }, .context = help, .expected = .quit });
     try check(.{ .key = .{ .ctrl = 'q' }, .context = help, .expected = .quit });
+}
+
+test "filtering the help overlay: type, delete, apply, cancel" {
+    const filtering: Context = .{ .view = .help, .mode = .help_search };
+    try check(.{ .key = .{ .char = 'a' }, .context = filtering, .expected = .{ .help_search_char = 'a' } });
+    try check(.{ .key = .{ .char = '/' }, .context = filtering, .expected = .{ .help_search_char = '/' } });
+    try check(.{ .key = .{ .char = 0xe9 }, .context = filtering, .expected = null });
+    try check(.{ .key = .backspace, .context = filtering, .expected = .help_search_backspace });
+    try check(.{ .key = .enter, .context = filtering, .expected = .help_search_commit });
+    try check(.{ .key = .escape, .context = filtering, .expected = .help_search_cancel });
+    try check(.{ .key = .{ .ctrl = 'c' }, .context = filtering, .expected = .quit });
+    try check(.{ .key = .{ .ctrl = 'q' }, .context = filtering, .expected = .quit });
+    try check(.{ .key = .down, .context = filtering, .expected = null });
+    try check(.{ .key = .{ .ctrl = 'd' }, .context = filtering, .expected = null });
+}
+
+test "q quits from the list but never from a text field" {
+    try check(.{ .key = .{ .char = 'q' }, .expected = .dismiss });
+    const search: Context = .{ .mode = .search };
+    try check(.{ .key = .{ .char = 'q' }, .context = search, .expected = .{ .search_char = 'q' } });
+    const filtering: Context = .{ .view = .help, .mode = .help_search };
+    try check(.{ .key = .{ .char = 'q' }, .context = filtering, .expected = .{ .help_search_char = 'q' } });
 }
 
 test "search mode types, edits, and commits" {

@@ -1,0 +1,419 @@
+//! IMAP responses: one complete line in, one typed value out.
+//!
+//! The transport hands the parser a line (or a line plus its inline literals)
+//! and the parser classifies it. Anything it does not model is still reported
+//! as data (`other`, `unknown`) instead of being dropped, so the adapter can log
+//! it and move on.
+//!
+//! This layer is deliberately pure: no sockets, no TLS, no clock. That is what
+//! makes a protocol conversation a unit test.
+
+const std = @import("std");
+
+const tokenizer = @import("tokenizer.zig");
+const time = @import("../../domain/time.zig");
+const Flags = @import("../../domain/message.zig").Flags;
+
+pub const Kind = enum { ok, no, bad };
+
+pub const Tagged = struct {
+    tag: []const u8,
+    kind: Kind,
+    text: []const u8,
+};
+
+pub const Fetch = struct {
+    sequence: u32 = 0,
+    uid: ?u32 = null,
+    flags: ?Flags = null,
+    /// Unix seconds from INTERNALDATE, or null when absent.
+    internal_date: ?i64 = null,
+    size_bytes: ?u32 = null,
+};
+
+pub const Untagged = union(enum) {
+    ok: []const u8,
+    no: []const u8,
+    bad: []const u8,
+    bye: []const u8,
+    preauth: []const u8,
+    exists: u32,
+    recent: u32,
+    expunge: u32,
+    fetch: Fetch,
+    capabilities: []const u8,
+    other: []const u8,
+};
+
+pub const Response = union(enum) {
+    continuation: []const u8,
+    tagged: Tagged,
+    untagged: Untagged,
+    /// Structurally valid but not a shape we model.
+    unknown: []const u8,
+};
+
+pub const Error = error{
+    Malformed,
+    InvalidDate,
+};
+
+/// Parses one complete response line (CRLF optional).
+pub fn parse(input: []const u8) Error!Response {
+    const line = std.mem.trimEnd(u8, input, "\r\n");
+    if (line.len == 0) return error.Malformed;
+
+    if (line[0] == '+') {
+        return .{ .continuation = trimLeft(line[1..]) };
+    }
+    if (line[0] == '*') {
+        if (line.len < 2) return error.Malformed;
+        if (line[1] != ' ') return error.Malformed;
+        return .{ .untagged = try untagged(line[2..]) };
+    }
+    return tagged(line);
+}
+
+fn tagged(line: []const u8) Error!Response {
+    const tag_end = std.mem.indexOfScalar(u8, line, ' ') orelse return error.Malformed;
+    const rest = trimLeft(line[tag_end + 1 ..]);
+    if (rest.len == 0) return error.Malformed;
+
+    const status_end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+    const status = rest[0..status_end];
+    const text = if (status_end == rest.len) "" else trimLeft(rest[status_end + 1 ..]);
+
+    return .{ .tagged = .{
+        .tag = line[0..tag_end],
+        .kind = kindFromWord(status) orelse return error.Malformed,
+        .text = text,
+    } };
+}
+
+fn untagged(rest: []const u8) Error!Untagged {
+    const first_end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+    const first = rest[0..first_end];
+    const tail = if (first_end == rest.len) "" else trimLeft(rest[first_end + 1 ..]);
+
+    if (std.fmt.parseInt(u32, first, 10)) |sequence| {
+        return sequenceResponse(sequence, tail);
+    } else |_| {}
+
+    if (std.ascii.eqlIgnoreCase(first, "OK")) return .{ .ok = tail };
+    if (std.ascii.eqlIgnoreCase(first, "NO")) return .{ .no = tail };
+    if (std.ascii.eqlIgnoreCase(first, "BAD")) return .{ .bad = tail };
+    if (std.ascii.eqlIgnoreCase(first, "BYE")) return .{ .bye = tail };
+    if (std.ascii.eqlIgnoreCase(first, "PREAUTH")) return .{ .preauth = tail };
+    if (std.ascii.eqlIgnoreCase(first, "CAPABILITY")) return .{ .capabilities = tail };
+    return .{ .other = rest };
+}
+
+fn sequenceResponse(sequence: u32, tail: []const u8) Error!Untagged {
+    const verb_end = std.mem.indexOfScalar(u8, tail, ' ') orelse tail.len;
+    const verb = tail[0..verb_end];
+    const rest = if (verb_end == tail.len) "" else trimLeft(tail[verb_end + 1 ..]);
+
+    if (std.ascii.eqlIgnoreCase(verb, "EXISTS")) return .{ .exists = sequence };
+    if (std.ascii.eqlIgnoreCase(verb, "RECENT")) return .{ .recent = sequence };
+    if (std.ascii.eqlIgnoreCase(verb, "EXPUNGE")) return .{ .expunge = sequence };
+    if (std.ascii.eqlIgnoreCase(verb, "FETCH")) return .{ .fetch = try parseFetch(sequence, rest) };
+    return .{ .other = tail };
+}
+
+fn parseFetch(sequence: u32, text: []const u8) Error!Fetch {
+    var result = Fetch{ .sequence = sequence };
+    var tokens = tokenizer.Tokenizer.init(text);
+
+    const open = try next(&tokens);
+    if (open != .open_paren) return error.Malformed;
+
+    while (true) {
+        const token = try next(&tokens);
+        switch (token) {
+            .close_paren => break,
+            .atom => |key| {
+                if (std.ascii.eqlIgnoreCase(key, "UID")) {
+                    result.uid = try nextNumber(&tokens);
+                } else if (std.ascii.eqlIgnoreCase(key, "RFC822.SIZE")) {
+                    result.size_bytes = try nextNumber(&tokens);
+                } else if (std.ascii.eqlIgnoreCase(key, "INTERNALDATE")) {
+                    result.internal_date = try nextDate(&tokens);
+                } else if (std.ascii.eqlIgnoreCase(key, "FLAGS")) {
+                    result.flags = try parseFlags(&tokens);
+                } else {
+                    try skipValue(&tokens);
+                }
+            },
+            else => return error.Malformed,
+        }
+    }
+    return result;
+}
+
+fn next(tokens: *tokenizer.Tokenizer) Error!tokenizer.Token {
+    const maybe = tokens.next() catch return error.Malformed;
+    if (maybe) |token| return token;
+    return error.Malformed;
+}
+
+fn nextNumber(tokens: *tokenizer.Tokenizer) Error!u32 {
+    const token = try next(tokens);
+    const text = switch (token) {
+        .atom => |atom| atom,
+        else => return error.Malformed,
+    };
+    return std.fmt.parseInt(u32, text, 10) catch return error.Malformed;
+}
+
+fn nextDate(tokens: *tokenizer.Tokenizer) Error!i64 {
+    const token = try next(tokens);
+    const quoted = switch (token) {
+        .quoted => |value| value,
+        else => return error.Malformed,
+    };
+    var buffer: [32]u8 = undefined;
+    const unescaped = tokenizer.unescape(quoted, &buffer) catch return error.Malformed;
+    return parseInternalDate(unescaped) orelse error.InvalidDate;
+}
+
+fn parseFlags(tokens: *tokenizer.Tokenizer) Error!Flags {
+    var flags = Flags{};
+    const open = try next(tokens);
+    if (open != .open_paren) return error.Malformed;
+
+    while (true) {
+        const token = try next(tokens);
+        switch (token) {
+            .close_paren => return flags,
+            .atom => |atom| {
+                if (std.ascii.eqlIgnoreCase(atom, "\\Seen")) flags.unread = false;
+                if (std.ascii.eqlIgnoreCase(atom, "\\Flagged")) flags.flagged = true;
+            },
+            else => return error.Malformed,
+        }
+    }
+}
+
+/// Consumes one value: a single token, or a balanced parenthesized group.
+fn skipValue(tokens: *tokenizer.Tokenizer) Error!void {
+    const token = try next(tokens);
+    if (token != .open_paren) return;
+
+    var depth: u32 = 1;
+    while (depth > 0) {
+        const inner = try next(tokens);
+        if (inner == .open_paren) depth += 1;
+        if (inner == .close_paren) depth -= 1;
+    }
+}
+
+fn kindFromWord(word: []const u8) ?Kind {
+    if (std.ascii.eqlIgnoreCase(word, "OK")) return .ok;
+    if (std.ascii.eqlIgnoreCase(word, "NO")) return .no;
+    if (std.ascii.eqlIgnoreCase(word, "BAD")) return .bad;
+    return null;
+}
+
+fn trimLeft(text: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < text.len and text[start] == ' ') start += 1;
+    return text[start..];
+}
+
+/// `"14-Nov-2023 22:13:20 +0200"` → Unix seconds. Null when the shape is wrong.
+pub fn parseInternalDate(text: []const u8) ?i64 {
+    if (text.len != 26) return null;
+    if (text[2] != '-' or text[6] != '-') return null;
+    if (text[11] != ' ' or text[14] != ':' or text[17] != ':' or text[20] != ' ') return null;
+
+    const month = time.month_from_abbrev(text[3..6]) orelse return null;
+    const day = std.fmt.parseInt(u8, text[0..2], 10) catch return null;
+    const year = std.fmt.parseInt(i32, text[7..11], 10) catch return null;
+    const hour = std.fmt.parseInt(u8, text[12..14], 10) catch return null;
+    const minute = std.fmt.parseInt(u8, text[15..17], 10) catch return null;
+    const second = std.fmt.parseInt(u8, text[18..20], 10) catch return null;
+    const offset = parseZone(text[21..26]) orelse return null;
+
+    if (day < 1 or day > 31) return null;
+    if (hour > 23 or minute > 59 or second > 60) return null;
+    return time.unix_from_parts(year, month, day, hour, minute, second, offset);
+}
+
+fn parseZone(text: []const u8) ?i32 {
+    if (text.len != 5) return null;
+    const sign: i32 = switch (text[0]) {
+        '+' => 1,
+        '-' => -1,
+        else => return null,
+    };
+    const hours = std.fmt.parseInt(i32, text[1..3], 10) catch return null;
+    const minutes = std.fmt.parseInt(i32, text[3..5], 10) catch return null;
+    if (hours > 23 or minutes > 59) return null;
+    return sign * (hours * 3600 + minutes * 60);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "a continuation response carries its text" {
+    const response = try parse("+ send the literal\r\n");
+    try testing.expectEqualStrings("send the literal", response.continuation);
+}
+
+test "an empty continuation is valid" {
+    const response = try parse("+\r\n");
+    try testing.expectEqualStrings("", response.continuation);
+}
+
+test "tagged OK, NO, and BAD" {
+    const ok = try parse("a1 OK LOGIN completed\r\n");
+    try testing.expectEqualStrings("a1", ok.tagged.tag);
+    try testing.expectEqual(Kind.ok, ok.tagged.kind);
+    try testing.expectEqualStrings("LOGIN completed", ok.tagged.text);
+
+    const no = try parse("a2 NO [AUTHENTICATIONFAILED] nope");
+    try testing.expectEqual(Kind.no, no.tagged.kind);
+    try testing.expectEqualStrings("[AUTHENTICATIONFAILED] nope", no.tagged.text);
+
+    const bad = try parse("a3 BAD unknown command");
+    try testing.expectEqual(Kind.bad, bad.tagged.kind);
+}
+
+test "a tagged status without text is valid" {
+    const response = try parse("a4 OK");
+    try testing.expectEqualStrings("", response.tagged.text);
+}
+
+test "tagged responses validate their structure" {
+    try testing.expectError(error.Malformed, parse("notag"));
+    try testing.expectError(error.Malformed, parse("a1 "));
+    try testing.expectError(error.Malformed, parse("a1 MAYBE whatever"));
+}
+
+test "untagged status responses" {
+    const ok = try parse("* OK [CAPABILITY IMAP4rev1] ready");
+    try testing.expectEqualStrings("[CAPABILITY IMAP4rev1] ready", ok.untagged.ok);
+
+    const no = try parse("* NO quota exceeded");
+    try testing.expectEqualStrings("quota exceeded", no.untagged.no);
+
+    const bad = try parse("* BAD what");
+    try testing.expectEqualStrings("what", bad.untagged.bad);
+
+    const bye = try parse("* BYE logging out");
+    try testing.expectEqualStrings("logging out", bye.untagged.bye);
+
+    const preauth = try parse("* PREAUTH welcome");
+    try testing.expectEqualStrings("welcome", preauth.untagged.preauth);
+}
+
+test "mailbox counts" {
+    try testing.expectEqual(@as(u32, 3), (try parse("* 3 EXISTS")).untagged.exists);
+    try testing.expectEqual(@as(u32, 1), (try parse("* 1 RECENT")).untagged.recent);
+    try testing.expectEqual(@as(u32, 5), (try parse("* 5 EXPUNGE")).untagged.expunge);
+}
+
+test "capabilities and unknown untagged data are reported, not dropped" {
+    const caps = try parse("* CAPABILITY IMAP4rev1 IDLE MOVE");
+    try testing.expectEqualStrings("IMAP4rev1 IDLE MOVE", caps.untagged.capabilities);
+
+    const other = try parse("* XSOMETHING new");
+    try testing.expectEqualStrings("XSOMETHING new", other.untagged.other);
+
+    const unknown_verb = try parse("* 12 UNKNOWN");
+    try testing.expectEqualStrings("UNKNOWN", unknown_verb.untagged.other);
+}
+
+test "a full FETCH response parses every attribute" {
+    const line = "* 12 FETCH (UID 42 FLAGS (\\Seen \\Flagged) RFC822.SIZE 4096 " ++
+        "INTERNALDATE \"14-Nov-2023 22:13:20 +0000\")";
+    const fetch = (try parse(line)).untagged.fetch;
+
+    try testing.expectEqual(@as(u32, 12), fetch.sequence);
+    try testing.expectEqual(@as(u32, 42), fetch.uid.?);
+    try testing.expectEqual(@as(u32, 4096), fetch.size_bytes.?);
+    try testing.expectEqual(@as(i64, 1_700_000_000), fetch.internal_date.?);
+    try testing.expect(!fetch.flags.?.unread);
+    try testing.expect(fetch.flags.?.flagged);
+}
+
+test "FETCH attributes may arrive in any order and be absent" {
+    const fetch = (try parse("* 1 FETCH (UID 7)")).untagged.fetch;
+    try testing.expectEqual(@as(u32, 7), fetch.uid.?);
+    try testing.expect(fetch.flags == null);
+    try testing.expect(fetch.internal_date == null);
+    try testing.expect(fetch.size_bytes == null);
+}
+
+test "FETCH with empty flags means unread and unflagged" {
+    const fetch = (try parse("* 2 FETCH (FLAGS () UID 9)")).untagged.fetch;
+    try testing.expect(fetch.flags.?.unread);
+    try testing.expect(!fetch.flags.?.flagged);
+}
+
+test "FETCH skips unknown attributes, including nested lists" {
+    const fetch = (try parse("* 3 FETCH (ENVELOPE (NIL NIL) UID 11 X-UNKNOWN \"x\")")).untagged.fetch;
+    try testing.expectEqual(@as(u32, 11), fetch.uid.?);
+}
+
+test "FETCH tolerates a literal value" {
+    const fetch = (try parse("* 4 FETCH (BODY[HEADER] {3}\r\nabc UID 12)")).untagged.fetch;
+    try testing.expectEqual(@as(u32, 12), fetch.uid.?);
+}
+
+test "FETCH date parsing applies the zone" {
+    const fetch = (try parse("* 5 FETCH (INTERNALDATE \"14-Nov-2023 22:13:20 +0200\")")).untagged.fetch;
+    try testing.expectEqual(@as(i64, 1_699_992_800), fetch.internal_date.?);
+}
+
+test "malformed FETCH responses are refused" {
+    try testing.expectError(error.Malformed, parse("* 1 FETCH UID 7"));
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (UID)"));
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (UID notanumber)"));
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (FLAGS \\Seen)"));
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (INTERNALDATE notquoted)"));
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (UID 7"));
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL) UID 7"));
+}
+
+test "a non-atom attribute key is malformed" {
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (\"quoted\" UID 7)"));
+}
+
+test "a non-atom flag is malformed" {
+    try testing.expectError(error.Malformed, parse("* 1 FETCH (FLAGS (\"x\"))"));
+}
+
+test "a FETCH date with the wrong shape is reported as an invalid date" {
+    try testing.expectError(error.InvalidDate, parse("* 1 FETCH (INTERNALDATE \"nope\")"));
+}
+
+test "empty and truncated responses are malformed" {
+    try testing.expectError(error.Malformed, parse(""));
+    try testing.expectError(error.Malformed, parse("\r\n"));
+    try testing.expectError(error.Malformed, parse("*"));
+}
+
+test "internal dates: valid shapes" {
+    try testing.expectEqual(@as(i64, 1_700_000_000), parseInternalDate("14-Nov-2023 22:13:20 +0000").?);
+    try testing.expectEqual(@as(i64, 951_782_400), parseInternalDate("29-Feb-2000 00:00:00 +0000").?);
+    try testing.expectEqual(@as(i64, 1_699_992_800), parseInternalDate("14-Nov-2023 22:13:20 +0200").?);
+}
+
+test "internal dates: every shape error returns null" {
+    try testing.expect(parseInternalDate("short") == null);
+    try testing.expect(parseInternalDate("14/Nov/2023 22:13:20 +0000") == null);
+    try testing.expect(parseInternalDate("14-Xyz-2023 22:13:20 +0000") == null);
+    try testing.expect(parseInternalDate("14-Nov-2023 22:13:20 00000") == null);
+    try testing.expect(parseInternalDate("14-Nov-2023 22:13:20 +00x0") == null);
+    try testing.expect(parseInternalDate("14-Nov-2023 22:13:20 +9900") == null);
+    try testing.expect(parseInternalDate("00-Nov-2023 22:13:20 +0000") == null);
+    try testing.expect(parseInternalDate("14-Nov-2023 24:13:20 +0000") == null);
+}
+
+test "negative zone offsets" {
+    try testing.expectEqual(@as(i64, 1_700_018_000), parseInternalDate("14-Nov-2023 22:13:20 -0500").?);
+}

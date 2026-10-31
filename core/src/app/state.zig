@@ -15,7 +15,7 @@ const MessageId = @import("../domain/id.zig").MessageId;
 const Store = @import("../domain/store.zig").Store;
 
 pub const View = enum { list, reader, help };
-pub const Mode = enum { normal, search };
+pub const Mode = enum { normal, search, help_search };
 
 pub const State = struct {
     view: View = .list,
@@ -43,6 +43,8 @@ pub const State = struct {
 
     /// Where to return when the help overlay closes.
     help_return: View = .list,
+    /// Filter typed inside the help overlay.
+    help_filter: Text(limits.help_query_max) = .{},
 
     status: Text(limits.status_max) = .{},
     /// Errors are shown with the alert style; plain confirmations are not.

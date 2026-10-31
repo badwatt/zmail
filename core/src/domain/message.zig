@@ -4,7 +4,7 @@
 const std = @import("std");
 const limits = @import("../limits.zig");
 const Text = @import("text.zig").Text;
-const containsIgnoreCase = @import("text.zig").containsIgnoreCase;
+const contains_ignore_case = @import("text.zig").contains_ignore_case;
 const Address = @import("address.zig").Address;
 const MessageId = @import("id.zig").MessageId;
 const Mailbox = @import("mailbox.zig").Mailbox;
@@ -62,11 +62,11 @@ pub const Message = struct {
     /// ASCII only; the needle comes from the user and is never interpreted.
     pub fn matches(self: *const Message, needle: []const u8) bool {
         if (needle.len == 0) return true;
-        if (containsIgnoreCase(self.from.name.slice(), needle)) return true;
-        if (containsIgnoreCase(self.from.local.slice(), needle)) return true;
-        if (containsIgnoreCase(self.from.domain.slice(), needle)) return true;
-        if (containsIgnoreCase(self.subject.slice(), needle)) return true;
-        if (containsIgnoreCase(self.snippet.slice(), needle)) return true;
+        if (contains_ignore_case(self.from.name.slice(), needle)) return true;
+        if (contains_ignore_case(self.from.local.slice(), needle)) return true;
+        if (contains_ignore_case(self.from.domain.slice(), needle)) return true;
+        if (contains_ignore_case(self.subject.slice(), needle)) return true;
+        if (contains_ignore_case(self.snippet.slice(), needle)) return true;
         return false;
     }
 };

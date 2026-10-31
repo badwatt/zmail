@@ -49,6 +49,11 @@ pub const Command = union(enum) {
     search_backspace,
     search_commit,
     search_cancel,
+    begin_help_search,
+    help_search_char: u8,
+    help_search_backspace,
+    help_search_commit,
+    help_search_cancel,
     toggle_help,
     refresh,
     set_viewport: Viewport,
@@ -89,11 +94,16 @@ test "every command is classified for status clearing" {
         .{ .command = .search_backspace, .clears = true },
         .{ .command = .search_commit, .clears = true },
         .{ .command = .search_cancel, .clears = true },
+        .{ .command = .begin_help_search, .clears = true },
+        .{ .command = .{ .help_search_char = 'a' }, .clears = true },
+        .{ .command = .help_search_backspace, .clears = true },
+        .{ .command = .help_search_commit, .clears = true },
+        .{ .command = .help_search_cancel, .clears = true },
         .{ .command = .toggle_help, .clears = true },
         .{ .command = .refresh, .clears = true },
     };
     for (commands) |case| {
         try testing.expectEqual(case.clears, case.command.clears_status());
     }
-    try testing.expectEqual(@as(usize, 20), commands.len);
+    try testing.expectEqual(@as(usize, 25), commands.len);
 }

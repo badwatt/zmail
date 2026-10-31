@@ -77,7 +77,8 @@ and disappears on the next action.
 | `Ctrl+D` / `Ctrl+U` | half page down / up |
 | `Ctrl+F` / `Ctrl+B`, `PageDown` / `PageUp` | page down / up |
 | `Enter` `l` `o` `→` | open the selected message |
-| `h` `q` `Esc` `←` | back one layer (nothing at the top level) |
+| `q` | quit from the list, back from the reader, type `q` in a field |
+| `h` `Esc` `←` | back one layer; never quits |
 | `u` | toggle read / unread |
 | `s` `*` | star / unstar |
 | `d` | archive |
@@ -87,11 +88,16 @@ and disappears on the next action.
 | `Shift+Tab` `[` | previous mailbox |
 | `1`–`6` | jump to Inbox, Sent, Drafts, Archive, Trash, Junk |
 | `R` | refresh from the server |
-| `?` | help |
+| `?` | help (`/` filters the key list) |
 | `Ctrl+Q` `Ctrl+C` | quit. The top level never closes on `Esc`, `q`, or `h` |
 
 Search is live: typing filters as you go, `Enter` keeps the filter, `Esc`
-cancels it. `↑`/`↓` still move the cursor while typing.
+cancels it. `↑`/`↓` still move the cursor while typing. Inside the help overlay,
+`/` starts the same kind of filter over the key map itself; `Enter` keeps it and
+`Esc` clears it.
+
+`Esc` is never a quit key. The only ways out are `q` from the list (never from a
+text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
 
 ## Mouse
 

@@ -32,6 +32,9 @@ pub const host_max: u32 = 253;
 /// Maximum bytes of a message body shown in the reader.
 pub const body_max: u32 = 64 * 1024;
 
+/// Maximum bytes of the help overlay's filter.
+pub const help_query_max: u32 = 24;
+
 /// Maximum bytes of the search/filter query.
 pub const filter_max: u32 = 48;
 

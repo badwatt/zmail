@@ -42,6 +42,11 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .search_backspace => search_backspace(state, store),
         .search_commit => search_commit(state, store),
         .search_cancel => search_cancel(state, store),
+        .begin_help_search => begin_help_search(state),
+        .help_search_char => |byte| help_search_char(state, byte),
+        .help_search_backspace => help_search_backspace(state),
+        .help_search_commit => help_search_commit(state),
+        .help_search_cancel => help_search_cancel(state),
         .toggle_help => toggle_help(state),
         .refresh => apply_refresh(state, &effects),
         .set_viewport => |viewport| apply_viewport(state, viewport),
@@ -120,14 +125,19 @@ fn apply_open(state: *State, store: *Store, effects: *Effects) void {
 fn apply_dismiss(state: *State, store: *Store) void {
     switch (state.mode) {
         .search => search_cancel(state, store),
+        .help_search => help_search_cancel(state),
         .normal => switch (state.view) {
-            .help => state.view = state.help_return,
+            .help => {
+                state.view = state.help_return;
+                state.mode = .normal;
+            },
             .reader => {
                 state.view = .list;
                 state.reader_scroll = 0;
             },
-            // The list is the top level: only Ctrl+Q / Ctrl+C close the app.
-            .list => {},
+            // `q` at the top level quits. Esc never reaches this branch: the
+            // key map does not translate it to `dismiss` in the list.
+            .list => state.quit = true,
         },
     }
 }
@@ -246,13 +256,43 @@ fn search_cancel(state: *State, store: *Store) void {
     state.rebuild(store);
 }
 
+fn begin_help_search(state: *State) void {
+    if (state.view != .help) return;
+    state.mode = .help_search;
+}
+
+fn help_search_char(state: *State, byte: u8) void {
+    if (state.mode != .help_search) return;
+    if (byte < 0x20 or byte > 0x7e) return;
+    state.help_filter.append_ascii(byte);
+}
+
+fn help_search_backspace(state: *State) void {
+    if (state.mode != .help_search) return;
+    state.help_filter.pop_codepoint();
+}
+
+fn help_search_commit(state: *State) void {
+    if (state.mode != .help_search) return;
+    state.mode = .normal;
+}
+
+fn help_search_cancel(state: *State) void {
+    if (state.mode != .help_search) return;
+    state.mode = .normal;
+    state.help_filter.clear();
+}
+
 fn toggle_help(state: *State) void {
     if (state.view == .help) {
         state.view = state.help_return;
+        state.mode = .normal;
         return;
     }
     state.help_return = state.view;
     state.view = .help;
+    state.mode = .normal;
+    state.help_filter.clear();
 }
 
 fn apply_refresh(state: *State, effects: *Effects) void {
@@ -489,7 +529,7 @@ test "open while already reading does nothing" {
     try testing.expect(effects.is_empty());
 }
 
-test "dismiss: cancel search, close help, leave the reader, but never quit" {
+test "dismiss: cancel search, close help, leave the reader, then quit from the list" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
 
@@ -512,18 +552,8 @@ test "dismiss: cancel search, close help, leave the reader, but never quit" {
     try testing.expectEqual(@as(u32, 0), fixture.state.reader_scroll);
 
     _ = apply(&fixture.state, &fixture.store, .dismiss);
-    try testing.expect(!fixture.state.quit);
-    try testing.expectEqual(View.list, fixture.state.view);
-}
-
-test "quit is the only way out, and it sets the flag" {
-    var fixture = try ready();
-    defer fixture.store.deinit(testing.allocator);
-
-    try testing.expect(!fixture.state.quit);
-    const effects = apply(&fixture.state, &fixture.store, .quit);
-    try testing.expect(effects.is_empty());
     try testing.expect(fixture.state.quit);
+    try testing.expectEqual(View.list, fixture.state.view);
 }
 
 test "next and previous mailbox cycle and ask the adapter to load them" {
@@ -823,6 +853,78 @@ test "help toggles over the current view and returns to it" {
     try testing.expectEqual(View.help, fixture.state.view);
     _ = apply(&fixture.state, &fixture.store, .toggle_help);
     try testing.expectEqual(View.reader, fixture.state.view);
+}
+
+test "help search: begin, type, backspace, commit" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .toggle_help);
+    _ = apply(&fixture.state, &fixture.store, .begin_help_search);
+    try testing.expectEqual(.help_search, fixture.state.mode);
+
+    _ = apply(&fixture.state, &fixture.store, .{ .help_search_char = 'm' });
+    _ = apply(&fixture.state, &fixture.store, .{ .help_search_char = 'o' });
+    try testing.expectEqualStrings("mo", fixture.state.help_filter.slice());
+
+    _ = apply(&fixture.state, &fixture.store, .help_search_backspace);
+    try testing.expectEqualStrings("m", fixture.state.help_filter.slice());
+
+    _ = apply(&fixture.state, &fixture.store, .help_search_commit);
+    try testing.expectEqual(.normal, fixture.state.mode);
+    try testing.expectEqualStrings("m", fixture.state.help_filter.slice());
+    try testing.expectEqual(View.help, fixture.state.view);
+}
+
+test "help search: cancel drops the filter; dismiss cancels first, then closes" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .toggle_help);
+    _ = apply(&fixture.state, &fixture.store, .begin_help_search);
+    _ = apply(&fixture.state, &fixture.store, .{ .help_search_char = 'x' });
+    _ = apply(&fixture.state, &fixture.store, .help_search_cancel);
+    try testing.expectEqual(.normal, fixture.state.mode);
+    try testing.expect(fixture.state.help_filter.is_empty());
+
+    _ = apply(&fixture.state, &fixture.store, .begin_help_search);
+    _ = apply(&fixture.state, &fixture.store, .{ .help_search_char = 'x' });
+    _ = apply(&fixture.state, &fixture.store, .dismiss);
+    try testing.expectEqual(.normal, fixture.state.mode);
+    try testing.expectEqual(View.help, fixture.state.view);
+
+    _ = apply(&fixture.state, &fixture.store, .dismiss);
+    try testing.expectEqual(View.list, fixture.state.view);
+}
+
+test "help search: ignored outside help, and non-printable bytes are ignored" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .begin_help_search);
+    try testing.expectEqual(.normal, fixture.state.mode);
+
+    _ = apply(&fixture.state, &fixture.store, .toggle_help);
+    _ = apply(&fixture.state, &fixture.store, .begin_help_search);
+    _ = apply(&fixture.state, &fixture.store, .{ .help_search_char = 0x1b });
+    _ = apply(&fixture.state, &fixture.store, .help_search_backspace);
+    try testing.expect(fixture.state.help_filter.is_empty());
+
+    _ = apply(&fixture.state, &fixture.store, .help_search_commit);
+    _ = apply(&fixture.state, &fixture.store, .help_search_cancel);
+}
+
+test "opening help clears a previous filter" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .toggle_help);
+    _ = apply(&fixture.state, &fixture.store, .begin_help_search);
+    _ = apply(&fixture.state, &fixture.store, .{ .help_search_char = 'z' });
+    _ = apply(&fixture.state, &fixture.store, .help_search_commit);
+    _ = apply(&fixture.state, &fixture.store, .toggle_help);
+    _ = apply(&fixture.state, &fixture.store, .toggle_help);
+    try testing.expect(fixture.state.help_filter.is_empty());
 }
 
 test "refresh asks for the current mailbox and says so" {

@@ -294,11 +294,19 @@ const search_hints = [_]Hint{
 };
 
 const help_hints = [_]Hint{
-    .{ .keys = "any key", .action = "close help" },
+    .{ .keys = "any key", .action = "dismiss" },
+    .{ .keys = "/", .action = "filter" },
+};
+
+const help_search_hints = [_]Hint{
+    .{ .keys = "type", .action = "filter" },
+    .{ .keys = "Enter", .action = "apply" },
+    .{ .keys = "Esc", .action = "cancel" },
 };
 
 fn hints_for(state: *const State) []const Hint {
     if (state.mode == .search) return &search_hints;
+    if (state.mode == .help_search) return &help_search_hints;
     return switch (state.view) {
         .list => &list_hints,
         .reader => &reader_hints,
@@ -388,7 +396,8 @@ const help_rows = [_]Hint{
 
 fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const card_width: u16 = @min(64, lay.columns - 4);
-    const card_height: u16 = @min(@as(u16, help_rows.len + 4), lay.rows - 2);
+    // Title, filter line, the rows, and the footer.
+    const card_height: u16 = @min(@as(u16, help_rows.len + 5), lay.rows - 2);
     const rect = Rect{
         .x = (lay.columns - card_width) / 2,
         .y = (lay.rows - card_height) / 2,
@@ -399,17 +408,61 @@ fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     out.fill_rect(rect, ' ', inputs.theme.text);
     out.box(rect, inputs.theme.border);
     _ = out.put_text(rect.x + 2, rect.y, " Keys ", card_width - 4, inputs.theme.accent.with_bold());
+    render_help_filter(inputs, rect, out);
 
-    const key_width: u16 = 16;
+    const filter = inputs.state.help_filter.slice();
     var row: u16 = 0;
+    var shown: u16 = 0;
     while (row < help_rows.len) : (row += 1) {
-        const y = rect.y + 2 + row;
-        if (y >= rect.bottom() - 1) break;
         const entry = help_rows[row];
-        _ = out.put_text(rect.x + 2, y, entry.keys, key_width, inputs.theme.accent);
-        _ = out.put_text(rect.x + 2 + key_width, y, entry.action, card_width -| (key_width + 4), inputs.theme.text);
+        if (!help_matches(filter, entry)) continue;
+
+        const y = rect.y + 2 + shown;
+        if (y >= rect.bottom() - 1) break;
+        _ = out.put_text(rect.x + 2, y, entry.keys, help_key_width, inputs.theme.accent);
+        _ = out.put_text(
+            rect.x + 2 + help_key_width,
+            y,
+            entry.action,
+            card_width -| (help_key_width + 4),
+            inputs.theme.text,
+        );
+        shown += 1;
     }
-    _ = out.put_text(rect.x + 2, rect.bottom() - 1, " any key closes ", card_width - 4, inputs.theme.dim);
+
+    if (shown == 0) {
+        _ = out.put_text(rect.x + 2, rect.y + 3, "No keys match", card_width - 4, inputs.theme.dim);
+    }
+
+    const footer = if (inputs.state.mode == .help_search)
+        " Enter apply  ·  Esc cancel "
+    else
+        " any key closes  ·  / filters ";
+    _ = out.put_text(rect.x + 2, rect.bottom() - 1, footer, card_width - 4, inputs.theme.dim);
+}
+
+const help_key_width: u16 = 16;
+
+fn render_help_filter(inputs: Inputs, rect: Rect, out: *Screen) void {
+    const y = rect.y + 1;
+    _ = out.put_text(rect.x + 2, y, "/", 1, inputs.theme.accent.with_bold());
+
+    const filter = inputs.state.help_filter.slice();
+    if (filter.len == 0 and inputs.state.mode != .help_search) {
+        _ = out.put_text(rect.x + 4, y, "filter keys", rect.width -| 6, inputs.theme.dim);
+        return;
+    }
+
+    const x = @as(u16, 4) + out.put_text(rect.x + 4, y, filter, rect.width -| 6, inputs.theme.text);
+    if (inputs.state.mode == .help_search) {
+        out.put(x, y, ' ', inputs.theme.text.with_reverse());
+    }
+}
+
+fn help_matches(filter: []const u8, entry: Hint) bool {
+    if (filter.len == 0) return true;
+    if (core.text.contains_ignore_case(entry.keys, filter)) return true;
+    return core.text.contains_ignore_case(entry.action, filter);
 }
 
 fn render_too_small(inputs: Inputs, out: *Screen) void {
@@ -674,7 +727,7 @@ test "frame draws the help overlay over the current view" {
 
     try row_contains(&out, 1, "Keys");
     try row_contains(&out, 3, "move down");
-    try row_contains(&out, 20, "any key closes");
+    try row_contains(&out, 21, "any key closes");
 }
 
 test "frame keeps the reader under the help overlay" {
@@ -690,6 +743,47 @@ test "frame keeps the reader under the help overlay" {
     // The reader header is still drawn to the left of the card.
     try row_contains(&out, 0, "Re: design");
     try row_contains(&out, 1, "Keys");
+}
+
+test "the help overlay advertises its filter and filters rows" {
+    var f = try fixture();
+    defer f.deinit();
+    _ = core.update.apply(&f.state, &f.store, .toggle_help);
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+    try row_contains(&out, 2, "/ filter keys");
+    try row_contains(&out, 3, "move down");
+    // The filter line lives inside the card, borders included.
+    try testing.expectEqual(@as(u21, '│'), out.cells[2][18].ch);
+    try testing.expectEqual(@as(u21, '│'), out.cells[2][81].ch);
+
+    // Type a filter that keeps only the star binding.
+    _ = core.update.apply(&f.state, &f.store, .begin_help_search);
+    _ = core.update.apply(&f.state, &f.store, .{ .help_search_char = 's' });
+    _ = core.update.apply(&f.state, &f.store, .{ .help_search_char = 't' });
+    _ = core.update.apply(&f.state, &f.store, .{ .help_search_char = 'a' });
+    _ = core.update.apply(&f.state, &f.store, .{ .help_search_char = 'r' });
+    frame(f.inputs(100, 24), &out);
+    try row_contains(&out, 2, "/ star");
+    try row_contains(&out, 3, "star");
+    try row_contains(&out, 21, "Esc cancel");
+
+    var buffer: [512]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, out.row_text(4, &buffer), "move down") == null);
+}
+
+test "the help overlay says so when nothing matches" {
+    var f = try fixture();
+    defer f.deinit();
+    _ = core.update.apply(&f.state, &f.store, .toggle_help);
+    _ = core.update.apply(&f.state, &f.store, .begin_help_search);
+    _ = core.update.apply(&f.state, &f.store, .{ .help_search_char = 'z' });
+    _ = core.update.apply(&f.state, &f.store, .{ .help_search_char = 'z' });
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+    try row_contains(&out, 4, "No keys match");
 }
 
 test "frame asks for a bigger terminal below the minimum size" {
