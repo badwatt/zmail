@@ -98,7 +98,7 @@ fn mapError(err: client_mod.Error) port.Error {
 const testing = std.testing;
 const Scripted = transport_mod.Scripted;
 
-const login_ok = "a1 OK LOGIN completed\r\n";
+const login_ok = "* OK ready\r\na1 OK LOGIN completed\r\n";
 
 test "open logs in and fetch selects the mailbox once" {
     var scripted: Scripted = .{ .input = login_ok ++
@@ -192,7 +192,7 @@ test "body, flags, and move reach the right commands" {
 }
 
 test "login failure is reported as Rejected through the port, and open fails" {
-    var scripted: Scripted = .{ .input = "a1 NO bad credentials\r\n" };
+    var scripted: Scripted = .{ .input = "* OK ready\r\na1 NO bad credentials\r\n" };
     try testing.expectError(error.LoginFailed, ImapMail.open(scripted.transport(), "me", "wrong"));
 }
 

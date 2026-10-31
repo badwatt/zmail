@@ -44,6 +44,9 @@ pub const status_max: u32 = 64;
 /// Maximum bytes of an account label ("work").
 pub const label_max: u32 = 24;
 
+/// Maximum bytes of a username sent to an IMAP/SMTP server.
+pub const username_max: u32 = 128;
+
 /// Maximum bytes of a secret (password or token) held in memory.
 pub const secret_max: u32 = 512;
 

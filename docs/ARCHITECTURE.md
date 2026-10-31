@@ -63,6 +63,21 @@ port without touching either adapter.
 `client.zig` talks to `ports/transport.zig` (`read`/`write`/`close`), never to a
 socket, so a whole IMAP conversation is a unit test with a scripted peer.
 
+**Network tree (`net/src`).** `tls.zig` is the only code that opens a socket.
+It implements the `Transport` port over `std.Io.net` + `std.crypto.tls.Client`:
+system CA bundle, hostname verification, no insecure mode. Two details matter:
+
+- Reads poll the socket, but first drain bytes already decrypted (or a complete
+  encrypted record already buffered). A greeting often arrives with the
+  handshake and would otherwise be invisible while the socket stays silent.
+- TLS is only entered when a whole encrypted record is buffered, because its own
+  read would block without a timeout. A partial record waits for the next poll.
+
+`net/` is deliberately outside the kcov include pattern (`core/src,tui/src`).
+It cannot be unit tested without a real TLS peer; it is verified by an opt-in
+live run (a real IMAP server, expected login refusal with a wrong password)
+plus the scripted-conversation tests one layer above it.
+
 ## The TUI
 
 | File | Responsibility |

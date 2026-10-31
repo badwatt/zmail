@@ -14,13 +14,13 @@ pub const Context = struct {
 };
 
 pub const Hooks = struct {
-    launch: *const fn (std.mem.Allocator, std.Io) anyerror!u8 = launch_mod.run,
+    launch: *const fn (std.mem.Allocator, std.Io, cli.Launch) anyerror!u8 = launch_mod.run,
 };
 
 pub const Outcome = union(enum) {
     print_stdout: []const u8,
     print_stderr: struct { text: []const u8, exit: u8 },
-    launch,
+    launch: cli.Launch,
 };
 
 pub fn decide(args: []const []const u8, stdout_buffer: []u8, stderr_buffer: []u8) Outcome {
@@ -31,7 +31,7 @@ pub fn decide(args: []const []const u8, stdout_buffer: []u8, stderr_buffer: []u8
             .text = cli.render_usage_error(stderr_buffer, failure),
             .exit = 2,
         } },
-        .launch => return .launch,
+        .launch => |options| return .{ .launch = options },
     }
 }
 
@@ -73,7 +73,7 @@ pub fn main_with(context: Context, hooks: Hooks, stdout: *std.Io.Writer, stderr:
             try stderr.writeAll(failure.text);
             return failure.exit;
         },
-        .launch => return hooks.launch(context.gpa, context.io),
+        .launch => |options| return hooks.launch(context.gpa, context.io, options),
     }
 }
 
@@ -108,13 +108,17 @@ test "decide: a bad flag prints to stderr and exits 2" {
 test "decide: no arguments launches the client" {
     var out: [1024]u8 = undefined;
     var err: [256]u8 = undefined;
-    try testing.expectEqual(Outcome.launch, decide(&[_][]const u8{"amail"}, &out, &err));
+    const outcome = decide(&[_][]const u8{"amail"}, &out, &err);
+    try testing.expectEqual(cli.Mode.demo, outcome.launch.mode);
 }
 
-fn stub_launch(gpa: std.mem.Allocator, io: std.Io) anyerror!u8 {
+fn stub_launch(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) anyerror!u8 {
     _ = gpa;
     _ = io;
-    return 7;
+    return switch (options.mode) {
+        .demo => 7,
+        .live => 8,
+    };
 }
 
 test "main_with routes every outcome, including launch" {

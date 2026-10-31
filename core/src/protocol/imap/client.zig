@@ -38,10 +38,13 @@ pub const Error = error{
     NotFound,
 };
 
+const Greeting = enum { no, ok, preauth };
+
 pub const Client = struct {
     transport: transport_mod.Transport,
     framer: framing.Framer = .{},
     tag_counter: u32 = 0,
+    greeted: Greeting = .no,
     read_buffer: [4096]u8 = undefined,
     /// Outgoing commands are bounded: a tag plus a mailbox name cannot need
     /// more, and a bug that tries to send more must fail, not truncate.
@@ -56,6 +59,11 @@ pub const Client = struct {
     }
 
     pub fn login(self: *Client, user: []const u8, password: []const u8) Error!void {
+        // The server speaks first. Sending LOGIN before reading the greeting is
+        // a protocol violation, and servers react by ignoring the command.
+        try self.await_greeting();
+        if (self.greeted == .preauth) return;
+
         var tag_buffer: [16]u8 = undefined;
         const tag = self.beginCommand(&tag_buffer);
         var command_buffer: [512]u8 = undefined;
@@ -187,6 +195,31 @@ pub const Client = struct {
         return self.command_buffer[0..self.command_limit];
     }
 
+    /// Reads the server greeting. PREAUTH means the connection is already
+    /// authenticated and LOGIN must be skipped.
+    fn await_greeting(self: *Client) Error!void {
+        if (self.greeted != .no) return;
+
+        while (true) {
+            const reply = try self.next_response();
+            switch (reply) {
+                .untagged => |untagged| switch (untagged) {
+                    .ok => {
+                        self.greeted = .ok;
+                        return;
+                    },
+                    .preauth => {
+                        self.greeted = .preauth;
+                        return;
+                    },
+                    .bye => return error.Rejected,
+                    else => {},
+                },
+                .tagged, .continuation, .unknown => {},
+            }
+        }
+    }
+
     fn beginCommand(self: *Client, tag_buffer: *[16]u8) []const u8 {
         self.tag_counter += 1;
         // "a" plus the decimal form of any u32 fits with room to spare.
@@ -210,7 +243,9 @@ pub const Client = struct {
         while (true) {
             const reply = try self.next_response();
             switch (reply) {
-                .untagged => |untagged| return untagged,
+                .untagged => |untagged| {
+                    return untagged;
+                },
                 .tagged => |tagged| {
                     if (!std.mem.eql(u8, tagged.tag, expected_tag)) continue;
                     return switch (tagged.kind) {
@@ -285,8 +320,26 @@ test "login writes the command and accepts a tagged OK" {
     try testing.expectEqualStrings("a1 LOGIN \"me@example.com\" \"secret\"\r\n", scripted.output_text());
 }
 
+test "the greeting must be read first: PREAUTH skips login, BYE is refused" {
+    var preauth: Scripted = .{ .input = "* PREAUTH welcome\r\n" };
+    var client = client_with(&preauth);
+    try client.login("me", "pw");
+    try testing.expectEqualStrings("", preauth.output_text());
+
+    var bye: Scripted = .{ .input = "* BYE not today\r\n" };
+    var client_bye = client_with(&bye);
+    try testing.expectError(error.Rejected, client_bye.login("me", "pw"));
+}
+
+test "untagged noise before the greeting is skipped" {
+    var scripted: Scripted = .{ .input = "* CAPABILITY IMAP4rev1\r\n* OK ready\r\na1 OK done\r\n" };
+    var client = client_with(&scripted);
+    try client.login("me", "pw");
+    try testing.expectEqualStrings("a1 LOGIN \"me\" \"pw\"\r\n", scripted.output_text());
+}
+
 test "login refused becomes LoginFailed" {
-    var scripted: Scripted = .{ .input = "a1 NO [AUTHENTICATIONFAILED] nope\r\n" };
+    var scripted: Scripted = .{ .input = "* OK ready\r\na1 NO [AUTHENTICATIONFAILED] nope\r\n" };
     var client = client_with(&scripted);
     try testing.expectError(error.LoginFailed, client.login("me", "wrong"));
 }
@@ -384,7 +437,7 @@ test "fetch_body without a body attribute is NotFound" {
 }
 
 test "set_flags and move write UID commands and accept OK" {
-    var scripted: Scripted = .{ .input = "a1 OK done\r\na2 OK done\r\n" };
+    var scripted: Scripted = .{ .input = "* OK ready\r\na1 OK done\r\na2 OK done\r\n" };
     var client = client_with(&scripted);
 
     try client.set_flags(7, .{ .unread = false, .flagged = true });
@@ -397,7 +450,7 @@ test "set_flags and move write UID commands and accept OK" {
 }
 
 test "a rejected STORE surfaces as Rejected" {
-    var scripted: Scripted = .{ .input = "a1 NO [CANNOT] no\r\n" };
+    var scripted: Scripted = .{ .input = "* OK ready\r\na1 NO [CANNOT] no\r\n" };
     var client = client_with(&scripted);
     try testing.expectError(error.Rejected, client.set_flags(7, .{}));
 }
@@ -476,7 +529,7 @@ test "a bounded command buffer refuses to send a truncated command" {
 }
 
 test "a password too long for the login buffer is a protocol error" {
-    var scripted: Scripted = .{ .input = "" };
+    var scripted: Scripted = .{ .input = "* OK ready\r\n" };
     var client = client_with(&scripted);
     const huge_password: [600]u8 = @splat('x');
     try testing.expectError(error.ProtocolError, client.login("me", &huge_password));

@@ -32,6 +32,7 @@ pub const sync = @import("app/sync.zig");
 pub const imap = @import("protocol/imap.zig");
 
 pub const demo = @import("demo.zig");
+pub const config = @import("config.zig");
 
 // Referenced from the module root's test block so `zig build test` includes
 // every submodule's tests.
@@ -57,4 +58,5 @@ test {
     _ = @import("app/sync.zig");
     _ = @import("protocol/imap.zig");
     _ = @import("demo.zig");
+    _ = @import("config.zig");
 }

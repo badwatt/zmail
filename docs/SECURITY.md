@@ -66,6 +66,19 @@ sets termios.
 The demo account is entirely local. The client makes no network request in this
 milestone. There is no analytics, no update check, and no crash reporting.
 
+### Live connections
+
+- **TLS with mandatory verification.** `net/src/tls.zig` has no insecure mode:
+  the system CA bundle validates the chain and the hostname is checked against
+  the certificate. Plaintext is refused by config validation unless the user
+  writes `allow_plaintext = true` for a local server.
+- **No password on disk.** The config file is refused if it contains a
+  `password` key (by name, with an actionable error). Today the password comes
+  from `AMAIL_PASSWORD`; the environment is a bridge, not the destination.
+- **Bounded protocol.** Commands have a fixed maximum size and are refused
+  rather than truncated; responses have a fixed frame budget; timeouts bound
+  every wait.
+
 ## Planned (with the IMAP/SMTP work)
 
 These are designed for but not built yet; they are not claimed as done.
@@ -73,10 +86,10 @@ These are designed for but not built yet; they are not claimed as done.
 - **TLS verification is mandatory.** Certificate validation on by default, with
   an explicit, loud opt-out for a self-signed local server. No “accept anything”
   fallback.
-- **Credentials never in config files.** The credential store port will have
-  three adapters: OS keyring, an `age`/`sops`-encrypted file with `0600`
-  permissions, and the self-hosted backend below. The plain text password never
-  appears in argv, config, logs, or error messages.
+- **Credentials leave the environment.** The `SecretStore` port will have three
+  adapters: OS keyring, an `age`/`sops`-encrypted file with `0600` permissions,
+  and the self-hosted backend below. `AMAIL_PASSWORD` is the temporary bridge;
+  it is never logged, echoed, or written to the config.
 - **OAuth2/XOAUTH2 for providers that require it**, with tokens stored like
   passwords, refreshed in memory, and never written to logs.
 - **HTML mail is rendered as text.** No HTML engine in the client. Links are

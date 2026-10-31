@@ -1,0 +1,13 @@
+//! Network adapters: the only place that opens sockets or speaks TLS.
+//!
+//! Everything here sits behind `core`'s `Transport` port. The logic above it
+//! (framing, commands, responses, the client) is tested with a scripted peer;
+//! this file is verified against a real TLS peer (see docs/ARCHITECTURE.md).
+
+const std = @import("std");
+
+pub const tls = @import("tls.zig");
+
+test {
+    _ = @import("tls.zig");
+}

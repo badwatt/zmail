@@ -28,11 +28,18 @@ The port exists; this milestone fills it in.
 - **The adapter (done: M2.2).** `adapters/imap_mail.zig` implements
   `ports/mail.Mail` on top of the client, selecting a mailbox once and mapping
   every protocol error onto `Unavailable` / `NotFound` / `Rejected`.
-- **Transport (next).** `std.crypto.tls.Client` over a socket behind
-  `ports/transport.zig`: certificate verification mandatory, bounded reads,
-  STARTTLS, and the same scripted-conversation tests at the boundary.
-- **Account setup.** A config file (host, port, security, username) plus the
-  `SecretStore` port for the password; then `amail --live` instead of the demo.
+- **TLS transport (done: M2.3).** `net/src/tls.zig` implements the `Transport`
+  port over a socket and `std.crypto.tls.Client`, with the system CA bundle and
+  hostname verification. Reads poll first and drain buffered records so a
+  greeting that arrives with the handshake is not lost.
+- **Account setup (done: M2.3).** A strict `key = value` config parsed in
+  `core/config.zig` (unknown keys and passwords are refused), `--live` and
+  `--config` in the CLI, and the password from `AMAIL_PASSWORD`.
+- **STARTTLS (next).** Upgrade a plaintext connection on 143/587 with the same
+  verification. Today only implicit TLS is accepted.
+- **SecretStore (next).** OS keyring, then an encrypted file, then the
+  self-hosted sync backend. The environment variable goes away.
+- **IDLE** for new mail, and flag sync back to the server after a local change.
 - **TLS adapter.** `std.crypto.tls.Client` with certificate verification
   mandatory. STARTTLS upgrade. A bounded, line-oriented transport with
   timeouts.

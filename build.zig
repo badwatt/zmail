@@ -25,7 +25,8 @@ pub fn build(b: *std.Build) void {
     const install_test_bins = b.option(bool, "test-bin", "Install test binaries for coverage analysis") orelse false;
 
     const core = coreModule(b, target, optimize);
-    const exe = addExe(b, target, optimize, core);
+    const net = netModule(b, target, optimize, core);
+    const exe = addExe(b, target, optimize, core, net);
     addTest(b, target, optimize, core, exe, install_test_bins);
     addCoverage(b, target, optimize, core);
     addFmt(b);
@@ -48,6 +49,20 @@ fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     return mod;
 }
 
+/// Network adapters (socket + TLS). Kept out of the test root: this is the one
+/// tree that needs a real peer to be exercised, and it is verified by the
+/// opt-in live test instead of by unit tests.
+fn netModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
+    const mod = b.createModule(.{
+        .root_source_file = b.path("net/src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    mod.addImport("core", core);
+    return mod;
+}
+
 /// The TUI module. Links libc for termios; only the OS adapter uses it.
 fn tuiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
     const mod = b.createModule(.{
@@ -57,10 +72,11 @@ fn tuiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .link_libc = true,
     });
     mod.addImport("core", core);
+    mod.addImport("net", netModule(b, target, optimize, core));
     return mod;
 }
 
-fn addExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Step.Compile {
+fn addExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, net: *std.Build.Module) *std.Build.Step.Compile {
     const mod = b.createModule(.{
         .root_source_file = b.path("tui/src/main.zig"),
         .target = target,
@@ -68,6 +84,7 @@ fn addExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .link_libc = true,
     });
     mod.addImport("core", core);
+    mod.addImport("net", net);
 
     const exe = b.addExecutable(.{
         .name = app_name,

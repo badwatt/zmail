@@ -23,10 +23,34 @@ decision below serves one of those, in that order.
 
 ```sh
 zig build run        # opens the demo inbox: no account, no network, no config
+amail --live         # connects to the account in the config file
 ```
 
 `q` quits from the list, `Ctrl+Q`/`Ctrl+C` quit from anywhere, and `?` shows
 every key (`/` inside the help filters it).
+
+### Live mode
+
+`~/.config/amail/config` (or `--config PATH`):
+
+```ini
+address     = alice@example.com
+label       = work
+username    = alice
+imap_host   = imap.example.com
+imap_port   = 993
+imap_security = tls
+```
+
+The password is **never** in the file; it is read from `AMAIL_PASSWORD`:
+
+```sh
+AMAIL_PASSWORD='...' amail --live
+```
+
+Only implicit TLS (`imap_port = 993`) is supported today. Certificate
+verification is mandatory and uses the system CA bundle. STARTTLS and a real
+secret store (OS keyring, encrypted file, self-hosted sync) are next.
 
 ```sh
 zig build test       # unit + integration + a real pseudo-terminal session
@@ -48,10 +72,12 @@ development tool, not a dependency).
 - `core/` holds the domain and the application state machine and performs no
   I/O at all. `tui/` is one adapter on top of it. A GUI can be a second adapter.
 
-The IMAP protocol layer is in place and tested end to end against a scripted
-server: framing (literals included), commands, responses, the client loop, and
-the `Mail` adapter on top. The remaining piece for live mail is the TLS/socket
-transport behind the `Transport` port (`docs/ROADMAP.md`).
+Live IMAP works: TLS transport with mandatory certificate verification, the
+protocol layer (framing with literals, commands, responses with ENVELOPE),
+the client loop, the `Mail` adapter, config parsing, and `--live`. The protocol
+and adapter are tested against a scripted server; the TLS transport is verified
+against a real IMAP server (a refused login is the expected end-to-end result
+for a bogus password). STARTTLS and a real secret store are next.
 
 ## Why this shape
 
