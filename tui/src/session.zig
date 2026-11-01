@@ -855,9 +855,11 @@ pub const Session = struct {
     }
 
     fn save_settings(self: *Session, form: *Settings) void {
+        // Nothing here closes the form: a refusal must not cost the user the
+        // fields they just typed. The reason goes inside the card.
         const accounts = self.deps.accounts_file orelse {
-            self.close_settings();
-            self.state.set_alert("Accounts cannot be changed here", .{});
+            form.setup.problem.set("Accounts cannot be changed here");
+            self.needs_render = true;
             return;
         };
 
@@ -865,7 +867,7 @@ pub const Session = struct {
         form.setup.step = .review;
         form.setup.next();
         if (!form.setup.done) {
-            form.field = .address;
+            // Keep the cursor where it is; the problem line explains what is wrong.
             form.setup.step = form.field.step();
             self.needs_render = true;
             return;
@@ -884,8 +886,8 @@ pub const Session = struct {
             .password = if (form.setup.password.len == 0) null else form.setup.password.expose(),
             .replaces = form.editing,
         }) catch {
-            self.close_settings();
-            self.state.set_alert("Could not save the account", .{});
+            form.setup.problem.set("Could not save the account; fix the reason above and try again");
+            self.needs_render = true;
             return;
         };
 
@@ -1934,6 +1936,37 @@ test "a new account is connected and listed without a restart" {
     rig.session.settle_refresh_for_test();
 }
 
+test "a refused save keeps the form and its contents" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+    form.setup.address.set("me@example.com");
+    form.setup.imap_host.set("imap.example.com");
+    form.setup.imap_port.set("993");
+    form.setup.username.set("me");
+    form.setup.password.append_codepoint('s');
+    form.field = .username;
+
+    // No port (the demo): the form must not close nor forget anything.
+    rig.session.save_settings(form);
+    try testing.expect(rig.session.settings != null);
+    try testing.expectEqual(Session.Field.username, rig.session.settings.?.field);
+    try testing.expectEqualStrings("me", rig.session.settings.?.setup.username.slice());
+    try testing.expectEqualStrings("me@example.com", rig.session.settings.?.setup.address.slice());
+    try testing.expect(rig.session.settings.?.setup.problem.len > 0);
+
+    // Fixing it and saving works, and only then does the form close.
+    var port: core.accounts_port.Memory = .{};
+    rig.session.deps.accounts_file = port.accounts();
+    rig.session.save_settings(&rig.session.settings.?);
+    try testing.expect(rig.session.settings == null);
+    try testing.expectEqual(@as(u32, 1), port.saved);
+}
+
 test "editing prefills the form and replaces the account" {
     var rig: Rig = .{};
     try rig.start();
@@ -2089,8 +2122,12 @@ test "closing the form twice, and after a failed save, is safe" {
 
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     rig.session.save_settings(&rig.session.settings.?);
-    try testing.expect(rig.session.settings == null);
-    try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
+    // The form stays open with the reason inside it, so nothing typed is lost.
+    try testing.expect(rig.session.settings != null);
+    try testing.expectEqualStrings(
+        "Accounts cannot be changed here",
+        rig.session.settings.?.setup.problem.slice(),
+    );
 }
 
 test "Enter moves between fields and saves on the last one" {
@@ -2200,7 +2237,9 @@ test "removing an account rewrites the config and drops its mail" {
     failing.setup.username.set("me");
     failing.setup.password.append_codepoint('s');
     rig.session.save_settings(failing);
-    try testing.expectEqualStrings("Could not save the account", rig.session.state.status.slice());
+    try testing.expect(rig.session.settings != null);
+    try testing.expect(std.mem.indexOf(u8, rig.session.settings.?.setup.problem.slice(), "Could not save") != null);
+    rig.session.close_settings();
     rig.session.run_effects_for_test(&.{.{ .remove_account = .{ .account = core.id.AccountId.from_int(2) } }});
     try testing.expectEqualStrings("Could not rewrite the config", rig.session.state.status.slice());
 }
