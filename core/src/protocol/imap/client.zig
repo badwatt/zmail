@@ -66,6 +66,26 @@ pub const Client = struct {
         return .{ .transport = transport };
     }
 
+    /// XOAUTH2 login: the bearer token is the credential now that providers
+    /// stopped accepting passwords.
+    pub fn login_token(self: *Client, user: []const u8, token: []const u8) Error!void {
+        try self.await_greeting();
+        if (self.greeted == .preauth) return;
+
+        var tag_buffer: [16]u8 = undefined;
+        const tag = self.beginCommand(&tag_buffer);
+        var payload: [512]u8 = undefined;
+        const bytes = command.authenticate_xoauth2(
+            self.command_slice(),
+            tag,
+            user,
+            token,
+            &payload,
+        ) catch return error.ProtocolError;
+        try self.send(bytes);
+        try self.wait_ok(tag);
+    }
+
     pub fn login(self: *Client, user: []const u8, password: []const u8) Error!void {
         // The server speaks first. Sending LOGIN before reading the greeting is
         // a protocol violation, and servers react by ignoring the command.
@@ -648,6 +668,22 @@ test "a response larger than the framer is refused" {
     var client = client_with(&scripted);
     client.max_timeouts = 0;
     try testing.expectError(error.ResponseTooLong, client.select(.inbox));
+}
+
+test "login_token sends AUTHENTICATE XOAUTH2 and accepts OK" {
+    var scripted: Scripted = .{ .input = "* OK ready\r\na1 OK AUTHENTICATE completed\r\n" };
+    var client = Client.init(scripted.transport());
+    try client.login_token("me@example.com", "ya29.token");
+
+    const output = scripted.output_text();
+    try testing.expect(std.mem.indexOf(u8, output, "AUTHENTICATE XOAUTH2 ") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "me@example.com") == null); // base64
+}
+
+test "a rejected token is LoginFailed" {
+    var scripted: Scripted = .{ .input = "* OK ready\r\na1 NO AUTHENTICATE failed\r\n" };
+    var client = Client.init(scripted.transport());
+    try testing.expectError(error.Rejected, client.login_token("me", "bad"));
 }
 
 test "logout sends the command and closes the transport" {

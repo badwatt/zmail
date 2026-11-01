@@ -47,6 +47,18 @@ pub const ImapMail = struct {
         return imap;
     }
 
+    /// Opens with an OAuth2 token instead of a password.
+    pub fn open_token(
+        transport: transport_mod.Transport,
+        account: AccountId,
+        user: []const u8,
+        token: []const u8,
+    ) client_mod.Error!ImapMail {
+        var imap = ImapMail{ .client = client_mod.Client.init(transport), .account = account };
+        try imap.client.login_token(user, token);
+        return imap;
+    }
+
     pub fn close(self: *ImapMail) void {
         self.client.logout();
         self.client.close();
@@ -365,6 +377,19 @@ test "delete in a mailbox the server does not have is NotFound" {
         imap.mail().delete_message(.inbox, MessageId.from_int(7)),
     );
     try testing.expectError(error.NotFound, imap.mail().empty_mailbox(.inbox));
+}
+
+test "open_token logs in with a bearer token" {
+    var scripted: Scripted = .{ .input = login_ok ++ "* 1 EXISTS\r\na2 OK selected\r\n" ++
+        "* 1 FETCH (UID 3 ENVELOPE (NIL \"token mail\" NIL NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
+        "a3 OK fetched\r\n" };
+    var imap = try ImapMail.open_token(scripted.transport(), AccountId.from_int(1), "me", "ya29.t");
+    defer imap.close();
+
+    var messages: [2]Message = undefined;
+    try testing.expectEqual(@as(u32, 1), try imap.mail().fetch(.inbox, &messages));
+    try testing.expectEqualStrings("token mail", messages[0].subject.slice());
+    try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "AUTHENTICATE XOAUTH2") != null);
 }
 
 test "login failure is reported as Rejected through the port, and open fails" {

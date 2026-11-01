@@ -47,6 +47,7 @@ pub const demo = @import("demo.zig");
 pub const cache = @import("cache.zig");
 pub const mime = @import("mime.zig");
 pub const sealed = @import("sealed.zig");
+pub const oauth = @import("oauth.zig");
 pub const lazy_mail = @import("adapters/lazy.zig").LazyMail;
 pub const lazy_outbox = @import("adapters/lazy.zig").LazyOutbox;
 pub const config = @import("config.zig");
@@ -88,6 +89,7 @@ test {
     _ = @import("cache.zig");
     _ = @import("mime.zig");
     _ = @import("sealed.zig");
+    _ = @import("oauth.zig");
     _ = @import("adapters/lazy.zig");
     _ = @import("config.zig");
 }
