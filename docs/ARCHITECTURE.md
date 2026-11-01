@@ -44,6 +44,24 @@ adapter, or a test double must satisfy.
 - `effect.Effect` is the bounded list of work the front end must do:
   `fetch_body`, `sync_flags`, `move_message`, `refresh`.
 
+**MIME (`core/src/mime.zig`).** The bridge between wire format and prose, pure
+and allocation-free: RFC 2047 encoded words (subjects, display names), transfer
+encodings (base64, quoted-printable), charsets (UTF-8, ASCII, ISO-8859-1,
+Windows-1252), multipart walking that prefers `text/plain` and falls back to
+stripped `text/html`, and sanitization on the way out. Buffers come from the
+caller, so a hostile message can only produce truncated text.
+
+One lifetime rule follows from the protocol code: strings unescaped from a
+response point into a scratch buffer, so that buffer belongs to the
+`Client` (`parse_scratch`), never to the parsing function. A stack local there
+dangles the moment the function returns, and the reader saw exactly that as
+garbage subjects.
+
+**Caching.** `cache.zig` is the versioned TSV codec; `ports/cache.zig` is the
+port; the session reads it at startup and on mailbox switches and writes it
+after every network refresh. `net/src/cache_file.zig` is the file adapter
+(one file per account and mailbox under the cache directory).
+
 **Adapters.** `adapters/memory_mail.zig` is the demo account and the tests'
 server double. `adapters/imap_mail.zig` implements the same port over the real
 protocol client; it is tested with a scripted server, not a network. The TLS

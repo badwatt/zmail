@@ -11,7 +11,10 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-pub const max_response: u32 = 64 * 1024;
+/// A whole response must fit in one buffer, and a message body arrives as one
+/// response. 128 KiB shows any text mail, and truncating an attachment-heavy
+/// message is better than failing to show it at all.
+pub const max_response: u32 = 128 * 1024;
 
 pub const Error = error{
     ResponseTooLong,

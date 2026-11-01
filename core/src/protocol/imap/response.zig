@@ -71,7 +71,9 @@ pub const Error = error{
 };
 
 /// Parses one complete response line (CRLF optional).
-pub fn parse(input: []const u8) Error!Response {
+/// `scratch` holds unescaped envelope strings; it must outlive the response, so
+/// the client owns it (a stack local here would dangle as soon as this returns).
+pub fn parse(input: []const u8, scratch: []u8) Error!Response {
     const line = std.mem.trimEnd(u8, input, "\r\n");
     if (line.len == 0) return error.Malformed;
 
@@ -81,7 +83,7 @@ pub fn parse(input: []const u8) Error!Response {
     if (line[0] == '*') {
         if (line.len < 2) return error.Malformed;
         if (line[1] != ' ') return error.Malformed;
-        return .{ .untagged = try untagged(line[2..]) };
+        return .{ .untagged = try untagged(line[2..], scratch) };
     }
     return tagged(line);
 }
@@ -102,13 +104,13 @@ fn tagged(line: []const u8) Error!Response {
     } };
 }
 
-fn untagged(rest: []const u8) Error!Untagged {
+fn untagged(rest: []const u8, scratch: []u8) Error!Untagged {
     const first_end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
     const first = rest[0..first_end];
     const tail = if (first_end == rest.len) "" else trimLeft(rest[first_end + 1 ..]);
 
     if (std.fmt.parseInt(u32, first, 10)) |sequence| {
-        return sequenceResponse(sequence, tail);
+        return sequenceResponse(sequence, tail, scratch);
     } else |_| {}
 
     if (std.ascii.eqlIgnoreCase(first, "OK")) return .{ .ok = tail };
@@ -120,7 +122,7 @@ fn untagged(rest: []const u8) Error!Untagged {
     return .{ .other = rest };
 }
 
-fn sequenceResponse(sequence: u32, tail: []const u8) Error!Untagged {
+fn sequenceResponse(sequence: u32, tail: []const u8, scratch: []u8) Error!Untagged {
     const verb_end = std.mem.indexOfScalar(u8, tail, ' ') orelse tail.len;
     const verb = tail[0..verb_end];
     const rest = if (verb_end == tail.len) "" else trimLeft(tail[verb_end + 1 ..]);
@@ -128,15 +130,15 @@ fn sequenceResponse(sequence: u32, tail: []const u8) Error!Untagged {
     if (std.ascii.eqlIgnoreCase(verb, "EXISTS")) return .{ .exists = sequence };
     if (std.ascii.eqlIgnoreCase(verb, "RECENT")) return .{ .recent = sequence };
     if (std.ascii.eqlIgnoreCase(verb, "EXPUNGE")) return .{ .expunge = sequence };
-    if (std.ascii.eqlIgnoreCase(verb, "FETCH")) return .{ .fetch = try parseFetch(sequence, rest) };
+    if (std.ascii.eqlIgnoreCase(verb, "FETCH")) return .{ .fetch = try parseFetch(sequence, rest, scratch) };
     return .{ .other = tail };
 }
 
-fn parseFetch(sequence: u32, text: []const u8) Error!Fetch {
+fn parseFetch(sequence: u32, text: []const u8, scratch: []u8) Error!Fetch {
     var result = Fetch{ .sequence = sequence };
     var tokens = tokenizer.Tokenizer.init(text);
-    // Unescaped envelope strings live here for the lifetime of the response.
-    var string_buffer: [1024]u8 = undefined;
+    // Unescaped envelope strings live in the caller's scratch, which outlives
+    // the response (a local buffer here would dangle once this returns).
     var string_len: usize = 0;
 
     const open = try next(&tokens);
@@ -156,7 +158,7 @@ fn parseFetch(sequence: u32, text: []const u8) Error!Fetch {
                 } else if (std.ascii.eqlIgnoreCase(key, "FLAGS")) {
                     result.flags = try parseFlags(&tokens);
                 } else if (std.ascii.eqlIgnoreCase(key, "ENVELOPE")) {
-                    result.envelope = try parseEnvelope(&tokens, &string_buffer, &string_len);
+                    result.envelope = try parseEnvelope(&tokens, scratch, &string_len);
                 } else if (startsWithIgnoreCase(key, "BODY")) {
                     result.body = try parseBodyValue(&tokens);
                 } else {
@@ -391,79 +393,87 @@ fn parseZone(text: []const u8) ?i32 {
 
 const testing = std.testing;
 
+/// One response is inspected at a time, so one scratch buffer serves the tests.
+/// It must outlive the assertions, which a per-test local would not.
+var test_scratch: [1024]u8 = undefined;
+
+fn parse_test(text: []const u8) Error!Response {
+    return parse(text, &test_scratch);
+}
+
 test "a continuation response carries its text" {
-    const response = try parse("+ send the literal\r\n");
+    const response = try parse_test("+ send the literal\r\n");
     try testing.expectEqualStrings("send the literal", response.continuation);
 }
 
 test "an empty continuation is valid" {
-    const response = try parse("+\r\n");
+    const response = try parse_test("+\r\n");
     try testing.expectEqualStrings("", response.continuation);
 }
 
 test "tagged OK, NO, and BAD" {
-    const ok = try parse("a1 OK LOGIN completed\r\n");
+    const ok = try parse_test("a1 OK LOGIN completed\r\n");
     try testing.expectEqualStrings("a1", ok.tagged.tag);
     try testing.expectEqual(Kind.ok, ok.tagged.kind);
     try testing.expectEqualStrings("LOGIN completed", ok.tagged.text);
 
-    const no = try parse("a2 NO [AUTHENTICATIONFAILED] nope");
+    const no = try parse_test("a2 NO [AUTHENTICATIONFAILED] nope");
     try testing.expectEqual(Kind.no, no.tagged.kind);
     try testing.expectEqualStrings("[AUTHENTICATIONFAILED] nope", no.tagged.text);
 
-    const bad = try parse("a3 BAD unknown command");
+    const bad = try parse_test("a3 BAD unknown command");
     try testing.expectEqual(Kind.bad, bad.tagged.kind);
 }
 
 test "a tagged status without text is valid" {
-    const response = try parse("a4 OK");
+    const response = try parse_test("a4 OK");
     try testing.expectEqualStrings("", response.tagged.text);
 }
 
 test "tagged responses validate their structure" {
-    try testing.expectError(error.Malformed, parse("notag"));
-    try testing.expectError(error.Malformed, parse("a1 "));
-    try testing.expectError(error.Malformed, parse("a1 MAYBE whatever"));
+    try testing.expectError(error.Malformed, parse_test("notag"));
+    try testing.expectError(error.Malformed, parse_test("a1 "));
+    try testing.expectError(error.Malformed, parse_test("a1 MAYBE whatever"));
 }
 
 test "untagged status responses" {
-    const ok = try parse("* OK [CAPABILITY IMAP4rev1] ready");
+    const ok = try parse_test("* OK [CAPABILITY IMAP4rev1] ready");
     try testing.expectEqualStrings("[CAPABILITY IMAP4rev1] ready", ok.untagged.ok);
 
-    const no = try parse("* NO quota exceeded");
+    const no = try parse_test("* NO quota exceeded");
     try testing.expectEqualStrings("quota exceeded", no.untagged.no);
 
-    const bad = try parse("* BAD what");
+    const bad = try parse_test("* BAD what");
     try testing.expectEqualStrings("what", bad.untagged.bad);
 
-    const bye = try parse("* BYE logging out");
+    const bye = try parse_test("* BYE logging out");
     try testing.expectEqualStrings("logging out", bye.untagged.bye);
 
-    const preauth = try parse("* PREAUTH welcome");
+    const preauth = try parse_test("* PREAUTH welcome");
     try testing.expectEqualStrings("welcome", preauth.untagged.preauth);
 }
 
 test "mailbox counts" {
-    try testing.expectEqual(@as(u32, 3), (try parse("* 3 EXISTS")).untagged.exists);
-    try testing.expectEqual(@as(u32, 1), (try parse("* 1 RECENT")).untagged.recent);
-    try testing.expectEqual(@as(u32, 5), (try parse("* 5 EXPUNGE")).untagged.expunge);
+    try testing.expectEqual(@as(u32, 3), (try parse_test("* 3 EXISTS")).untagged.exists);
+    try testing.expectEqual(@as(u32, 1), (try parse_test("* 1 RECENT")).untagged.recent);
+    try testing.expectEqual(@as(u32, 5), (try parse_test("* 5 EXPUNGE")).untagged.expunge);
 }
 
 test "capabilities and unknown untagged data are reported, not dropped" {
-    const caps = try parse("* CAPABILITY IMAP4rev1 IDLE MOVE");
+    const caps = try parse_test("* CAPABILITY IMAP4rev1 IDLE MOVE");
     try testing.expectEqualStrings("IMAP4rev1 IDLE MOVE", caps.untagged.capabilities);
 
-    const other = try parse("* XSOMETHING new");
+    const other = try parse_test("* XSOMETHING new");
     try testing.expectEqualStrings("XSOMETHING new", other.untagged.other);
 
-    const unknown_verb = try parse("* 12 UNKNOWN");
+    const unknown_verb = try parse_test("* 12 UNKNOWN");
     try testing.expectEqualStrings("UNKNOWN", unknown_verb.untagged.other);
 }
 
 test "a full FETCH response parses every attribute" {
     const line = "* 12 FETCH (UID 42 FLAGS (\\Seen \\Flagged) RFC822.SIZE 4096 " ++
         "INTERNALDATE \"14-Nov-2023 22:13:20 +0000\")";
-    const fetch = (try parse(line)).untagged.fetch;
+    const fetch = (try parse_test(line)).untagged.fetch;
 
     try testing.expectEqual(@as(u32, 12), fetch.sequence);
     try testing.expectEqual(@as(u32, 42), fetch.uid.?);
@@ -474,7 +484,7 @@ test "a full FETCH response parses every attribute" {
 }
 
 test "FETCH attributes may arrive in any order and be absent" {
-    const fetch = (try parse("* 1 FETCH (UID 7)")).untagged.fetch;
+    const fetch = (try parse_test("* 1 FETCH (UID 7)")).untagged.fetch;
     try testing.expectEqual(@as(u32, 7), fetch.uid.?);
     try testing.expect(fetch.flags == null);
     try testing.expect(fetch.internal_date == null);
@@ -482,13 +492,13 @@ test "FETCH attributes may arrive in any order and be absent" {
 }
 
 test "FETCH with empty flags means unread and unflagged" {
-    const fetch = (try parse("* 2 FETCH (FLAGS () UID 9)")).untagged.fetch;
+    const fetch = (try parse_test("* 2 FETCH (FLAGS () UID 9)")).untagged.fetch;
     try testing.expect(fetch.flags.?.unread);
     try testing.expect(!fetch.flags.?.flagged);
 }
 
 test "FETCH skips unknown attributes, including nested lists" {
-    const fetch = (try parse("* 3 FETCH (X-UNKNOWN (NIL NIL) UID 11 X-OTHER \"x\")")).untagged.fetch;
+    const fetch = (try parse_test("* 3 FETCH (X-UNKNOWN (NIL NIL) UID 11 X-OTHER \"x\")")).untagged.fetch;
     try testing.expectEqual(@as(u32, 11), fetch.uid.?);
 }
 
@@ -500,7 +510,7 @@ test "FETCH parses ENVELOPE: subject unescaped, first from address" {
         "((\"Alice Rivera\" NIL \"alice\" \"example.com\")) " ++
         "((\"Bob\" NIL \"bob\" \"example.com\")) NIL NIL NIL \"<id@example.com>\") " ++
         "FLAGS (\\Seen) RFC822.SIZE 4096 INTERNALDATE \"14-Nov-2023 22:13:20 +0000\")";
-    const fetch = (try parse(line)).untagged.fetch;
+    const fetch = (try parse_test(line)).untagged.fetch;
 
     const envelope = fetch.envelope.?;
     try testing.expectEqualStrings("Hello \"world\"", envelope.subject.?);
@@ -513,85 +523,85 @@ test "FETCH parses ENVELOPE: subject unescaped, first from address" {
 }
 
 test "FETCH with a NIL envelope and an empty address list" {
-    const nil = (try parse("* 1 FETCH (UID 1 ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL))")).untagged.fetch;
+    const nil = (try parse_test("* 1 FETCH (UID 1 ENVELOPE (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL))")).untagged.fetch;
     try testing.expect(nil.envelope.?.subject == null);
     try testing.expect(nil.envelope.?.from_mailbox == null);
 
-    const empty = (try parse("* 1 FETCH (UID 2 ENVELOPE (NIL NIL () () () () () NIL NIL NIL))")).untagged.fetch;
+    const empty = (try parse_test("* 1 FETCH (UID 2 ENVELOPE (NIL NIL () () () () () NIL NIL NIL))")).untagged.fetch;
     try testing.expect(empty.envelope.?.from_name == null);
 }
 
 test "FETCH captures a body literal" {
-    const fetch = (try parse("* 1 FETCH (UID 7 BODY[TEXT] {11}\r\nhello world)")).untagged.fetch;
+    const fetch = (try parse_test("* 1 FETCH (UID 7 BODY[TEXT] {11}\r\nhello world)")).untagged.fetch;
     try testing.expectEqual(@as(u32, 7), fetch.uid.?);
     try testing.expectEqualStrings("hello world", fetch.body.?);
 }
 
 test "FETCH captures a quoted body and ignores NIL" {
-    const quoted = (try parse("* 1 FETCH (BODY[] \"tiny\")")).untagged.fetch;
+    const quoted = (try parse_test("* 1 FETCH (BODY[] \"tiny\")")).untagged.fetch;
     try testing.expectEqualStrings("tiny", quoted.body.?);
 
-    const nil = (try parse("* 1 FETCH (BODY[] NIL UID 3)")).untagged.fetch;
+    const nil = (try parse_test("* 1 FETCH (BODY[] NIL UID 3)")).untagged.fetch;
     try testing.expect(nil.body == null);
     try testing.expectEqual(@as(u32, 3), nil.uid.?);
 }
 
 test "a body value that is a group is skipped, and ENVELOPE NIL is accepted" {
-    const grouped = (try parse("* 1 FETCH (BODY[] (NIL) UID 3)")).untagged.fetch;
+    const grouped = (try parse_test("* 1 FETCH (BODY[] (NIL) UID 3)")).untagged.fetch;
     try testing.expect(grouped.body == null);
     try testing.expectEqual(@as(u32, 3), grouped.uid.?);
 
-    const nil = (try parse("* 2 FETCH (UID 4 ENVELOPE NIL)")).untagged.fetch;
+    const nil = (try parse_test("* 2 FETCH (UID 4 ENVELOPE NIL)")).untagged.fetch;
     try testing.expect(nil.envelope == null);
 }
 
 test "an ENVELOPE that is neither a list nor NIL is malformed" {
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE \"x\")"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (ENVELOPE \"x\")"));
 }
 
 test "malformed envelopes are refused" {
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL NIL))"));
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL NIL 5 NIL NIL NIL NIL NIL NIL NIL))"));
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL NIL (NIL) NIL NIL NIL NIL NIL NIL NIL))"));
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL NIL ((NIL)) NIL NIL NIL NIL NIL NIL NIL))"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (ENVELOPE (NIL NIL))"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (ENVELOPE (NIL NIL 5 NIL NIL NIL NIL NIL NIL NIL))"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (ENVELOPE (NIL NIL (NIL) NIL NIL NIL NIL NIL NIL NIL))"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (ENVELOPE (NIL NIL ((NIL)) NIL NIL NIL NIL NIL NIL NIL))"));
 }
 
 test "FETCH tolerates a literal value" {
-    const fetch = (try parse("* 4 FETCH (BODY[HEADER] {3}\r\nabc UID 12)")).untagged.fetch;
+    const fetch = (try parse_test("* 4 FETCH (BODY[HEADER] {3}\r\nabc UID 12)")).untagged.fetch;
     try testing.expectEqual(@as(u32, 12), fetch.uid.?);
 }
 
 test "FETCH date parsing applies the zone" {
-    const fetch = (try parse("* 5 FETCH (INTERNALDATE \"14-Nov-2023 22:13:20 +0200\")")).untagged.fetch;
+    const fetch = (try parse_test("* 5 FETCH (INTERNALDATE \"14-Nov-2023 22:13:20 +0200\")")).untagged.fetch;
     try testing.expectEqual(@as(i64, 1_699_992_800), fetch.internal_date.?);
 }
 
 test "malformed FETCH responses are refused" {
-    try testing.expectError(error.Malformed, parse("* 1 FETCH UID 7"));
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (UID)"));
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (UID notanumber)"));
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (FLAGS \\Seen)"));
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (INTERNALDATE notquoted)"));
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (UID 7"));
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (ENVELOPE (NIL) UID 7"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH UID 7"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (UID)"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (UID notanumber)"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (FLAGS \\Seen)"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (INTERNALDATE notquoted)"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (UID 7"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (ENVELOPE (NIL) UID 7"));
 }
 
 test "a non-atom attribute key is malformed" {
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (\"quoted\" UID 7)"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (\"quoted\" UID 7)"));
 }
 
 test "a non-atom flag is malformed" {
-    try testing.expectError(error.Malformed, parse("* 1 FETCH (FLAGS (\"x\"))"));
+    try testing.expectError(error.Malformed, parse_test("* 1 FETCH (FLAGS (\"x\"))"));
 }
 
 test "a FETCH date with the wrong shape is reported as an invalid date" {
-    try testing.expectError(error.InvalidDate, parse("* 1 FETCH (INTERNALDATE \"nope\")"));
+    try testing.expectError(error.InvalidDate, parse_test("* 1 FETCH (INTERNALDATE \"nope\")"));
 }
 
 test "empty and truncated responses are malformed" {
-    try testing.expectError(error.Malformed, parse(""));
-    try testing.expectError(error.Malformed, parse("\r\n"));
-    try testing.expectError(error.Malformed, parse("*"));
+    try testing.expectError(error.Malformed, parse_test(""));
+    try testing.expectError(error.Malformed, parse_test("\r\n"));
+    try testing.expectError(error.Malformed, parse_test("*"));
 }
 
 test "internal dates: valid shapes" {

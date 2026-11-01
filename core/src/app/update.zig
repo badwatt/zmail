@@ -170,7 +170,7 @@ fn apply_open(state: *State, store: *Store, effects: *Effects) void {
         message.flags = message.flags.mark_read();
         effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
     }
-    effects.add(.{ .fetch_body = .{ .account = message.account, .id = message.id } });
+    effects.add(.{ .fetch_body = .{ .account = message.account, .mailbox = message.mailbox, .id = message.id } });
 }
 
 fn apply_dismiss(state: *State, store: *Store) void {
@@ -624,7 +624,7 @@ test "open: marks an unread message read, fetches the body, and switches view" {
 
     try expect_effects(&effects, &.{
         .{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false } } },
-        .{ .fetch_body = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1) } },
+        .{ .fetch_body = .{ .account = AccountId.from_int(1), .mailbox = .inbox, .id = MessageId.from_int(1) } },
     });
 }
 
@@ -634,7 +634,7 @@ test "open: an already-read message only fetches the body" {
     fixture.store.at(0).flags = .{ .unread = false };
 
     const effects = apply(&fixture.state, &fixture.store, .open_selected);
-    try expect_effects(&effects, &.{.{ .fetch_body = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1) } }});
+    try expect_effects(&effects, &.{.{ .fetch_body = .{ .account = AccountId.from_int(1), .mailbox = .inbox, .id = MessageId.from_int(1) } }});
 }
 
 test "open: an empty list explains itself and stays put" {

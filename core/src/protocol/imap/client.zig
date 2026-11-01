@@ -20,6 +20,8 @@ const Message = @import("../../domain/message.zig").Message;
 const Flags = @import("../../domain/message.zig").Flags;
 const MessageId = @import("../../domain/id.zig").MessageId;
 const Address = @import("../../domain/address.zig").Address;
+const mime = @import("../../mime.zig");
+const limits = @import("../../limits.zig");
 
 pub const Error = error{
     /// The transport failed or the peer went away.
@@ -50,6 +52,9 @@ pub const Client = struct {
     /// more, and a bug that tries to send more must fail, not truncate.
     command_buffer: [256]u8 = undefined,
     command_limit: u16 = 256,
+    /// Envelope strings unescaped from one response point here, so they stay
+    /// valid while the message is built (see response.parse).
+    parse_scratch: [1024]u8 = undefined,
     /// Per-read wait, and how many of those in a row mean "give up".
     timeout_ms: u32 = 100,
     max_timeouts: u32 = 100,
@@ -263,7 +268,7 @@ pub const Client = struct {
         while (true) {
             const maybe = self.framer.next() catch return error.ResponseTooLong;
             if (maybe) |complete| {
-                return response.parse(complete) catch |err| switch (err) {
+                return response.parse(complete, &self.parse_scratch) catch |err| switch (err) {
                     error.Malformed => continue,
                     error.InvalidDate => return error.ProtocolError,
                 };
@@ -291,12 +296,16 @@ fn message_from(fetch: *const response.Fetch, mailbox: Mailbox) Message {
         .flags = fetch.flags orelse .{},
     };
     if (fetch.envelope) |envelope| {
+        // Subjects and names travel as RFC 2047 encoded words; decode them at
+        // the protocol boundary so nothing above ever sees "=?utf-8?Q?...".
+        var name_buffer: [limits.name_max * 4]u8 = undefined;
+        var subject_buffer: [limits.subject_max * 4]u8 = undefined;
         message.from = Address.from_parts(
-            envelope.from_name orelse "",
+            mime.decode_encoded_words(envelope.from_name orelse "", &name_buffer),
             envelope.from_mailbox orelse "",
             envelope.from_host orelse "",
         );
-        message.subject.set(envelope.subject orelse "");
+        message.subject.set(mime.decode_encoded_words(envelope.subject orelse "", &subject_buffer));
     }
     return message;
 }
@@ -405,6 +414,47 @@ test "fetch_envelopes truncates to the output and skips entries without a UID" {
     try testing.expectEqualStrings("kept", messages[0].subject.slice());
 }
 
+test "escaped envelope strings survive the message builder" {
+    // The subject is quoted and escaped, so it lives in the parse scratch. The
+    // builder allocates large buffers of its own; before the scratch was
+    // client-owned, those overwrote the dead frame and the subject came out as
+    // garbage.
+    var scripted: Scripted = .{ .input = "* OK ready\r\n" ++
+        "a1 OK LOGIN completed\r\n" ++
+        "* 1 EXISTS\r\n" ++
+        "a2 OK selected\r\n" ++
+        "* 1 FETCH (UID 6 ENVELOPE (NIL \"he said \\\"hi\\\"\" ((\"Al \\\"A\\\" Ice\" NIL \"al\" \"example.com\")) NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
+        "a3 OK\r\n" };
+
+    var client = Client.init(scripted.transport());
+    try client.login("me", "pw");
+    _ = try client.select(.inbox);
+
+    var messages: [2]Message = undefined;
+    try testing.expectEqual(@as(u32, 1), try client.fetch_envelopes(.inbox, 1, 1, &messages));
+    try testing.expectEqualStrings("he said \"hi\"", messages[0].subject.slice());
+    try testing.expectEqualStrings("Al \"A\" Ice", messages[0].from.label());
+}
+
+test "envelopes decode RFC 2047 subjects and names" {
+    var scripted: Scripted = .{ .input = "* OK ready\r\n" ++
+        "a1 OK LOGIN completed\r\n" ++
+        "* 1 EXISTS\r\n" ++
+        "a2 OK selected\r\n" ++
+        "* 1 FETCH (UID 5 ENVELOPE (NIL \"=?utf-8?Q?caf=C3=A9?=\" ((\"=?iso-8859-1?Q?Ren=E9?=\" NIL \"rene\" \"example.com\")) NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
+        "a3 OK\r\n" };
+
+    var client = Client.init(scripted.transport());
+    try client.login("me", "pw");
+    const exists = try client.select(.inbox);
+    try testing.expectEqual(@as(u32, 1), exists);
+
+    var messages: [2]Message = undefined;
+    try testing.expectEqual(@as(u32, 1), try client.fetch_envelopes(.inbox, 1, 1, &messages));
+    try testing.expectEqualStrings("café", messages[0].subject.slice());
+    try testing.expectEqualStrings("René", messages[0].from.label());
+}
+
 test "fetch_body copies the literal into the caller's buffer" {
     const script =
         "* 1 FETCH (UID 7 BODY[TEXT] {11}\r\nhello world)\r\n" ++
@@ -415,7 +465,7 @@ test "fetch_body copies the literal into the caller's buffer" {
     var body: [64]u8 = undefined;
     const text = try client.fetch_body(7, &body);
     try testing.expectEqualStrings("hello world", text);
-    try testing.expectEqualStrings("a1 UID FETCH 7 (BODY.PEEK[TEXT])\r\n", scripted.output_text());
+    try testing.expectEqualStrings("a1 UID FETCH 7 (BODY.PEEK[])\r\n", scripted.output_text());
 }
 
 test "fetch_body truncates a body larger than the buffer" {
@@ -487,7 +537,7 @@ test "responses for another tag are ignored, continuations are skipped" {
 }
 
 test "a response larger than the framer is refused" {
-    const big = try testing.allocator.alloc(u8, 70 * 1024);
+    const big = try testing.allocator.alloc(u8, 200 * 1024);
     defer testing.allocator.free(big);
     @memset(big, 'x');
 

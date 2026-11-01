@@ -237,7 +237,7 @@ pub const Session = struct {
     fn run_effects(self: *Session, effects: []const core.effect.Effect) void {
         for (effects) |effect| {
             switch (effect) {
-                .fetch_body => |args| self.fetch_body(args.account, args.id),
+                .fetch_body => |args| self.fetch_body(args.account, args.mailbox, args.id),
                 .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags),
                 .move_message => |args| self.move_message(args.account, args.id, args.to),
                 .refresh => |args| self.reload(args.account, args.mailbox, args.force),
@@ -260,12 +260,12 @@ pub const Session = struct {
         return null;
     }
 
-    fn fetch_body(self: *Session, account: core.id.AccountId, id: MessageId) void {
+    fn fetch_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
         const mail = self.source_for(account) orelse {
             self.state.set_alert("That account is not connected", .{});
             return;
         };
-        const body = mail.fetch_body(id, &self.body) catch {
+        const body = mail.fetch_body(mailbox, id, &self.body) catch {
             self.body_len = 0;
             self.body_loaded = true;
             self.wrapped = .{};
@@ -427,10 +427,15 @@ const FakeMail = struct {
         return self.inner.mail().fetch(mailbox, out);
     }
 
-    fn fetchBodyThunk(context: *anyopaque, id: MessageId, out: []u8) core.mail_port.Error![]const u8 {
+    fn fetchBodyThunk(
+        context: *anyopaque,
+        mailbox: Mailbox,
+        id: MessageId,
+        out: []u8,
+    ) core.mail_port.Error![]const u8 {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         if (self.fail_body) return error.Rejected;
-        return self.inner.mail().fetch_body(id, out);
+        return self.inner.mail().fetch_body(mailbox, id, out);
     }
 
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: core.message.Flags) core.mail_port.Error!void {
@@ -846,6 +851,7 @@ test "an effect for an unknown account alerts instead of crashing" {
     _ = core.update.apply(&rig.session.state, &rig.session.store, .{ .move = .down });
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(9),
+        .mailbox = .inbox,
         .id = MessageId.from_int(1),
     } }});
     try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());

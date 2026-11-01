@@ -17,7 +17,7 @@ const Outgoing = @import("../domain/outgoing.zig").Outgoing;
 pub const Effect = union(enum) {
     sync_flags: struct { account: AccountId, id: MessageId, flags: Flags },
     move_message: struct { account: AccountId, id: MessageId, to: Mailbox },
-    fetch_body: struct { account: AccountId, id: MessageId },
+    fetch_body: struct { account: AccountId, mailbox: Mailbox, id: MessageId },
     /// Null account means every account (the unified view).
     refresh: struct { account: ?AccountId, mailbox: Mailbox, force: bool = false },
     /// Hand the message to the outbox. The body is borrowed from compose state.
@@ -57,7 +57,7 @@ test "Effects: starts empty and grows in order" {
 
     const id = MessageId.from_int(7);
     const account = AccountId.from_int(1);
-    effects.add(.{ .fetch_body = .{ .account = account, .id = id } });
+    effects.add(.{ .fetch_body = .{ .account = account, .mailbox = .inbox, .id = id } });
     effects.add(.{ .refresh = .{ .account = account, .mailbox = .inbox } });
 
     try testing.expect(!effects.is_empty());
@@ -71,7 +71,7 @@ test "Effects: fills to the declared bound" {
     const id = MessageId.from_int(1);
     var index: u32 = 0;
     while (index < limits.actions_max) : (index += 1) {
-        effects.add(.{ .fetch_body = .{ .account = AccountId.from_int(1), .id = id } });
+        effects.add(.{ .fetch_body = .{ .account = AccountId.from_int(1), .mailbox = .inbox, .id = id } });
     }
     try testing.expectEqual(limits.actions_max, effects.len);
 }

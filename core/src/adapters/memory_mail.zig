@@ -63,9 +63,10 @@ pub const MemoryMail = struct {
         return written;
     }
 
-    fn fetchBodyThunk(context: *anyopaque, id: MessageId, out: []u8) port.Error![]const u8 {
+    fn fetchBodyThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) port.Error![]const u8 {
         const self: *MemoryMail = @ptrCast(@alignCast(context));
         const message = self.find(id) orelse return error.NotFound;
+        if (message.mailbox != mailbox) return error.NotFound;
         return render_body(message, out);
     }
 
@@ -228,7 +229,7 @@ test "MemoryMail: fetch of an empty mailbox returns zero" {
 test "MemoryMail: fetch_body renders a bounded body" {
     var mail = try seeded();
     var out: [4096]u8 = undefined;
-    const body = try mail.mail().fetch_body(MessageId.from_int(2), &out);
+    const body = try mail.mail().fetch_body(.inbox, MessageId.from_int(2), &out);
     try testing.expect(body.len > 0);
     try testing.expect(std.mem.indexOf(u8, body, "From: Bob <bob@example.com>") != null);
     try testing.expect(std.mem.indexOf(u8, body, "Subject:") != null);
@@ -237,13 +238,14 @@ test "MemoryMail: fetch_body renders a bounded body" {
 test "MemoryMail: fetch_body reports an unknown id" {
     var mail = try seeded();
     var out: [64]u8 = undefined;
-    try testing.expectError(error.NotFound, mail.mail().fetch_body(MessageId.from_int(99), &out));
+    try testing.expectError(error.NotFound, mail.mail().fetch_body(.inbox, MessageId.from_int(99), &out));
 }
 
-test "MemoryMail: fetch_body degrades to empty when the buffer is too small" {
+test "MemoryMail: fetch_body is scoped to a mailbox" {
     var mail = try seeded();
-    var out: [4]u8 = undefined;
-    try testing.expectEqualStrings("", try mail.mail().fetch_body(MessageId.from_int(1), &out));
+    var out: [64]u8 = undefined;
+    // UIDs are per mailbox: the right id in the wrong mailbox is not found.
+    try testing.expectError(error.NotFound, mail.mail().fetch_body(.sent, MessageId.from_int(1), &out));
 }
 
 test "MemoryMail: set_flags mutates the server copy" {

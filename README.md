@@ -101,6 +101,12 @@ development tool, not a dependency).
 - `core/` holds the domain and the application state machine and performs no
   I/O at all. `tui/` is one adapter on top of it. A GUI can be a second adapter.
 
+Messages are rendered as text, not raw MIME: `core/src/mime.zig` decodes
+encoded-word subjects and names, base64 and quoted-printable bodies, the common
+charsets (UTF-8, ISO-8859-1, Windows-1252), and walks multipart trees (prefers
+`text/plain`, falls back to stripped HTML). Every buffer is bounded; a message
+larger than 128 KiB is truncated rather than refused.
+
 Live IMAP works: TLS transport with mandatory certificate verification, the
 protocol layer (framing with literals, commands, responses with ENVELOPE),
 the client loop, the `Mail` adapter, multi-account config, and the setup

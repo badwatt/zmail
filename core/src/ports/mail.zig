@@ -29,9 +29,11 @@ pub const Mail = struct {
         /// `out`, newest first, and returns how many were written. If `out` is
         /// too small, the oldest messages are dropped.
         fetch: *const fn (context: *anyopaque, mailbox: Mailbox, out: []Message) Error!u32,
-        /// Copies the plain-text body of `id` into `out` and returns the written
-        /// slice. Bodies are fetched on demand and never cached in envelopes.
-        fetch_body: *const fn (context: *anyopaque, id: MessageId, out: []u8) Error![]const u8,
+        /// Copies the displayable text of `id` (which lives in `mailbox`) into
+        /// `out` and returns the written slice. Bodies are fetched on demand and
+        /// never cached in envelopes. UIDs are per mailbox, so the mailbox is
+        /// part of the address.
+        fetch_body: *const fn (context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) Error![]const u8,
         set_flags: *const fn (context: *anyopaque, id: MessageId, flags: Flags) Error!void,
         move_message: *const fn (context: *anyopaque, id: MessageId, to: Mailbox) Error!void,
     };
@@ -40,8 +42,8 @@ pub const Mail = struct {
         return self.vtable.fetch(self.context, mailbox, out);
     }
 
-    pub fn fetch_body(self: Mail, id: MessageId, out: []u8) Error![]const u8 {
-        return self.vtable.fetch_body(self.context, id, out);
+    pub fn fetch_body(self: Mail, mailbox: Mailbox, id: MessageId, out: []u8) Error![]const u8 {
+        return self.vtable.fetch_body(self.context, mailbox, id, out);
     }
 
     pub fn set_flags(self: Mail, id: MessageId, flags: Flags) Error!void {
@@ -94,9 +96,10 @@ const Recorder = struct {
         return 1;
     }
 
-    fn fetchBodyThunk(context: *anyopaque, id: MessageId, out: []u8) Error![]const u8 {
+    fn fetchBodyThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) Error![]const u8 {
         const self: *Recorder = @ptrCast(@alignCast(context));
         self.last_id = id;
+        self.last_mailbox = mailbox;
         if (out.len == 0) return "";
         out[0] = 'x';
         return out[0..1];
@@ -140,7 +143,7 @@ test "Mail.fetch with no room writes nothing and succeeds" {
 test "Mail.fetch_body forwards the id and returns a slice into out" {
     var recorder: Recorder = .{};
     var out: [4]u8 = undefined;
-    const body = try recorder.mail().fetch_body(MessageId.from_int(9), &out);
+    const body = try recorder.mail().fetch_body(.inbox, MessageId.from_int(9), &out);
     try testing.expectEqualStrings("x", body);
     try testing.expectEqual(MessageId.from_int(9), recorder.last_id);
 }
@@ -148,7 +151,7 @@ test "Mail.fetch_body forwards the id and returns a slice into out" {
 test "Mail.fetch_body handles an empty output buffer" {
     var recorder: Recorder = .{};
     var out: [0]u8 = undefined;
-    try testing.expectEqualStrings("", try recorder.mail().fetch_body(MessageId.from_int(9), &out));
+    try testing.expectEqualStrings("", try recorder.mail().fetch_body(.inbox, MessageId.from_int(9), &out));
 }
 
 test "Mail.set_flags forwards id and flags" {

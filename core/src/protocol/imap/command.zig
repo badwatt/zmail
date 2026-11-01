@@ -128,7 +128,7 @@ pub fn fetch_body(buffer: []u8, tag: []const u8, uid: u32) Error![]const u8 {
 
     var render = Render.begin(buffer, tag, "UID FETCH ");
     render.number(uid);
-    render.text(" (BODY.PEEK[TEXT])");
+    render.text(" (BODY.PEEK[])");
     return render.finish();
 }
 
@@ -222,7 +222,7 @@ test "fetch_envelopes rejects impossible ranges" {
 
 test "fetch_body uses UID and peeks so it does not mark the message read" {
     var buffer: [128]u8 = undefined;
-    try expect_command("a4 UID FETCH 42 (BODY.PEEK[TEXT])\r\n", fetch_body(&buffer, "a4", 42));
+    try expect_command("a4 UID FETCH 42 (BODY.PEEK[])\r\n", fetch_body(&buffer, "a4", 42));
 }
 
 test "fetch_body rejects uid zero" {

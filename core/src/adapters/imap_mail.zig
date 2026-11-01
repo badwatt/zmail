@@ -12,6 +12,8 @@ const std = @import("std");
 const client_mod = @import("../protocol/imap/client.zig");
 const transport_mod = @import("../ports/transport.zig");
 const port = @import("../ports/mail.zig");
+const mime = @import("../mime.zig");
+const limits = @import("../limits.zig");
 
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
 const Message = @import("../domain/message.zig").Message;
@@ -24,6 +26,11 @@ pub const ImapMail = struct {
     /// Which configured account these UIDs belong to. Stamped on every
     /// envelope: the same UID can exist on several servers.
     account: AccountId,
+    /// Full raw message, its displayable text, and the MIME decoding scratch.
+    /// Three buffers, no allocation, all bounded: a mail server cannot make us
+    /// allocate, and a huge message is truncated, not fatal.
+    raw: [limits.body_max * 2]u8 = undefined,
+    scratch: [limits.body_max]u8 = undefined,
     selected: ?Mailbox = null,
     exists: u32 = 0,
 
@@ -67,9 +74,18 @@ pub const ImapMail = struct {
         return count;
     }
 
-    fn fetchBodyThunk(context: *anyopaque, id: MessageId, out: []u8) port.Error![]const u8 {
+    fn fetchBodyThunk(
+        context: *anyopaque,
+        mailbox: Mailbox,
+        id: MessageId,
+        out: []u8,
+    ) port.Error![]const u8 {
         const self: *ImapMail = @ptrCast(@alignCast(context));
-        return self.client.fetch_body(try uid_of(id), out) catch |err| return mapError(err);
+        // UIDs are per mailbox, and after a cached start no mailbox may be
+        // selected yet: select before fetching, always.
+        try self.selectIfNeeded(mailbox);
+        const raw = self.client.fetch_body(try uid_of(id), &self.raw) catch |err| return mapError(err);
+        return mime.text_body(raw, out, &self.scratch);
     }
 
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) port.Error!void {
@@ -181,16 +197,18 @@ test "switching mailbox selects again" {
 }
 
 test "body, flags, and move reach the right commands" {
+    const message = "Content-Type: text/plain; charset=utf-8\r\n\r\nhi";
     var scripted: Scripted = .{ .input = login_ok ++
-        "* 1 FETCH (BODY[TEXT] {2}\r\nhi)\r\na2 OK\r\n" ++
-        "a3 OK\r\n" ++
-        "a4 OK\r\n" };
+        "* 1 EXISTS\r\na2 OK selected\r\n" ++
+        "* 1 FETCH (BODY[] {45}\r\n" ++ message ++ ")\r\na3 OK\r\n" ++
+        "a4 OK\r\n" ++
+        "a5 OK\r\n" };
     var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
 
-    var body: [16]u8 = undefined;
-    try testing.expectEqualStrings("hi", try mail.fetch_body(MessageId.from_int(7), &body));
+    var body: [64]u8 = undefined;
+    try testing.expectEqualStrings("hi", try mail.fetch_body(.inbox, MessageId.from_int(7), &body));
     try mail.set_flags(MessageId.from_int(7), .{ .unread = false });
     try mail.move_message(MessageId.from_int(7), .trash);
 
@@ -216,7 +234,7 @@ test "a rejected select is NotFound, and a missing body too" {
     var imap_missing = try ImapMail.open(missing.transport(), AccountId.from_int(1), "me", "pw");
     defer imap_missing.close();
     var body: [8]u8 = undefined;
-    try testing.expectError(error.NotFound, imap_missing.mail().fetch_body(MessageId.from_int(9), &body));
+    try testing.expectError(error.NotFound, imap_missing.mail().fetch_body(.inbox, MessageId.from_int(9), &body));
 }
 
 test "every client error maps onto one of the port's three cases" {

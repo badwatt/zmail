@@ -63,9 +63,17 @@ The port exists; this milestone fills it in.
   credential file per account, a unified list with an `a` scope switch, and a
   TSV envelope cache under `~/.cache/amail`. Switching to a loaded mailbox no
   longer refetches it, and startup reads the cache before the network.
+- **Real mail bodies (done).** `core/src/mime.zig` decodes encoded-word
+  subjects and names, base64 and quoted-printable, the common charsets, and
+  multipart trees (plain first, HTML stripped as a fallback). Bodies are
+  fetched with `BODY.PEEK[]` from the message's own mailbox, so reading Sent
+  works and a cached start still opens messages.
 - **Lazy connections (next).** The launcher still logs in before the UI opens,
   so a dead server delays startup. Sources should connect on demand and show
   cached mail immediately.
+- **Big messages (next).** A response is bounded at 128 KiB, so a message with
+  a large attachment is truncated or refused. Streaming a literal straight into
+  the body buffer would remove the bound without an allocation.
 - **M3.2 next.** Quote the original in replies; `Cc`/`Bcc` and multiple
   recipients; RFC 2047 encoding for non-ASCII subjects; drafts persisted in the
   Drafts mailbox; reply-all and forward; threading by `Message-ID`.
