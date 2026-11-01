@@ -87,7 +87,7 @@ and disappears on the next action.
 | `Tab` `]` | next mailbox |
 | `Shift+Tab` `[` | previous mailbox |
 | `1`–`6` | jump to Inbox, Sent, Drafts, Archive, Trash, Junk |
-| `R` | refresh from the server |
+| `Ctrl+R` | refresh from the server |
 | `?` | help (`/` filters the key list) |
 | `c` | compose a new message |
 | `r` | reply to the selected message |

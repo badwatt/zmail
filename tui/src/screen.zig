@@ -101,6 +101,12 @@ pub const Screen = struct {
     columns: u16 = 0,
     rows: u16 = 0,
     cells: [max_rows][max_columns]Cell = undefined,
+    /// The last frame written to the terminal. Flushing only the rows that
+    /// differ keeps a ticking spinner to one row instead of a full repaint,
+    /// which is what made the header flicker.
+    previous: [max_rows][max_columns]Cell = undefined,
+    /// Nothing has been written yet: the next flush must paint every row.
+    pristine: bool = true,
 
     pub fn init(columns: u16, rows: u16) Screen {
         var screen: Screen = .{};
@@ -109,9 +115,48 @@ pub const Screen = struct {
     }
 
     pub fn resize(self: *Screen, columns: u16, rows: u16) void {
-        self.columns = @min(columns, max_columns);
-        self.rows = @min(rows, max_rows);
+        const bounded_columns = @min(columns, max_columns);
+        const bounded_rows = @min(rows, max_rows);
+        // Called on every frame; resizing to the same size must not throw away
+        // the previous frame (that would repaint everything and flicker).
+        if (bounded_columns == self.columns and bounded_rows == self.rows) return;
+        self.columns = bounded_columns;
+        self.rows = bounded_rows;
         self.clear();
+        self.pristine = true;
+    }
+
+    /// True when this row differs from what the terminal already shows.
+    pub fn row_changed(self: *const Screen, row: u16) bool {
+        assert(row < self.rows);
+        if (self.pristine) return true;
+        var x: u16 = 0;
+        while (x < self.columns) : (x += 1) {
+            const now = self.cells[row][x];
+            const before = self.previous[row][x];
+            if (now.ch != before.ch) return true;
+            if (!Style.eql(now.style, before.style)) return true;
+        }
+        return false;
+    }
+
+    /// True when any row needs to be written.
+    pub fn dirty_any(self: *const Screen) bool {
+        if (self.pristine) return self.rows > 0;
+        var row: u16 = 0;
+        while (row < self.rows) : (row += 1) {
+            if (self.row_changed(row)) return true;
+        }
+        return false;
+    }
+
+    /// Remembers the frame as written.
+    pub fn commit(self: *Screen) void {
+        var row: u16 = 0;
+        while (row < self.rows) : (row += 1) {
+            @memcpy(self.previous[row][0..self.columns], self.cells[row][0..self.columns]);
+        }
+        self.pristine = false;
     }
 
     pub fn clear(self: *Screen) void {

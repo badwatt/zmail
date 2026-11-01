@@ -117,7 +117,9 @@ Live IMAP works: TLS transport with mandatory certificate verification, the
 protocol layer (framing with literals, commands, responses with ENVELOPE),
 the client loop, the `Mail` adapter, multi-account config, and the setup
 assistant. Envelopes are cached under `~/.cache/amail`, so a restart and a
-mailbox switch do not wait for the network; `R` refreshes on demand. The protocol
+mailbox switch do not wait for the network; `Ctrl+R` refreshes on demand, and
+message bodies are cached too (sealed with XChaCha20-Poly1305), so reading a
+message you have already opened never touches a socket. The protocol
 and adapter are tested against a scripted server; the TLS transport is verified
 against a real IMAP server (a refused login is the expected end-to-end result
 for a bogus password). STARTTLS and a real secret store are next.

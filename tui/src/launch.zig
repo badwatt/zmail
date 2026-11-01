@@ -80,7 +80,7 @@ fn run_demo(gpa: std.mem.Allocator, system: SessionSystem) ?Failure {
     demo.outboxes[0] = .{ .id = core.id.AccountId.from_int(1), .outbox = demo.outbox[0].outbox() };
     demo.outboxes[1] = .{ .id = core.id.AccountId.from_int(2), .outbox = demo.outbox[1].outbox() };
 
-    return run_session(gpa, system, &demo.sources, &demo.outboxes, null, false);
+    return run_session(gpa, system, &demo.sources, &demo.outboxes, null, null, false);
 }
 
 fn run_session(
@@ -89,6 +89,7 @@ fn run_session(
     accounts: []const session_mod.MailSource,
     outboxes: []const session_mod.OutboxSource,
     cache: ?core.cache_port.Cache,
+    bodies: ?core.bodies_port.BodyCache,
     splash: bool,
 ) ?Failure {
     var session: session_mod.Session = undefined;
@@ -96,6 +97,7 @@ fn run_session(
         .accounts = accounts,
         .outboxes = outboxes,
         .cache = cache,
+        .bodies = bodies,
         .splash = splash,
         .system = system,
         .theme = theme_for_environment(),
@@ -366,9 +368,13 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
 
     var file_cache: net.cache_file.FileCache = undefined;
     var cache: ?core.cache_port.Cache = null;
+    var file_bodies: net.bodies.FileBodies = undefined;
+    var bodies: ?core.bodies_port.BodyCache = null;
     if (cache_dir.len > 0) {
         file_cache = net.cache_file.FileCache.init(gpa, io, cache_dir, labels[0..file.len]);
         cache = file_cache.cache();
+        file_bodies = net.bodies.FileBodies.init(gpa, io, cache_dir, labels[0..file.len]);
+        bodies = file_bodies.cache();
     }
 
     const outcome = run_session(
@@ -377,6 +383,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         live.sources[0..live.mail_count],
         live.outboxes[0..live.outbox_count],
         cache,
+        bodies,
         true,
     );
     if (outcome != null) return outcome;

@@ -8,6 +8,7 @@ const std = @import("std");
 
 pub const tls = @import("tls.zig");
 pub const cache_file = @import("cache_file.zig");
+pub const bodies = @import("bodies.zig");
 
 test {
     _ = @import("tls.zig");

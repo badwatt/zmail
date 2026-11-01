@@ -35,6 +35,10 @@ pub const Inputs = struct {
 
 pub fn frame(inputs: Inputs, out: *Screen) void {
     out.resize(inputs.columns, inputs.rows);
+    // Renderers draw what they need; anything else must not survive from the
+    // previous view. The flush still compares rows, so this costs nothing on
+    // the wire.
+    out.clear();
     const lay = layout_mod.Layout.compute(out.columns, out.rows, inputs.state.accounts.max_label());
     if (lay.too_small) {
         render_too_small(inputs, out);
@@ -647,9 +651,11 @@ fn render_help_filter(inputs: Inputs, rect: Rect, out: *Screen) void {
         return;
     }
 
-    const x = @as(u16, 4) + out.put_text(rect.x + 4, y, filter, rect.width -| 6, inputs.theme.text);
+    const written = out.put_text(rect.x + 4, y, filter, rect.width -| 6, inputs.theme.text);
     if (inputs.state.mode == .help_search) {
-        out.put(x, y, ' ', inputs.theme.text.with_reverse());
+        // The caret follows the text: `put_text` returns cells written, not an
+        // absolute column, so it must be added to where the text started.
+        out.put(rect.x + 4 + written, y, ' ', inputs.theme.text.with_reverse());
     }
 }
 
@@ -1156,6 +1162,31 @@ test "the boot splash shows the wordmark, the server, and a spinner" {
     // The list is not drawn behind it.
     var row_buffer: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
+}
+
+test "the help filter caret sits after the text, not at the left edge" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .help;
+    f.state.mode = .help_search;
+    f.state.help_filter.set("hey");
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+
+    const card_width: u16 = @min(64, 100 - 4);
+    const card_height: u16 = @min(@as(u16, help_rows.len + 5), 24 - 2);
+    const rect = Rect{
+        .x = (100 - card_width) / 2,
+        .y = (24 - card_height) / 2,
+        .width = card_width,
+        .height = card_height,
+    };
+    const row = rect.y + 1;
+    // The text starts at rect.x + 4; "hey" is three cells, so the caret is next.
+    try testing.expectEqual(@as(u21, ' '), out.cells[row][rect.x + 7].ch);
+    try testing.expect(out.cells[row][rect.x + 7].style.attrs.reverse);
+    try testing.expect(!out.cells[row][0 + 7].style.attrs.reverse);
 }
 
 test "a refresh paints a spinner next to the position" {

@@ -24,6 +24,7 @@ pub const time = @import("domain/time.zig");
 pub const mail_port = @import("ports/mail.zig");
 pub const outbox_port = @import("ports/outbox.zig");
 pub const cache_port = @import("ports/cache.zig");
+pub const bodies_port = @import("ports/bodies.zig");
 pub const transport_port = @import("ports/transport.zig");
 pub const memory_mail = @import("adapters/memory_mail.zig");
 pub const imap_mail = @import("adapters/imap_mail.zig");
@@ -44,6 +45,7 @@ pub const smtp = @import("protocol/smtp.zig");
 pub const demo = @import("demo.zig");
 pub const cache = @import("cache.zig");
 pub const mime = @import("mime.zig");
+pub const sealed = @import("sealed.zig");
 pub const lazy_mail = @import("adapters/lazy.zig").LazyMail;
 pub const lazy_outbox = @import("adapters/lazy.zig").LazyOutbox;
 pub const config = @import("config.zig");
@@ -66,6 +68,7 @@ test {
     _ = @import("ports/mail.zig");
     _ = @import("ports/outbox.zig");
     _ = @import("ports/cache.zig");
+    _ = @import("ports/bodies.zig");
     _ = @import("adapters/memory_mail.zig");
     _ = @import("adapters/imap_mail.zig");
     _ = @import("adapters/smtp_outbox.zig");
@@ -82,6 +85,7 @@ test {
     _ = @import("demo.zig");
     _ = @import("cache.zig");
     _ = @import("mime.zig");
+    _ = @import("sealed.zig");
     _ = @import("adapters/lazy.zig");
     _ = @import("config.zig");
 }

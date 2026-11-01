@@ -72,6 +72,10 @@ The port exists; this milestone fills it in.
   without touching the others; the unified list labels every row with its
   account, in that account's hue; `Ctrl+R` pulls in a worker thread with a
   footer spinner; mailboxes resolve their real server names via `LIST`.
+- **Instant reading (done).** Bodies are cached sealed, one file per message,
+  so opening a message you have read opens no socket (verified: zero `connect`
+  calls). Only rows that changed are written to the terminal, so a ticking
+  spinner no longer repaints the screen — that was the header flicker.
 - **An account picker (next).** `a` cycles the scope; a small overlay listing
   every account (and "All accounts") would be clearer than cycling.
 - **Lazy connections (done).** The launcher builds accounts without touching

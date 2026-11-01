@@ -82,9 +82,16 @@ milestone. There is no analytics, no update check, and no crash reporting.
   guarded by `0600` and never printed, logged, or included in the config.
 - **Per-account credentials.** One `0600` file per account label under
   `credentials/`; the config still refuses a `password` key.
-- **The cache is private data.** `~/.cache/amail/<label>/<mailbox>.tsv` holds
-  senders, subjects, and snippets in plaintext, mode `0600` inside a `0700`
-  directory. It is only a copy of what the server sends, and `R` replaces it.
+- **The envelope cache is private data.** `~/.cache/amail/<label>/<mailbox>.tsv`
+  holds senders, subjects, and snippets in plaintext, mode `0600` inside a
+  `0700` directory. It is only a copy of what the server sends, and `Ctrl+R`
+  replaces it.
+- **Bodies are sealed at rest.** `~/.cache/amail/<label>/bodies/<mailbox>/<uid>.bin`
+  is `nonce || XChaCha20-Poly1305 ciphertext || tag`, keyed with
+  `~/.cache/amail/key` (32 random bytes, `0600`, created on first use; the key
+  uses the IO's CSPRNG). No body text is ever written in the clear, so a stray
+  backup or a synced cache directory does not leak prose. A tampered or
+  truncated file fails authentication and is treated as a cache miss.
 - **SMTP AUTH PLAIN only inside TLS.** The credentials are base64-encoded in the
   command (as SMTP requires) and only sent after the TLS handshake. Plaintext
   SMTP follows the same `allow_plaintext` rule as IMAP. The encoded payload is

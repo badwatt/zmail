@@ -54,6 +54,9 @@ pub const Deps = struct {
     /// Whether connecting can block for long enough to deserve a splash. The
     /// demo's mail is in memory, so it boots straight to the list.
     splash: bool = true,
+    /// Sealed bodies on disk: reading a message twice must not touch the
+    /// network twice.
+    bodies: ?core.bodies_port.BodyCache = null,
     system: System,
     theme: theme_mod.Theme = theme_mod.Theme.dark(),
     now: Now = fixed_now,
@@ -413,6 +416,17 @@ pub const Session = struct {
     }
 
     fn fetch_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
+        // The local copy first: opening a message you have read is instant.
+        if (self.deps.bodies) |bodies| {
+            if (bodies.load(account, mailbox, id, &self.body) catch null) |cached| {
+                self.body_len = @intCast(cached.len);
+                self.body_loaded = true;
+                self.wrapped = .{};
+                self.needs_render = true;
+                return;
+            }
+        }
+
         const mail = self.source_for(account) orelse {
             self.state.set_alert("That account is not connected", .{});
             return;
@@ -426,6 +440,9 @@ pub const Session = struct {
         };
         self.body_len = @intCast(body.len);
         self.body_loaded = true;
+        if (self.deps.bodies) |bodies| {
+            bodies.save(account, mailbox, id, body) catch {};
+        }
     }
 
     fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags) void {
@@ -514,16 +531,24 @@ pub const Session = struct {
 
     fn flush(self: *Session) void {
         const system = self.deps.system;
-        system.write("\x1b[H") catch return;
+        if (!self.screen.dirty_any()) return;
 
         var row: u16 = 0;
         while (row < self.screen.rows) : (row += 1) {
+            if (!self.screen.row_changed(row)) continue;
+
+            // Absolute placement per row: skipping rows means the terminal
+            // cursor cannot be assumed to be anywhere in particular.
+            var cursor: [16]u8 = undefined;
+            const at = std.fmt.bufPrint(&cursor, "\x1b[{d};1H", .{row + 1}) catch return;
+            system.write(at) catch return;
+
             var writer = std.Io.Writer.fixed(&self.row_buffer);
             self.screen.encode_row(row, &writer, self.deps.theme.colored) catch return;
-            if (row > 0) system.write("\r\n") catch return;
             system.write(writer.buffered()) catch return;
         }
         system.write("\x1b[0m") catch {};
+        self.screen.commit();
     }
 };
 
@@ -1088,6 +1113,55 @@ test "a failed move becomes an alert" {
 
     rig.send("d");
     try testing.expectEqualStrings("Could not move the message", rig.session.state.status.slice());
+}
+
+test "a cached body opens without touching the network" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var bodies: core.bodies_port.Memory = .{};
+    try bodies.cache().save(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "cached prose");
+    bodies.saves = 0;
+    rig.session.deps.bodies = bodies.cache();
+
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(1),
+    } }});
+    try testing.expectEqualStrings("cached prose", rig.session.body[0..rig.session.body_len]);
+    try testing.expectEqual(@as(u32, 1), bodies.loads);
+    try testing.expectEqual(@as(u32, 0), bodies.saves);
+}
+
+test "a fetched body is saved for next time" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var bodies: core.bodies_port.Memory = .{};
+    rig.session.deps.bodies = bodies.cache();
+
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(1),
+    } }});
+    try testing.expectEqual(@as(u32, 1), bodies.saves);
+    try testing.expect(bodies.have);
+    try testing.expect(rig.session.body_len > 0);
+
+    // Second open: the cache answers, the network is not asked again.
+    rig.session.body_loaded = false;
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(1),
+    } }});
+    try testing.expectEqual(@as(u32, 2), bodies.loads);
 }
 
 test "an in-memory source boots without a splash" {
