@@ -403,7 +403,16 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         read_password(io, path, entry.label.slice(), file.len == 1, &account.password) catch {};
         account.password_ready = !account.password.is_empty();
         account.oauth_client_id.set(entry.oauth_client_id.slice());
-        if (read_token(io, path, entry.label.slice())) |token| {
+        if (read_token(io, path, entry.label.slice())) |stored| {
+            var token = stored;
+            if (!token.is_fresh(os.now_unix())) {
+                // Expired: exchange the refresh token, and keep the new one.
+                const provider = provider_for(entry.account.imap.host.slice());
+                const client_id = entry.oauth_client_id.slice();
+                if (net.oauth_flow.refresh(gpa, io, provider, client_id, &token)) {
+                    write_token(io, path, entry.label.slice(), &token) catch {};
+                }
+            }
             if (token.is_fresh(os.now_unix())) account.token = token;
         } else |_| {}
         // An OAuth account lives on its token: a missing password is expected.
@@ -882,7 +891,17 @@ const FileAccounts = struct {
         const entry = file.items()[index];
         if (entry.account.imap.security != .tls) return error.Unavailable;
 
-        const has_token = read_token(self.io, self.path, entry.label.slice()) catch null;
+        var stored_token = read_token(self.io, self.path, entry.label.slice()) catch null;
+        if (stored_token) |*token| {
+            if (!token.is_fresh(os.now_unix())) {
+                const provider = provider_for(entry.account.imap.host.slice());
+                const client_id = entry.oauth_client_id.slice();
+                if (net.oauth_flow.refresh(self.gpa, self.io, provider, client_id, token)) {
+                    write_token(self.io, self.path, entry.label.slice(), token) catch {};
+                }
+            }
+        }
+        const has_token = stored_token;
         const fresh = if (has_token) |value| value.is_fresh(os.now_unix()) else false;
 
         var password: core.secret.Secret = .{};

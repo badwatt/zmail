@@ -696,10 +696,11 @@ pub const Session = struct {
         username,
         password,
         sign_in,
+        advanced,
         client_id,
 
         fn count() u8 {
-            return 9;
+            return 10;
         }
 
         fn step(self: Field) core.setup.Step {
@@ -711,7 +712,7 @@ pub const Session = struct {
                 .smtp_port => .smtp_port,
                 .username => .username,
                 .password => .password,
-                .sign_in, .client_id => .review,
+                .sign_in, .advanced, .client_id => .review,
             };
         }
     };
@@ -832,6 +833,7 @@ pub const Session = struct {
         switch (key) {
             .char => |codepoint| switch (form.field) {
                 .sign_in => if (codepoint == ' ') form.setup.set_oauth(!form.setup.oauth),
+                .advanced => if (codepoint == ' ') form.setup.toggle_advanced(),
                 .client_id => if (codepoint >= 0x20 and codepoint != 0x7f) form.setup.oauth_client_id.append_codepoint(codepoint),
                 else => if (codepoint >= 0x20 and codepoint != 0x7f) form.setup.append(codepoint),
             },
@@ -845,6 +847,7 @@ pub const Session = struct {
             .enter => switch (form.field) {
                 .password => self.save_settings(form),
                 .sign_in => form.setup.set_oauth(!form.setup.oauth),
+                .advanced => form.setup.toggle_advanced(),
                 .client_id => self.save_settings(form),
                 else => self.move_field(form, 1),
             },
@@ -897,7 +900,12 @@ pub const Session = struct {
     fn move_field(self: *Session, form: *Settings, delta: i8) void {
         const count: i16 = Field.count();
         const current: i16 = @backingInt(form.field);
-        const next = @mod(current + delta + count, count);
+        // Walk in the direction asked, stepping over hidden rows.
+        var next = @mod(current + delta + count, count);
+        var guard: u8 = 0;
+        while (!form.setup.field_visible(@intCast(next)) and guard < count) : (guard += 1) {
+            next = @mod(next + delta + count, count);
+        }
         form.field = @fromBackingInt(@intCast(@as(u8, @intCast(next))));
         form.setup.step = form.field.step();
         self.needs_render = true;
@@ -2022,9 +2030,20 @@ test "with OAuth the password row is skipped" {
     _ = rig.session.settings_key(form, .{ .char = ' ' });
     try testing.expect(form.setup.oauth);
     _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.advanced, form.field);
+
+    // Advanced is folded: Tab steps over the client id.
+    try testing.expect(!form.setup.show_advanced);
+    try testing.expect(!form.setup.field_visible(@backingInt(Session.Field.client_id)));
+    _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.address, form.field);
+
+    // Open it and the client id becomes reachable.
+    form.field = .advanced;
+    _ = rig.session.settings_key(form, .enter);
+    try testing.expect(form.setup.show_advanced);
+    _ = rig.session.settings_key(form, .tab);
     try testing.expectEqual(Session.Field.client_id, form.field);
-    _ = rig.session.settings_key(form, .back_tab);
-    try testing.expectEqual(Session.Field.sign_in, form.field);
 }
 
 test "a new OAuth account saves without a password and signs in" {

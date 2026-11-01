@@ -55,7 +55,17 @@ pub fn settings(
     out.clear();
 
     const card_width: u16 = @min(66, out.columns -| 4);
-    const rows: u16 = 9;
+    // Only the rows that make sense right now: no password with OAuth, no
+    // client id unless Advanced is open.
+    var visible: [10]u8 = undefined;
+    var visible_count: u8 = 0;
+    for (0..10) |candidate| {
+        const index: u8 = @intCast(candidate);
+        if (!setup.field_visible(index)) continue;
+        visible[visible_count] = index;
+        visible_count += 1;
+    }
+    const rows: u16 = visible_count;
     const card_height: u16 = rows + 6; // title, blanks, fields, problem
     const rect = Rect{
         .x = (out.columns -| card_width) / 2,
@@ -77,34 +87,34 @@ pub fn settings(
         "Username",
         "Password",
         "Sign in",
+        "Advanced",
         "Client ID",
     };
 
-    var index: u8 = 0;
-    while (index < rows) : (index += 1) {
-        const y = rect.y + 2 + index;
+    var row: u8 = 0;
+    while (row < rows) : (row += 1) {
+        const index = visible[row];
+        const y = rect.y + 2 + row;
         const active = index == @backingInt(field);
         if (active) {
             out.fill_rect(.{ .x = rect.x + 1, .y = y, .width = rect.width - 2, .height = 1 }, ' ', theme.selection);
             out.put(rect.x + 1, y, '▌', theme.accent);
         }
 
-        // An OAuth account has no password row: say so instead of hiding it silently.
-        const shown = if (index == 6 and setup.oauth) "— (OAuth)" else labels[index];
+        const shown = switch (index) {
+            8 => if (setup.show_advanced) "Advanced ▾" else "Advanced ▸",
+            else => labels[index],
+        };
         _ = out.put_text(rect.x + 3, y, shown, 13, if (active) theme.accent else theme.dim);
 
         var masked: [core.limits.secret_max]u8 = @splat('*');
         const raw = switch (index) {
             7 => if (setup.oauth) "oauth" else "password",
-            8 => setup.oauth_client_id.slice(),
+            8 => if (setup.show_advanced) "client id, optional" else "",
+            9 => setup.oauth_client_id.slice(),
             else => field_value(setup, index),
         };
-        const value = if (index == 6 and setup.oauth)
-            "not used"
-        else if (index == 6)
-            masked[0..@min(raw.len, 32)]
-        else
-            raw;
+        const value = if (index == 6) masked[0..@min(raw.len, 32)] else raw;
         const style = if (active) theme.text.with_bold() else theme.text;
         const written = out.put_text(rect.x + 17, y, value, rect.width -| 19, style);
         if (active) out.put(rect.x + 17 + written, y, ' ', theme.text.with_reverse());

@@ -50,6 +50,8 @@ pub const Setup = struct {
     oauth: bool = false,
     /// The provider's client id (from the app you registered).
     oauth_client_id: Text(256) = .{},
+    /// The advanced rows (the OAuth client id) start folded away.
+    show_advanced: bool = false,
     done: bool = false,
     cancelled: bool = false,
 
@@ -63,6 +65,21 @@ pub const Setup = struct {
     /// Editing an existing account starts at the summary: Enter saves as is,
     /// Esc walks back to the field that needs changing. No retyping.
     /// Password or OAuth2: one switch, no extra step.
+    /// Rows the form shows. The password is meaningless with OAuth, and the
+    /// client id is too rare to be on screen by default.
+    pub fn field_visible(self: *const Setup, index: u8) bool {
+        return switch (index) {
+            6 => !self.oauth,
+            9 => self.show_advanced,
+            else => true,
+        };
+    }
+
+    pub fn toggle_advanced(self: *Setup) void {
+        self.show_advanced = !self.show_advanced;
+        self.problem.set("");
+    }
+
     pub fn set_oauth(self: *Setup, enabled: bool) void {
         self.oauth = enabled;
         self.problem.clear();
@@ -413,6 +430,22 @@ test "skipping the SMTP host omits the SMTP block and the port step" {
     const text = setup.config_text(&buffer);
     try testing.expect(std.mem.indexOf(u8, text, "smtp_") == null);
     try testing.expect(std.mem.indexOf(u8, text, "username = alice") != null);
+}
+
+test "advanced rows fold away until asked for" {
+    var setup = Setup.init();
+    defer setup.deinit();
+    // Rows are address..password, sign in, advanced, client id.
+    try testing.expect(setup.field_visible(8)); // advanced itself
+    try testing.expect(!setup.field_visible(9)); // client id
+    setup.toggle_advanced();
+    try testing.expect(setup.field_visible(9));
+    setup.toggle_advanced();
+    try testing.expect(!setup.field_visible(9));
+    // The password row disappears with OAuth.
+    try testing.expect(setup.field_visible(6));
+    setup.set_oauth(true);
+    try testing.expect(!setup.field_visible(6));
 }
 
 test "an empty username becomes the address, and OAuth needs no password" {

@@ -83,19 +83,69 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
     core.oauth.parse_token(response.body, now(io), out) catch return error.Unavailable;
 }
 
-fn show_url(io: std.Io, options: Options, url: []const u8) void {
-    // A GUI terminal gets the browser; anything else gets the URL plus a QR.
-    var child = std.process.spawn(io, .{
-        .argv = &.{ "xdg-open", url },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch null;
-    if (child) |*process| _ = process.wait(io) catch null;
+/// Exchanges a refresh token for a fresh access token, in place. No browser,
+/// no prompt: this runs on a normal refresh when the stored token expired.
+pub fn refresh(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    provider: core.oauth.Provider,
+    client_id: []const u8,
+    token: *core.oauth.Token,
+) bool {
+    if (client_id.len == 0 or token.refresh.is_empty()) return false;
 
+    var body_buffer: [1024]u8 = undefined;
+    const body = core.oauth.refresh_body(&body_buffer, provider, client_id, token.refresh.slice());
+    if (body.len == 0) return false;
+
+    const endpoint = core.oauth.endpoints(provider).token_url;
+    if (endpoint.len == 0) return false;
+
+    var response_buffer: [8192]u8 = undefined;
+    const response = https.post(
+        gpa,
+        io,
+        host_of(endpoint),
+        path_of(endpoint),
+        "application/x-www-form-urlencoded",
+        body,
+        &response_buffer,
+    ) catch return false;
+
+    if (response.status != 200) return false;
+    var refreshed: core.oauth.Token = .{};
+    core.oauth.parse_token(response.body, now(io), &refreshed) catch return false;
+    // Providers often omit the refresh token on refresh: keep the old one.
+    if (refreshed.refresh.is_empty()) refreshed.refresh = token.refresh;
+    token.* = refreshed;
+    return true;
+}
+
+fn show_url(io: std.Io, options: Options, url: []const u8) void {
+    // The URL always goes out first: it is the only thing that works
+    // everywhere, and a browser that fails to open must not hide it.
     options.write(options.context, "\nOpen this URL to sign in:\n\n");
     options.write(options.context, url);
     options.write(options.context, "\n\n");
+
+    // Then try to save the copying: whatever opener this machine has.
+    const openers = [_][]const []const u8{
+        &.{ "xdg-open", url },
+        &.{ "gio", "open", url },
+        &.{ "sensible-browser", url },
+        &.{ "open", url },
+        &.{ "wslview", url },
+    };
+    for (openers) |argv| {
+        var child = std.process.spawn(io, .{
+            .argv = argv,
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch continue;
+        _ = child.wait(io) catch null;
+        break;
+    }
 
     // QR fallback: `qrencode` printing to the terminal.
     var qr = std.process.spawn(io, .{
@@ -133,4 +183,16 @@ fn path_of(url: []const u8) []const u8 {
 fn now(io: std.Io) i64 {
     const stamp = std.Io.Timestamp.now(io, .real);
     return @intCast(@divTrunc(stamp.nanoseconds, std.time.ns_per_s));
+}
+
+test "a refresh needs a client id and a refresh token" {
+    var token: core.oauth.Token = .{};
+    token.access.set("old");
+    // No client id: nothing to send.
+    try std.testing.expect(!refresh(std.testing.allocator, undefined, .microsoft, "", &token));
+    // A client id but no refresh token: nothing to exchange.
+    try std.testing.expect(!refresh(std.testing.allocator, undefined, .microsoft, "client", &token));
+    // A custom provider has no endpoint: refused before any I/O.
+    token.refresh.set("refresh");
+    try std.testing.expect(!refresh(std.testing.allocator, undefined, .custom, "client", &token));
 }
