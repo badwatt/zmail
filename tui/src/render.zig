@@ -519,9 +519,9 @@ const Hint = struct {
 const accounts_hints = [_]Hint{
     .{ .keys = "j/k", .action = "move" },
     .{ .keys = "Enter", .action = "select" },
-    .{ .keys = "d", .action = "remove" },
     .{ .keys = "n", .action = "add" },
     .{ .keys = "e", .action = "edit" },
+    .{ .keys = "d", .action = "remove" },
     .{ .keys = "Esc", .action = "close" },
 };
 
@@ -540,7 +540,7 @@ const list_hints = [_]Hint{
     .{ .keys = "c", .action = "compose" },
     .{ .keys = "r", .action = "reply" },
     .{ .keys = "^R", .action = "refresh" },
-    .{ .keys = "/", .action = "search" },
+    .{ .keys = "A", .action = "accounts" },
     .{ .keys = "?", .action = "help" },
 };
 
@@ -674,6 +674,8 @@ const help_rows = [_]Hint{
     .{ .keys = "#", .action = "move to trash" },
     .{ .keys = "X", .action = "delete for good (Trash)" },
     .{ .keys = "E", .action = "empty Trash" },
+    .{ .keys = "A", .action = "accounts: pick, add, edit, remove" },
+    .{ .keys = "a", .action = "next account scope" },
     .{ .keys = "/", .action = "search" },
     .{ .keys = "Tab / [ ]", .action = "next mailbox" },
     .{ .keys = "1 - 6", .action = "jump to mailbox" },
@@ -734,7 +736,7 @@ fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     _ = out.put_text(
         rect.x + 2,
         rect.y + rect.height - 1,
-        "Enter select · n add · e edit · d remove · Esc",
+        "Enter select · n add · e edit · d remove · Esc close",
         rect.width -| 4,
         inputs.theme.dim,
     );
@@ -1310,6 +1312,15 @@ test "the boot splash shows the wordmark, the server, and a spinner" {
     // The list is not drawn behind it.
     var row_buffer: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
+}
+
+test "the list footer advertises the accounts overlay" {
+    var f = try fixture();
+    defer f.deinit();
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+    try row_contains(&out, 23, "accounts");
+    try row_contains(&out, 23, "refresh");
 }
 
 test "the account settings card shows the step, the value, and the problem" {

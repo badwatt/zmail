@@ -43,7 +43,7 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .empty_trash => empty_trash(state, store, &effects),
         .open_accounts => open_accounts(state),
         .accounts_move => |move| accounts_move(state, move),
-        .accounts_select => accounts_select(state),
+        .accounts_select => accounts_select(state, store),
         .accounts_remove => accounts_remove(state, &effects),
         .accounts_add => effects.add(.{ .edit_account = .{ .account = null } }),
         .accounts_edit => accounts_edit(state, &effects),
@@ -270,13 +270,15 @@ fn accounts_move(state: *State, move: Move) void {
     };
 }
 
-fn accounts_select(state: *State) void {
+fn accounts_select(state: *State, store: *const Store) void {
     const cursor = state.accounts_cursor;
     state.view = .list;
     if (cursor == 0) {
         state.account_filter = null;
         state.cursor = 0;
         state.offset = 0;
+        // Rebuild: the filter is applied here, so the list changes immediately.
+        state.rebuild(store);
         state.set_status("All accounts", .{});
         return;
     }
@@ -287,6 +289,7 @@ fn accounts_select(state: *State) void {
     state.account_filter = account.id;
     state.cursor = 0;
     state.offset = 0;
+    state.rebuild(store);
     state.set_status("{s}", .{account.label.slice()});
 }
 
@@ -648,6 +651,11 @@ test "the accounts overlay opens, moves, selects, and closes" {
     defer fixture.store.deinit(testing.allocator);
     fixture.state.accounts.add(AccountId.from_int(1), "home", .{}, .{});
     fixture.state.accounts.add(AccountId.from_int(2), "work", .{}, .{});
+    // One message from another account, so filtering is observable.
+    var other = message_with(9, "from work", .inbox, 100);
+    other.account = AccountId.from_int(2);
+    try fixture.store.insert(&other);
+    fixture.state.rebuild(&fixture.store);
     fixture.state.accounts_cursor = 1;
 
     _ = apply(&fixture.state, &fixture.store, .open_accounts);
@@ -669,6 +677,8 @@ test "the accounts overlay opens, moves, selects, and closes" {
     try testing.expectEqual(View.list, fixture.state.view);
     try testing.expectEqual(AccountId.from_int(1), fixture.state.account_filter.?);
     try testing.expectEqualStrings("home", fixture.state.status.slice());
+    // The list is filtered right away, without waiting for a refresh.
+    try testing.expect(fixture.state.visible_len < fixture.store.len);
 
     _ = apply(&fixture.state, &fixture.store, .open_accounts);
     _ = apply(&fixture.state, &fixture.store, .accounts_select);
