@@ -40,6 +40,10 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
         render_too_small(inputs, out);
         return;
     }
+    if (inputs.state.booting) {
+        render_splash(inputs, out);
+        return;
+    }
 
     switch (inputs.state.view) {
         .list => render_list(inputs, lay, out),
@@ -55,6 +59,48 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
         .compose => render_compose(inputs, lay, out),
     }
     render_footer(inputs, lay, out);
+}
+
+/// The first network load can take a second: say so, beautifully, instead of
+/// showing an empty list. Cached mail never reaches this path.
+const spinner_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+
+fn render_splash(inputs: Inputs, out: *Screen) void {
+    out.clear();
+    const theme = inputs.theme;
+    const middle = out.rows / 2;
+
+    put_centered(out, middle -| 3, "a m a i l", theme.accent.with_bold());
+    put_centered(out, middle -| 2, "──────────────", theme.dim);
+
+    var label_buffer: [96]u8 = undefined;
+    const spinner = spinner_frames[inputs.state.spinner % spinner_frames.len];
+    const labels = account_labels(inputs.state, &label_buffer);
+    var line_buffer: [160]u8 = undefined;
+    const line = std.fmt.bufPrint(
+        &line_buffer,
+        "{s}  connecting to {s}",
+        .{ spinner, labels },
+    ) catch "connecting";
+    put_centered(out, middle, line, theme.dim);
+
+    if (inputs.state.accounts.len == 1) {
+        var address_buffer: [core.limits.address_max]u8 = undefined;
+        const address = inputs.state.accounts.items[0].address.addr_spec(&address_buffer);
+        if (address.len > 0) put_centered(out, middle +| 1, address, theme.dim.with_dim());
+    }
+
+    put_centered(out, middle +| 3, "cached mail opens instantly · R refreshes", theme.dim.with_dim());
+}
+
+fn account_labels(state: *const State, buffer: []u8) []const u8 {
+    if (state.accounts.len == 0) return "mail";
+    var writer = std.Io.Writer.fixed(buffer);
+    for (state.accounts.items[0..state.accounts.len], 0..) |account, index| {
+        if (index > 0) writer.writeAll(", ") catch break;
+        writer.writeAll(account.label.slice()) catch break;
+    }
+    return writer.buffered();
 }
 
 fn render_list(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
@@ -1061,6 +1107,39 @@ test "frame shows reader hints and a scroll percentage" {
     frame(f.inputs(100, 24), &out);
     try row_contains(&out, 23, "scroll");
     try row_contains(&out, 23, "75%");
+}
+
+test "the boot splash shows the wordmark, the server, and a spinner" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.booting = true;
+    f.state.accounts.add(core.id.AccountId.from_int(1), "work", try core.address.Address.init("alice@example.com"));
+
+    var out = Screen.init(80, 24);
+    frame(f.inputs(80, 24), &out);
+    try row_contains(&out, 9, "a m a i l");
+    try row_contains(&out, 12, "connecting to work");
+    try row_contains(&out, 13, "alice@example.com");
+    try row_contains(&out, 15, "R refreshes");
+    // The list is not drawn behind it.
+    var row_buffer: [512]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
+}
+
+test "the splash spinner advances with the tick" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.booting = true;
+    var seen: [2][]const u8 = .{ "", "" };
+    var out = Screen.init(80, 24);
+    f.state.spinner = 0;
+    frame(f.inputs(80, 24), &out);
+    seen[0] = spinner_frames[0];
+    f.state.spinner = 3;
+    frame(f.inputs(80, 24), &out);
+    seen[1] = spinner_frames[3];
+    try testing.expect(!std.mem.eql(u8, seen[0], seen[1]));
+    try row_contains(&out, 12, seen[1]);
 }
 
 test "frame shows search hints while typing" {

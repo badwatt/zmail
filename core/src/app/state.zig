@@ -102,6 +102,10 @@ pub const State = struct {
     account_filter: ?AccountId = null,
     compose: Compose = .{},
 
+    /// True while the first network load runs: the frame becomes a splash.
+    booting: bool = false,
+    /// Free-running tick for the splash spinner.
+    spinner: u8 = 0,
     status: Text(limits.status_max) = .{},
     /// Errors are shown with the alert style; plain confirmations are not.
     status_alert: bool = false,

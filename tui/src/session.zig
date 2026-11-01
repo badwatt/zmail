@@ -77,6 +77,8 @@ pub const Session = struct {
     size: system_mod.Size = .{},
     now_unix: i64 = 0,
     needs_render: bool = true,
+    /// Set when the cache could not fill the current mailbox.
+    needs_boot: bool = false,
 
     /// One row of encoded ANSI. Bounded by the widest row times the longest
     /// possible style run, so a frame never allocates.
@@ -111,7 +113,54 @@ pub const Session = struct {
         self.now_unix = deps.now();
         self.size = deps.system.size() catch system_mod.Size{};
         self.screen.resize(self.size.columns, self.size.rows);
-        self.reload(null, self.state.mailbox, false);
+        // Cache only: the first frame must not wait for a socket. Anything the
+        // cache cannot serve is fetched by `boot`, after that frame is painted.
+        self.load_cached(self.state.mailbox);
+    }
+
+    /// Fills the store from the on-disk cache and remembers whether the network
+    /// is still needed.
+    fn load_cached(self: *Session, mailbox: Mailbox) void {
+        var served: u32 = 0;
+        for (self.deps.accounts, 0..) |source, index| {
+            const mask = mask_bit(@intCast(index), @backingInt(mailbox));
+            if (self.deps.cache) |cache| {
+                const cached = cache.load(source.id, mailbox, self.scratch) catch 0;
+                if (cached > 0) {
+                    core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..cached]);
+                    self.loaded_mask |= mask;
+                    served += 1;
+                    continue;
+                }
+            }
+            self.needs_boot = true;
+        }
+
+        self.state.rebuild(&self.store);
+        if (served > 0 and !self.needs_boot) {
+            self.state.status.set("Cached · R refreshes");
+            self.state.status_alert = false;
+        }
+        self.needs_render = true;
+    }
+
+    /// Runs once, right after the first frame: opens the connections the cache
+    /// could not replace. The splash is on screen while this blocks.
+    pub fn boot(self: *Session) void {
+        if (!self.needs_boot) return;
+        self.needs_boot = false;
+
+        // `loop` already painted the splash for this boot; only paint it here
+        // when boot is driven from somewhere else (tests, future front ends).
+        if (!self.state.booting) {
+            self.state.booting = true;
+            self.render();
+        }
+
+        self.reload(null, self.state.mailbox, true);
+
+        self.state.booting = false;
+        self.needs_render = true;
     }
 
     pub fn deinit(self: *Session) void {
@@ -139,6 +188,7 @@ pub const Session = struct {
         }
 
         self.sync_size();
+        self.state.spinner +%= 1;
         self.now_unix = self.deps.now();
         if (self.needs_render) self.render();
         return !self.state.quit;
@@ -147,6 +197,10 @@ pub const Session = struct {
     /// Runs until the user quits. `run.zig` wraps this with raw mode and the
     /// alternate screen.
     pub fn loop(self: *Session) void {
+        // Paint first (cached mail, or the splash), then do the slow part.
+        self.state.booting = self.needs_boot;
+        self.render();
+        self.boot();
         while (self.step()) {}
     }
 
@@ -489,6 +543,8 @@ const Rig = struct {
             .theme = theme_mod.Theme.dark(),
             .now = fixed_now,
         });
+        // Tests exercise the steady state: the cache is empty, so boot fetches.
+        self.session.boot();
     }
 
     fn deinit(self: *Rig) void {
@@ -511,15 +567,31 @@ test "session loads the initial mailbox on init" {
     try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
 }
 
-test "session renders the first frame on its first step" {
+test "session paints the list before it touches the network" {
     var rig: Rig = .{};
-    try rig.start();
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+    });
     defer rig.deinit();
-    try testing.expectEqual(@as(u32, 0), rig.fake_system.output_len);
 
-    _ = rig.session.step();
-    try testing.expect(rig.fake_system.output_len > 0);
+    // Nothing has been fetched yet: an empty cache means "boot later".
+    try testing.expectEqual(@as(u32, 0), rig.session.store.len);
+    try testing.expect(rig.session.needs_boot);
+
+    rig.session.render();
+    rig.session.boot();
+    try testing.expectEqual(@as(u32, 2), rig.session.store.len);
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "amail") != null);
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Inbox") != null);
 }
 
 test "j and k move the cursor and redraw" {
@@ -726,6 +798,7 @@ test "two accounts share one unified list, and a cycles the scope" {
         .now = fixed_now,
     });
     defer session.deinit();
+    session.boot();
 
     try testing.expectEqual(@as(u32, 2), session.store.len);
     try testing.expectEqual(@as(u32, 2), session.state.visible_len);
@@ -785,6 +858,7 @@ test "starting from a cache does not touch the network, and R refreshes and save
         .now = fixed_now,
         .cache = cache.cache(),
     });
+    rig.session.boot();
     defer rig.deinit();
 
     try testing.expectEqual(@as(u32, 1), cache.loads);
@@ -794,6 +868,43 @@ test "starting from a cache does not touch the network, and R refreshes and save
     rig.send("R");
     try testing.expectEqual(@as(u32, 1), cache.saves);
     try testing.expectEqual(@as(u32, 2), cache.last_saved);
+}
+
+test "switching to an unloaded mailbox reads the cache, not the network" {
+    var rig: Rig = .{};
+    try rig.seed();
+    var cache: core.cache_port.Memory = .{ .load_count = 1 };
+    rig.fake_system.size_value = .{ .columns = 100, .rows = 24 };
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .cache = cache.cache(),
+    });
+    defer rig.deinit();
+
+    // Warm cache: no boot, and the footer says where the mail came from.
+    try testing.expect(!rig.session.needs_boot);
+    try testing.expectEqualStrings("Cached · R refreshes", rig.session.state.status.slice());
+    rig.session.boot();
+    try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
+    try testing.expectEqualStrings("cached", rig.session.store.at(0).subject.slice());
+
+    // Sent is not loaded yet, so the switch goes through `reload`: the cache
+    // serves it and no socket is touched.
+    rig.send("]");
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    try testing.expectEqual(@as(u32, 2), cache.loads);
+    try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
+    const row = rig.session.state.visible[0];
+    try testing.expectEqualStrings("cached", rig.session.store.at(row).subject.slice());
+    try testing.expectEqual(Mailbox.sent, rig.session.store.at(row).mailbox);
 }
 
 test "a cache miss falls back to the network and fills the cache" {
@@ -813,6 +924,7 @@ test "a cache miss falls back to the network and fills the cache" {
         .now = fixed_now,
         .cache = cache.cache(),
     });
+    rig.session.boot();
     defer rig.deinit();
 
     try testing.expectEqual(@as(u32, 1), cache.loads);
@@ -837,6 +949,7 @@ test "a failing cache degrades to the network" {
         .now = fixed_now,
         .cache = cache.cache(),
     });
+    rig.session.boot();
     defer rig.deinit();
 
     try testing.expectEqual(@as(u32, 2), rig.session.state.visible_len);

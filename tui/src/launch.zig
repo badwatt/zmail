@@ -106,35 +106,167 @@ fn run_session(
 
 const max_accounts = core.config.max_accounts;
 
+/// One configured account, connected on demand.
+///
+/// Nothing here touches the network until a port call arrives: with a warm
+/// cache the first frame is painted without a socket, and a connection that
+/// fails becomes an ordinary port error (cached mail stays readable) instead of
+/// a reason not to start.
+const LiveAccount = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    id: core.id.AccountId = .unknown,
+    label: []const u8 = "",
+    from: core.address.Address = .{},
+    host: core.text.Text(core.limits.host_max) = .{},
+    port: u16 = 0,
+    username: core.text.Text(core.limits.username_max) = .{},
+    password: core.secret.Secret = .{},
+    password_ready: bool = false,
+    smtp_host: core.text.Text(core.limits.host_max) = .{},
+    smtp_port: u16 = 0,
+    smtp_enabled: bool = false,
+
+    imap_transport: net.tls.TlsTransport = undefined,
+    smtp_transport: net.tls.TlsTransport = undefined,
+    imap: core.imap_mail.ImapMail = undefined,
+    smtp_client: core.smtp_outbox.SmtpOutbox = undefined,
+    has_imap: bool = false,
+    has_smtp: bool = false,
+
+    /// Why the last connection attempt failed, for the exit message.
+    failure: ?[]const u8 = null,
+    connected: bool = false,
+
+    fn openMail(context: *anyopaque) core.mail_port.Error!core.mail_port.Mail {
+        const self: *LiveAccount = @ptrCast(@alignCast(context));
+        if (self.has_imap) return self.imap.mail();
+        if (!self.password_ready) {
+            self.failure = "No password for an account: run setup again or set AMAIL_PASSWORD";
+            return error.Unavailable;
+        }
+
+        self.imap_transport.open(self.gpa, self.io, self.host.slice(), self.port) catch {
+            self.failure = "Could not connect to an IMAP server over TLS";
+            return error.Unavailable;
+        };
+        self.imap = core.imap_mail.ImapMail.open(
+            self.imap_transport.transport(),
+            self.id,
+            self.username.slice(),
+            self.password.expose(),
+        ) catch |err| {
+            self.imap_transport.deinit();
+            self.failure = login_message(err);
+            return error.Unavailable;
+        };
+        self.has_imap = true;
+        self.connected = true;
+        return self.imap.mail();
+    }
+
+    fn closeMail(context: *anyopaque) void {
+        const self: *LiveAccount = @ptrCast(@alignCast(context));
+        if (!self.has_imap) return;
+        self.imap.close();
+        self.imap_transport.deinit();
+        self.has_imap = false;
+    }
+
+    fn openOutbox(context: *anyopaque) core.outbox_port.Error!core.outbox_port.Outbox {
+        const self: *LiveAccount = @ptrCast(@alignCast(context));
+        if (self.has_smtp) return self.smtp_client.outbox();
+        if (!self.smtp_enabled or !self.password_ready) return error.Unavailable;
+
+        self.smtp_transport.open(self.gpa, self.io, self.smtp_host.slice(), self.smtp_port) catch
+            return error.Unavailable;
+        self.smtp_client = core.smtp_outbox.SmtpOutbox.connect(
+            self.smtp_transport.transport(),
+            "localhost",
+            self.username.slice(),
+            self.password.expose(),
+            os.now_unix,
+        ) catch {
+            self.smtp_transport.deinit();
+            return error.Unavailable;
+        };
+        self.has_smtp = true;
+        return self.smtp_client.outbox();
+    }
+
+    fn closeOutbox(context: *anyopaque) void {
+        const self: *LiveAccount = @ptrCast(@alignCast(context));
+        if (!self.has_smtp) return;
+        self.smtp_client.close();
+        self.smtp_transport.deinit();
+        self.has_smtp = false;
+    }
+};
+
 const Live = struct {
-    imap_transport: [max_accounts]net.tls.TlsTransport = undefined,
-    imap: [max_accounts]core.imap_mail.ImapMail = undefined,
-    smtp_transport: [max_accounts]net.tls.TlsTransport = undefined,
-    smtp: [max_accounts]core.smtp_outbox.SmtpOutbox = undefined,
-    has_imap: [max_accounts]bool = @splat(false),
-    has_smtp: [max_accounts]bool = @splat(false),
+    accounts: [max_accounts]LiveAccount = undefined,
+    len: u8 = 0,
+    lazy_mail: [max_accounts]core.lazy_mail = undefined,
+    lazy_outbox: [max_accounts]core.lazy_outbox = undefined,
     sources: [max_accounts]session_mod.MailSource = undefined,
     outboxes: [max_accounts]session_mod.OutboxSource = undefined,
-    imap_count: u8 = 0,
+    mail_count: u8 = 0,
     outbox_count: u8 = 0,
+
+    fn add(self: *Live, account: LiveAccount) void {
+        const index = self.len;
+        self.accounts[index] = account;
+        self.len += 1;
+
+        self.lazy_mail[index] = .{
+            .context = &self.accounts[index],
+            .open_fn = LiveAccount.openMail,
+            .close_fn = LiveAccount.closeMail,
+        };
+        self.sources[self.mail_count] = .{
+            .id = account.id,
+            .label = account.label,
+            .from = account.from,
+            .mail = self.lazy_mail[index].mail(),
+        };
+        self.mail_count += 1;
+
+        if (account.smtp_enabled) {
+            self.lazy_outbox[index] = .{
+                .context = &self.accounts[index],
+                .open_fn = LiveAccount.openOutbox,
+                .close_fn = LiveAccount.closeOutbox,
+            };
+            self.outboxes[self.outbox_count] = .{
+                .id = account.id,
+                .outbox = self.lazy_outbox[index].outbox(),
+            };
+            self.outbox_count += 1;
+        }
+    }
 
     fn close(self: *Live) void {
         var index: u8 = 0;
-        while (index < max_accounts) : (index += 1) {
-            if (self.has_smtp[index]) self.smtp[index].close();
+        while (index < self.len) : (index += 1) {
+            self.lazy_outbox[index].close();
         }
         index = 0;
-        while (index < max_accounts) : (index += 1) {
-            if (self.has_imap[index]) self.imap[index].close();
+        while (index < self.len) : (index += 1) {
+            self.lazy_mail[index].close();
+            self.accounts[index].password.deinit();
+        }
+    }
+
+    fn firstFailure(self: *const Live) ?[]const u8 {
+        var index: u8 = 0;
+        while (index < self.len) : (index += 1) {
+            if (self.accounts[index].connected) return null;
         }
         index = 0;
-        while (index < max_accounts) : (index += 1) {
-            if (self.has_smtp[index]) self.smtp_transport[index].deinit();
+        while (index < self.len) : (index += 1) {
+            if (self.accounts[index].failure) |message| return message;
         }
-        index = 0;
-        while (index < max_accounts) : (index += 1) {
-            if (self.has_imap[index]) self.imap_transport[index].deinit();
-        }
+        return null;
     }
 };
 
@@ -189,53 +321,31 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         if (entry.account.imap.security != .tls) {
             return .{ .message = "Only implicit TLS (imap_security = tls) is supported today" };
         }
-
-        var password: core.secret.Secret = .{};
-        defer password.deinit();
-        read_password(io, path, entry.label.slice(), file.len == 1, &password) catch
-            return .{ .message = "No password for an account: run setup again or set AMAIL_PASSWORD" };
-
-        live.imap_transport[index].open(
-            gpa,
-            io,
-            entry.account.imap.host.slice(),
-            entry.account.imap.port,
-        ) catch return .{ .message = "Could not connect to an IMAP server over TLS" };
-        live.has_imap[index] = true;
-
-        const id = core.id.AccountId.from_int(index + 1);
-        live.imap[index] = core.imap_mail.ImapMail.open(
-            live.imap_transport[index].transport(),
-            id,
-            entry.account.username.slice(),
-            password.expose(),
-        ) catch |err| return .{ .message = login_message(err) };
-        live.sources[live.imap_count] = .{
-            .id = id,
-            .label = entry.label.slice(),
-            .from = entry.account.address,
-            .mail = live.imap[index].mail(),
-        };
-        live.imap_count += 1;
-
         if (entry.smtp) |smtp| {
             if (smtp.security != .tls) {
                 return .{ .message = "Only implicit TLS for SMTP (smtp_port = 465) is supported today" };
             }
-            live.smtp_transport[index].open(gpa, io, smtp.host.slice(), smtp.port) catch
-                return .{ .message = "Could not connect to an SMTP server over TLS" };
-            live.has_smtp[index] = true;
-            live.smtp[index] = core.smtp_outbox.SmtpOutbox.connect(
-                live.smtp_transport[index].transport(),
-                "localhost",
-                entry.account.username.slice(),
-                password.expose(),
-                os.now_unix,
-            ) catch return .{ .message = "SMTP login failed: check the credentials" };
-
-            live.outboxes[live.outbox_count] = .{ .id = id, .outbox = live.smtp[index].outbox() };
-            live.outbox_count += 1;
         }
+
+        var account = LiveAccount{
+            .gpa = gpa,
+            .io = io,
+            .id = core.id.AccountId.from_int(index + 1),
+            .label = entry.label.slice(),
+            .from = entry.account.address,
+            .port = entry.account.imap.port,
+            .smtp_enabled = entry.smtp != null,
+        };
+        account.host.set(entry.account.imap.host.slice());
+        account.username.set(entry.account.username.slice());
+        if (entry.smtp) |smtp| {
+            account.smtp_host.set(smtp.host.slice());
+            account.smtp_port = smtp.port;
+        }
+        read_password(io, path, entry.label.slice(), file.len == 1, &account.password) catch {};
+        account.password_ready = !account.password.is_empty();
+
+        live.add(account);
     }
 
     // On-disk cache: startup and mailbox switches read from here, so the first
@@ -258,13 +368,17 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         cache = file_cache.cache();
     }
 
-    return run_session(
+    const outcome = run_session(
         gpa,
         system,
-        live.sources[0..live.imap_count],
+        live.sources[0..live.mail_count],
         live.outboxes[0..live.outbox_count],
         cache,
     );
+    if (outcome != null) return outcome;
+    // A connection that never worked left nothing on screen: say why.
+    if (live.firstFailure()) |reason| return .{ .message = reason };
+    return null;
 }
 
 fn read_password(

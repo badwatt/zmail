@@ -26,6 +26,9 @@ zig build run        # live by default: the config, or the setup assistant
 amail --demo         # the built-in demo inbox: no account, no network
 ```
 
+Once the cache is warm, startup opens no socket: the first frame is the mail you
+already had, and `R` is what talks to the server.
+
 `q` quits from the list, `Ctrl+Q`/`Ctrl+C` quit from anywhere, and `?` shows
 every key (`/` inside the help filters it).
 

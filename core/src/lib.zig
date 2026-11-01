@@ -42,6 +42,8 @@ pub const smtp = @import("protocol/smtp.zig");
 pub const demo = @import("demo.zig");
 pub const cache = @import("cache.zig");
 pub const mime = @import("mime.zig");
+pub const lazy_mail = @import("adapters/lazy.zig").LazyMail;
+pub const lazy_outbox = @import("adapters/lazy.zig").LazyOutbox;
 pub const config = @import("config.zig");
 
 // Referenced from the module root's test block so `zig build test` includes
@@ -78,5 +80,6 @@ test {
     _ = @import("demo.zig");
     _ = @import("cache.zig");
     _ = @import("mime.zig");
+    _ = @import("adapters/lazy.zig");
     _ = @import("config.zig");
 }

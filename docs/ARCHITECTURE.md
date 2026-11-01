@@ -57,6 +57,14 @@ response point into a scratch buffer, so that buffer belongs to the
 dangles the moment the function returns, and the reader saw exactly that as
 garbage subjects.
 
+**Starting up.** `Session.init` reads the cache and paints; `Session.boot`
+opens only the connections the cache could not replace, after that first frame
+is on screen. The connections themselves are lazy (`adapters/lazy.zig`): the
+`Mail` and `Outbox` ports open on their first call, so a warm start performs no
+I/O at all and a failed connection is an ordinary port error instead of a
+startup failure. The process boundary (`tui/src/launch.zig`) keeps the
+password, the TLS transports, and the error messages that the opener needs.
+
 **Caching.** `cache.zig` is the versioned TSV codec; `ports/cache.zig` is the
 port; the session reads it at startup and on mailbox switches and writes it
 after every network refresh. `net/src/cache_file.zig` is the file adapter

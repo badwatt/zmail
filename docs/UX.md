@@ -102,6 +102,27 @@ cancels it. `↑`/`↓` still move the cursor while typing. Inside the help over
 `Esc` is never a quit key. The only ways out are `q` from the list (never from a
 text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
 
+## Opening
+
+With a cache, amail opens instantly: the first frame is the last known mail,
+read from disk, and **no socket is opened**. The footer says so — `Cached · R
+refreshes` — and `R` is the only thing that touches the network.
+
+Without a cache (first run, or a new account) the network is unavoidable, so
+the first frame is a splash instead of an empty list:
+
+```
+                        a m a i l
+                   ──────────────
+                    ⠋  connecting to work
+                       alice@example.com
+
+         cached mail opens instantly · R refreshes
+```
+
+A connection that fails no longer refuses to start: cached mail stays readable
+and the failure becomes a status line.
+
 ## First run
 
 `amail` with no config opens the setup assistant, one field per screen:

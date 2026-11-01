@@ -68,9 +68,9 @@ The port exists; this milestone fills it in.
   multipart trees (plain first, HTML stripped as a fallback). Bodies are
   fetched with `BODY.PEEK[]` from the message's own mailbox, so reading Sent
   works and a cached start still opens messages.
-- **Lazy connections (next).** The launcher still logs in before the UI opens,
-  so a dead server delays startup. Sources should connect on demand and show
-  cached mail immediately.
+- **Lazy connections (done).** The launcher builds accounts without touching
+  the network; ports open on first use, so a warm cache starts in milliseconds
+  with no socket, and a cold start shows a splash while it connects.
 - **Big messages (next).** A response is bounded at 128 KiB, so a message with
   a large attachment is truncated or refused. Streaming a literal straight into
   the body buffer would remove the bound without an allocation.
