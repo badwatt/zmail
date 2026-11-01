@@ -1059,26 +1059,64 @@ const FileAccounts = struct {
         var buffer: [8193]u8 = undefined;
         const text = read_file(self.io, self.path, &buffer) catch |err| switch (err) {
             error.FileNotFound => "",
-            else => return error.Unavailable,
+            else => {
+                refuse(draft, "Could not read the config file");
+                return error.Unavailable;
+            },
         };
-        const existing = core.config.parse(text) catch return error.Unavailable;
+        const existing = core.config.parse(text) catch |err| {
+            refuse(draft, config_message(err));
+            return error.Unavailable;
+        };
 
         if (draft.replaces) |account| {
             // Replace in place: drop the old section, then append the new one.
             const index: usize = @intCast(account.to_int() - 1);
-            if (index >= existing.len) return error.Unavailable;
+            if (index >= existing.len) {
+                refuse(draft, "That account is no longer in the config file");
+                return error.Unavailable;
+            }
             var kept_buffer: [8193]u8 = undefined;
             const kept = core.config.without(text, existing.items()[index].label.slice(), &kept_buffer);
-            write_file(self.io, self.path, kept) catch return error.Unavailable;
-        } else if (core.config.has_label(text, draft.label)) {
-            return error.Unavailable;
+            write_file(self.io, self.path, kept) catch {
+                refuse(draft, "Could not write the config file");
+                return error.Unavailable;
+            };
         }
 
-        append_file(self.io, self.path, draft.text) catch return error.Unavailable;
+        // A taken label is not a dead end: pick the next free one and say so.
+        var label_buffer: [core.limits.label_max]u8 = undefined;
+        var final_label = draft.label;
+        var text_to_append = draft.text;
+        if (draft.replaces == null and core.config.has_label(text, draft.label)) {
+            const unique = core.config.unique_label(text, draft.label, &label_buffer);
+            if (unique.len == 0) {
+                refuse(draft, "Too many accounts with that name: rename one of them");
+                return error.Unavailable;
+            }
+            var rewritten: [8193]u8 = undefined;
+            text_to_append = core.config.rename_label(draft.text, draft.label, unique, &rewritten);
+            if (text_to_append.len == 0) {
+                refuse(draft, "Could not rename the account");
+                return error.Unavailable;
+            }
+            final_label = unique;
+        }
+        if (draft.label_out) |out| out.set(final_label);
+
+        append_file(self.io, self.path, text_to_append) catch |err| {
+            refuse(draft, if (err == error.AccessDenied)
+                "No permission to write the config file"
+            else
+                "Could not write the config file");
+            return error.Unavailable;
+        };
         // No password in the draft means "keep the one on disk".
         if (draft.password) |password| {
-            write_credential_bytes(self.io, self.path, draft.label, password) catch
+            write_credential_bytes(self.io, self.path, final_label, password) catch {
+                refuse(draft, "Could not write the sealed credential file");
                 return error.Unavailable;
+            };
         }
 
         // The new account's id is its position in the file.
@@ -1086,6 +1124,11 @@ const FileAccounts = struct {
         return core.id.AccountId.from_int(@intCast(existing.len + 1));
     }
 };
+
+/// Puts the reason for a refusal where the form can show it.
+fn refuse(draft: core.accounts_port.Accounts.Draft, message: []const u8) void {
+    if (draft.problem) |slot| slot.set(message);
+}
 
 /// `--add-account`: ask for one more account and append it to the config.
 /// Existing accounts, their credentials, and their cache are untouched.
@@ -1132,6 +1175,12 @@ fn run_add_account(io: std.Io, options: cli.Launch, system: SessionSystem) ?Fail
 }
 
 fn append_file(io: std.Io, path: []const u8, text: []const u8) !void {
+    // The very first save creates the directory too: without this a fresh
+    // install failed with a message that named no cause.
+    const dir = cli.parent_dir(path);
+    if (dir.len > 0) {
+        _ = std.Io.Dir.cwd().createDirPathStatus(io, dir, directory_mode) catch .existing;
+    }
     const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
     defer file.close(io);
     const size = try file.stat(io);

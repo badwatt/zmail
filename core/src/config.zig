@@ -199,6 +199,22 @@ fn smtp_server(entry: *Entry) *account.Server {
 }
 
 /// The same file with one account's label changed.
+/// A label that is not taken yet: `alvaro`, `alvaro2`, `alvaro3`... Returns an
+/// empty slice when every candidate is used, which the caller reports.
+pub fn unique_label(text: []const u8, wanted: []const u8, buffer: []u8) []const u8 {
+    if (!has_label(text, wanted)) {
+        if (wanted.len > buffer.len) return "";
+        @memcpy(buffer[0..wanted.len], wanted);
+        return buffer[0..wanted.len];
+    }
+    var attempt: u8 = 2;
+    while (attempt < 100) : (attempt += 1) {
+        const candidate = std.fmt.bufPrint(buffer, "{s}{d}", .{ wanted, attempt }) catch return "";
+        if (!has_label(text, candidate)) return candidate;
+    }
+    return "";
+}
+
 pub fn rename_label(text: []const u8, old: []const u8, new: []const u8, buffer: []u8) []const u8 {
     var writer = std.Io.Writer.fixed(buffer);
     var lines = std.mem.splitScalar(u8, text, '\n');

@@ -23,6 +23,10 @@ pub const Accounts = struct {
         password: ?[]const u8 = null,
         /// The account this draft replaces, or null for a new one.
         replaces: ?AccountId = null,
+        /// Receives what the label ended up being: a collision is renamed.
+        label_out: ?*Text(limits.label_max) = null,
+        /// Where the reason for a refusal goes, in words for the user.
+        problem: ?*Text(256) = null,
     };
 
     /// A freshly opened account: enough to add it to the view and fetch mail.

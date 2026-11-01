@@ -6,6 +6,10 @@
 //! 100% gate as the logic.
 
 const std = @import("std");
+
+/// Alternate screen on, cursor hidden, mouse on; and the way back.
+const enter_screen = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h";
+const leave_screen = "\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
@@ -47,6 +51,8 @@ pub const Posix = struct {
             .size = sizeThunk,
             .enter_raw = enterRawThunk,
             .leave_raw = leaveRawThunk,
+            .suspend_ui = suspendThunk,
+            .resume_ui = resumeThunk,
         } };
     }
 
@@ -81,6 +87,19 @@ pub const Posix = struct {
         if (ioctl(self.stdout, TIOCGWINSZ, &window) != 0) return error.NotATerminal;
         if (window.col == 0 or window.row == 0) return error.NotATerminal;
         return .{ .columns = window.col, .rows = window.row };
+    }
+
+    /// Leave the alternate screen and cooked mode: what a browser flow needs.
+    fn suspendThunk(context: *anyopaque) system_mod.Error!void {
+        const self: *Posix = @ptrCast(@alignCast(context));
+        writeThunk(context, leave_screen) catch {};
+        _ = self;
+        leaveRawThunk(context) catch {};
+    }
+
+    fn resumeThunk(context: *anyopaque) system_mod.Error!void {
+        enterRawThunk(context) catch {};
+        writeThunk(context, enter_screen) catch {};
     }
 
     fn enterRawThunk(context: *anyopaque) system_mod.Error!void {

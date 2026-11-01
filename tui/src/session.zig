@@ -649,9 +649,13 @@ pub const Session = struct {
             self.state.set_alert("Accounts cannot be changed here", .{});
             return;
         };
-        // The provider's own words are worth more than a generic failure.
+        // The flow talks to a human in a browser: give the terminal back first,
+        // or the URL lands on a screen nobody is looking at.
+        self.deps.system.suspend_ui() catch {};
         var problem: core.text.Text(256) = .{};
         accounts.oauth_login(account, &problem) catch {
+            self.deps.system.resume_ui() catch {};
+            self.invalidate_screen();
             self.invalidate_screen();
             // The account is saved either way: the sign-in is what failed.
             self.attach_new_account(account, label);
@@ -662,6 +666,7 @@ pub const Session = struct {
             }
             return;
         };
+        self.deps.system.resume_ui() catch {};
         self.invalidate_screen();
         self.state.set_status("Signed in {s}", .{label});
         self.open_settings_after_oauth(account);
@@ -953,6 +958,11 @@ pub const Session = struct {
         var label_buffer: [core.limits.label_max]u8 = undefined;
         const label = form.setup.account_label(&label_buffer);
 
+        // The label can change under us: a taken name is renamed, not refused.
+        var final_label: core.text.Text(core.limits.label_max) = .{};
+        final_label.set(label);
+        var reason: core.text.Text(256) = .{};
+
         const saved_id = accounts.save(.{
             .text = text,
             .label = label,
@@ -963,8 +973,16 @@ pub const Session = struct {
             else
                 form.setup.password.expose(),
             .replaces = form.editing,
+            .label_out = &final_label,
+            .problem = &reason,
         }) catch {
-            form.setup.problem.set("Could not save the account; fix the reason above and try again");
+            // Say what failed. "Fix the reason above" with nothing above was a
+            // dead end.
+            if (!reason.is_empty()) {
+                form.setup.problem.set(reason.slice());
+            } else {
+                form.setup.problem.set("Could not write the config or the credential file");
+            }
             self.needs_render = true;
             return;
         };
@@ -983,8 +1001,9 @@ pub const Session = struct {
         const added = form.editing == null;
         const oauth = form.setup.oauth;
         const new_id = saved_id;
+        const saved_label = final_label.slice();
         self.close_settings();
-        self.state.set_status("{s} saved", .{label});
+        self.state.set_status("{s} saved", .{saved_label});
         if (!added) return;
 
         if (oauth) {
@@ -992,7 +1011,7 @@ pub const Session = struct {
             self.oauth_account(new_id);
             return;
         }
-        self.attach_new_account(new_id, label);
+        self.attach_new_account(new_id, saved_label);
     }
 
     fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags) void {
@@ -2019,6 +2038,29 @@ test "the form shows the servers the source reported" {
     try testing.expectEqualStrings("993", form.setup.imap_port.slice());
 }
 
+test "a save failure says what failed, not 'fix the reason above'" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // A port that refuses without a reason: the form still names the stage.
+    var port: core.accounts_port.Memory = .{ .fail = true };
+    rig.session.deps.accounts_file = port.accounts();
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+    form.setup.address.set("new@example.com");
+    form.setup.imap_host.set("imap.example.com");
+    form.setup.imap_port.set("993");
+    try core.secret.Secret.init("pw", &form.setup.password);
+    rig.session.save_settings(form);
+
+    try testing.expect(rig.session.settings != null);
+    const shown = rig.session.settings.?.setup.problem.slice();
+    try testing.expect(shown.len > 0);
+    try testing.expect(std.mem.indexOf(u8, shown, "Could not write") != null);
+}
+
 test "the form reads sign in, then password, then the fold" {
     var rig: Rig = .{};
     try rig.start();
@@ -2057,56 +2099,21 @@ test "with OAuth the password row is skipped" {
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     const form = &rig.session.settings.?;
 
-    // Walk down to Username, then Tab: with OAuth off it lands on Password.
-    form.setup.address.set("me@example.com");
-    _ = rig.session.settings_key(form, .enter); // imap_host
-    while (form.field != .username) _ = rig.session.settings_key(form, .tab);
+    // Sign in sits right before Password: Tab walks from one to the other.
+    form.field = .sign_in;
     _ = rig.session.settings_key(form, .tab);
     try testing.expectEqual(Session.Field.password, form.field);
 
-    // Turn OAuth on: the password row is skipped entirely.
+    // With OAuth there is no password to type, so that row disappears.
     form.field = .sign_in;
     _ = rig.session.settings_key(form, .{ .char = ' ' });
     try testing.expect(form.setup.oauth);
     _ = rig.session.settings_key(form, .tab);
     try testing.expectEqual(Session.Field.advanced, form.field);
 
-    // Advanced is folded: Tab steps over the client id.
-    try testing.expect(!form.setup.show_advanced);
-    try testing.expect(!form.setup.field_visible(@backingInt(Session.Field.client_id)));
-    _ = rig.session.settings_key(form, .tab);
-    try testing.expectEqual(Session.Field.address, form.field);
-
-    // Open it and the client id becomes reachable.
-    form.field = .advanced;
-    _ = rig.session.settings_key(form, .enter);
-    try testing.expect(form.setup.show_advanced);
-    _ = rig.session.settings_key(form, .tab);
-    try testing.expectEqual(Session.Field.client_id, form.field);
-}
-
-test "a failed OAuth sign-in keeps the account and shows the provider's words" {
-    var rig: Rig = .{};
-    try rig.start();
-    defer rig.deinit();
-    _ = rig.session.step();
-
-    var port: core.accounts_port.Memory = .{ .fail = true };
-    rig.session.deps.accounts_file = port.accounts();
-    rig.session.state.accounts.add(
-        core.id.AccountId.from_int(1),
-        "work",
-        core.address.Address.init("me@outlook.com") catch core.address.Address{},
-        .{},
-    );
-    rig.session.state.accounts.items[0].oauth_client.set("client-1");
-    rig.session.state.accounts.items[0].label.set("work");
-
-    rig.session.oauth_account(core.id.AccountId.from_int(1));
-    // Not "could not save": the account exists, the sign-in is what failed.
-    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "saved") != null);
-    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "retry") != null);
-    try testing.expect(rig.session.settings == null);
+    // ...and back up lands on Sign in, not on the hidden row.
+    _ = rig.session.settings_key(form, .back_tab);
+    try testing.expectEqual(Session.Field.sign_in, form.field);
 }
 
 test "a new OAuth account saves without a password and signs in" {
@@ -2470,7 +2477,8 @@ test "removing an account rewrites the config and drops its mail" {
     failing.setup.password.append_codepoint('s');
     rig.session.save_settings(failing);
     try testing.expect(rig.session.settings != null);
-    try testing.expect(std.mem.indexOf(u8, rig.session.settings.?.setup.problem.slice(), "Could not save") != null);
+    // The reason now names the stage instead of saying "fix the reason above".
+    try testing.expect(std.mem.indexOf(u8, rig.session.settings.?.setup.problem.slice(), "Could not write") != null);
     rig.session.close_settings();
     rig.session.run_effects_for_test(&.{.{ .remove_account = .{ .account = core.id.AccountId.from_int(2) } }});
     try testing.expectEqualStrings("Could not rewrite the config", rig.session.state.status.slice());

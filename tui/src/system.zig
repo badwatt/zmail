@@ -32,6 +32,11 @@ pub const System = struct {
         size: *const fn (context: *anyopaque) Error!Size,
         enter_raw: *const fn (context: *anyopaque) Error!void,
         leave_raw: *const fn (context: *anyopaque) Error!void,
+        /// Hands the terminal back to the shell, so a browser round trip can
+        /// print its URL where a human can see it.
+        suspend_ui: *const fn (context: *anyopaque) Error!void,
+        /// Takes the terminal back and repaints from scratch.
+        resume_ui: *const fn (context: *anyopaque) Error!void,
     };
 
     pub fn read(self: System, buffer: []u8, timeout_ms: u32) Error!usize {
@@ -52,6 +57,14 @@ pub const System = struct {
 
     pub fn leave_raw(self: System) Error!void {
         return self.vtable.leave_raw(self.context);
+    }
+
+    pub fn suspend_ui(self: System) Error!void {
+        return self.vtable.suspend_ui(self.context);
+    }
+
+    pub fn resume_ui(self: System) Error!void {
+        return self.vtable.resume_ui(self.context);
     }
 };
 
@@ -78,8 +91,14 @@ pub const Fake = struct {
             .size = sizeThunk,
             .enter_raw = enterRawThunk,
             .leave_raw = leaveRawThunk,
+            .suspend_ui = suspendThunk,
+            .resume_ui = resumeThunk,
         } };
     }
+
+    fn suspendThunk(_: *anyopaque) Error!void {}
+
+    fn resumeThunk(_: *anyopaque) Error!void {}
 
     pub fn push_input(self: *Fake, bytes: []const u8) void {
         const available = self.input.len - self.input_len;
