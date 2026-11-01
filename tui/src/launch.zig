@@ -1275,6 +1275,12 @@ fn config_message(err: anyerror) []const u8 {
         error.PlaintextForbidden => "Plaintext IMAP needs allow_plaintext = true",
         error.InvalidHost, error.EmptyHost => "Invalid imap_host in the config file",
         error.InvalidPort => "Invalid imap_port in the config file",
+        error.DuplicateLabel => "Two accounts share a name: rename one of the [account ...] sections",
+        error.InvalidLabel => "An [account ...] name has characters that cannot be used",
+        error.UnknownSection => "Unknown section in the config file",
+        error.MixedFormat => "The config mixes one-account and multi-account styles",
+        error.TooManyAccounts => "Too many accounts in one config file",
+        error.TooLong => "The config has a value that is too long",
         else => "Invalid config file",
     };
 }

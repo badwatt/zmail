@@ -239,12 +239,27 @@ pub const Session = struct {
         self.needs_render = true;
     }
 
+    /// Leaves the splash on screen only while there is something to wait for.
+    fn stop_splash(self: *Session) void {
+        self.state.booting = false;
+        self.needs_render = true;
+    }
+
     /// Runs once, right after the first frame: opens the connections the cache
     /// could not replace. The splash is on screen while this blocks.
     pub fn boot(self: *Session) void {
-        if (!self.needs_boot) return;
+        std.debug.print("boot: needs_boot={} sources={} splash={}\n", .{ self.needs_boot, self.source_count, self.deps.splash });
+        if (!self.needs_boot) {
+            self.stop_splash();
+            return;
+        }
         self.needs_boot = false;
-        if (self.source_count == 0) return;
+        if (self.source_count == 0) {
+            // Nothing to connect to (a broken config, no accounts): do not sit
+            // on the splash. The notice is what the user needs to read.
+            self.stop_splash();
+            return;
+        }
 
         // The first connection must be made on this thread: the transport's
         // Io belongs to the event loop, and opening it from the worker leaves
@@ -1832,6 +1847,26 @@ test "an in-memory source boots without a splash" {
     try testing.expectEqual(@as(u32, 2), rig.session.store.len);
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "connecting") == null);
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Inbox") != null);
+}
+
+test "a boot with nothing to connect leaves the splash" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // A config that could not be read leaves no sources: the splash must not
+    // stay up forever over the notice that explains it.
+    rig.session.source_count = 0;
+    rig.session.state.booting = true;
+    rig.session.needs_boot = false;
+    rig.session.boot();
+    try testing.expect(!rig.session.state.booting);
+
+    rig.session.state.booting = true;
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    try testing.expect(!rig.session.state.booting);
 }
 
 test "loop without a splash paints only the data" {
