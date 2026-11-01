@@ -109,8 +109,29 @@ pub const Setup = struct {
         }
     }
 
+    /// Fields are typed by humans: "  me@example.com  " is the same account.
+    /// Passwords are never trimmed (a space can be part of a secret).
+    fn trim_fields(self: *Setup) void {
+        switch (self.step) {
+            .address, .imap_host, .imap_port, .smtp_host, .smtp_port, .username => {},
+            .password, .review => return,
+        }
+        // Copy through a scratch buffer: Text.set cannot take an aliased slice.
+        var buffer: [limits.address_max]u8 = undefined;
+        switch (self.step) {
+            .address => self.address.set(trim_copy(self.address.slice(), &buffer)),
+            .imap_host => self.imap_host.set(trim_copy(self.imap_host.slice(), &buffer)),
+            .imap_port => self.imap_port.set(trim_copy(self.imap_port.slice(), &buffer)),
+            .smtp_host => self.smtp_host.set(trim_copy(self.smtp_host.slice(), &buffer)),
+            .smtp_port => self.smtp_port.set(trim_copy(self.smtp_port.slice(), &buffer)),
+            .username => self.username.set(trim_copy(self.username.slice(), &buffer)),
+            .password, .review => {},
+        }
+    }
+
     pub fn next(self: *Setup) void {
         self.problem.clear();
+        self.trim_fields();
         switch (self.step) {
             .address => {
                 const address = Address.init(self.address.slice()) catch {
@@ -275,6 +296,18 @@ pub const Setup = struct {
         if (self.username.is_empty()) self.username.set(address.local.slice());
     }
 };
+
+fn trimmed(value: []const u8) []const u8 {
+    return std.mem.trim(u8, value, " \t\r\n");
+}
+
+/// Trimmed copy in `buffer` (Text.set must not read from its own storage).
+fn trim_copy(value: []const u8, buffer: []u8) []const u8 {
+    const text = trimmed(value);
+    const length = @min(text.len, buffer.len);
+    @memcpy(buffer[0..length], text[0..length]);
+    return buffer[0..length];
+}
 
 fn valid_host(host: *const Text(limits.host_max)) bool {
     if (host.is_empty()) return false;
