@@ -701,10 +701,12 @@ pub const Session = struct {
         imap_port,
         smtp_host,
         smtp_port,
-        username,
-        password,
+        // Sign in comes before the password: the choice decides whether there
+        // is a password at all. Everything below Advanced is rare.
         sign_in,
+        password,
         advanced,
+        username,
         client_id,
 
         fn count() u8 {
@@ -718,9 +720,9 @@ pub const Session = struct {
                 .imap_port => .imap_port,
                 .smtp_host => .smtp_host,
                 .smtp_port => .smtp_port,
-                .username => .username,
-                .password => .password,
                 .sign_in, .advanced, .client_id => .review,
+                .password => .password,
+                .username => .username,
             };
         }
     };
@@ -2015,6 +2017,35 @@ test "the form shows the servers the source reported" {
     try testing.expectEqualStrings("alvaro", form.setup.username.slice());
     try testing.expectEqualStrings("587", form.setup.smtp_port.slice());
     try testing.expectEqualStrings("993", form.setup.imap_port.slice());
+}
+
+test "the form reads sign in, then password, then the fold" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+
+    // Walking down: hosts, Sign in, Password, Advanced, and then nothing rare.
+    form.field = .smtp_port;
+    _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.sign_in, form.field);
+    _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.password, form.field);
+    _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.advanced, form.field);
+    _ = rig.session.settings_key(form, .tab);
+    // Username and the client id sit below the fold: folded, we wrap around.
+    try testing.expectEqual(Session.Field.address, form.field);
+
+    // Opened, they appear after it, never above.
+    form.field = .advanced;
+    _ = rig.session.settings_key(form, .enter);
+    _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.username, form.field);
+    _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.client_id, form.field);
 }
 
 test "with OAuth the password row is skipped" {

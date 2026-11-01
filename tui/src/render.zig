@@ -84,10 +84,10 @@ pub fn settings(
         "IMAP port",
         "SMTP server",
         "SMTP port",
-        "Username",
-        "Password",
         "Sign in",
+        "Password",
         "Advanced",
+        "Username",
         "Client ID",
     };
 
@@ -102,15 +102,15 @@ pub fn settings(
         }
 
         const shown = switch (index) {
-            8 => if (setup.show_advanced) "Advanced ▾" else "Advanced ▸",
+            7 => if (setup.show_advanced) "Advanced ▾" else "Advanced ▸",
             else => labels[index],
         };
         _ = out.put_text(rect.x + 3, y, shown, 13, if (active) theme.accent else theme.dim);
 
         var masked: [core.limits.secret_max]u8 = @splat('*');
         const raw = switch (index) {
-            7 => if (setup.oauth) "oauth" else "password",
-            8 => if (setup.show_advanced) "client id, optional" else "",
+            5 => if (setup.oauth) "oauth" else "password",
+            7 => if (setup.show_advanced) "open" else "",
             9 => setup.oauth_client_id.slice(),
             else => field_value(setup, index),
         };
@@ -126,7 +126,7 @@ pub fn settings(
     } else if (@backingInt(field) == rows - 1) {
         _ = out.put_text(rect.x + 3, hint_y, "Enter saves · Ctrl+S also saves", rect.width -| 4, theme.accent);
     } else {
-        _ = out.put_text(rect.x + 3, hint_y, "Tab moves · Enter saves on the last field", rect.width -| 4, theme.dim);
+        _ = out.put_text(rect.x + 3, hint_y, "Tab moves · space toggles · Ctrl+S saves · Esc closes", rect.width -| 4, theme.dim);
     }
 
     const hints = [_]Hint{
@@ -144,7 +144,7 @@ fn field_value(setup: *const core.setup.Setup, index: u8) []const u8 {
         2 => setup.imap_port.slice(),
         3 => setup.smtp_host.slice(),
         4 => setup.smtp_port.slice(),
-        5 => setup.username.slice(),
+        8 => setup.username_or_address(),
         else => setup.password.expose(),
     };
 }

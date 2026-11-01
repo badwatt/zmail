@@ -68,9 +68,11 @@ pub const Setup = struct {
     /// Rows the form shows. The password is meaningless with OAuth, and the
     /// client id is too rare to be on screen by default.
     pub fn field_visible(self: *const Setup, index: u8) bool {
+        // Order: address, hosts, sign in, password, advanced, then the rare
+        // rows (username, OAuth client id) below the fold.
         return switch (index) {
-            6 => !self.oauth,
-            9 => self.show_advanced,
+            6 => !self.oauth, // password, when signing in with one
+            8, 9 => self.show_advanced, // username, OAuth client id
             else => true,
         };
     }
@@ -272,6 +274,12 @@ pub const Setup = struct {
         return buffer[0..length];
     }
 
+    /// Providers take the address as the username unless told otherwise, so an
+    /// empty field means "the address".
+    pub fn username_or_address(self: *const Setup) []const u8 {
+        return if (self.username.is_empty()) self.address.slice() else self.username.slice();
+    }
+
     fn address_local(self: *const Setup) []const u8 {
         const raw = self.address.slice();
         const at = std.mem.indexOfScalar(u8, raw, '@') orelse return raw;
@@ -295,7 +303,7 @@ pub const Setup = struct {
         , .{
             label,
             self.address.slice(),
-            self.username.slice(),
+            self.username_or_address(),
             self.imap_host.slice(),
             self.imap_port.slice(),
         }) catch return "";
@@ -432,17 +440,41 @@ test "skipping the SMTP host omits the SMTP block and the port step" {
     try testing.expect(std.mem.indexOf(u8, text, "username = alice") != null);
 }
 
+test "the username is derived when it is not given" {
+    var setup = Setup.init();
+    defer setup.deinit();
+    setup.address.set("alice@example.com");
+    setup.imap_host.set("imap.example.com");
+    setup.imap_port.set("993");
+
+    // Hidden by default, because the address is what providers expect.
+    try testing.expect(!setup.field_visible(8));
+    try testing.expectEqualStrings("alice@example.com", setup.username_or_address());
+
+    var buffer: [1024]u8 = undefined;
+    const text = setup.config_text(&buffer);
+    try testing.expect(std.mem.indexOf(u8, text, "username = alice@example.com") != null);
+
+    // Asked for, it wins.
+    setup.toggle_advanced();
+    try testing.expect(setup.field_visible(8));
+    setup.username.set("alice");
+    try testing.expectEqualStrings("alice", setup.username_or_address());
+}
+
 test "advanced rows fold away until asked for" {
     var setup = Setup.init();
     defer setup.deinit();
-    // Rows are address..password, sign in, advanced, client id.
-    try testing.expect(setup.field_visible(8)); // advanced itself
+    // address, hosts, sign in, password, advanced ... then the fold.
+    try testing.expect(setup.field_visible(7)); // advanced itself
+    try testing.expect(!setup.field_visible(8)); // username
     try testing.expect(!setup.field_visible(9)); // client id
     setup.toggle_advanced();
+    try testing.expect(setup.field_visible(8));
     try testing.expect(setup.field_visible(9));
     setup.toggle_advanced();
     try testing.expect(!setup.field_visible(9));
-    // The password row disappears with OAuth.
+    // The password row disappears with OAuth, and it sits after Sign in.
     try testing.expect(setup.field_visible(6));
     setup.set_oauth(true);
     try testing.expect(!setup.field_visible(6));
