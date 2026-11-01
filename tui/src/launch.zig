@@ -230,6 +230,9 @@ const Live = struct {
         const index = self.len;
         self.accounts[index] = account;
         self.len += 1;
+        // Slices must point at the stored account, not at the parameter: the
+        // parameter dies when this returns, and the form would show garbage.
+        const stored = &self.accounts[index];
 
         self.lazy_mail[index] = .{
             .context = &self.accounts[index],
@@ -241,12 +244,12 @@ const Live = struct {
             .label = account.label,
             .from = account.from,
             .mail = self.lazy_mail[index].mail(),
-            .imap_host = account.host.slice(),
-            .imap_port = account.port,
-            .username = account.username.slice(),
-            .smtp_host = account.smtp_host.slice(),
-            .smtp_port = account.smtp_port,
-            .smtp = account.smtp_enabled,
+            .imap_host = stored.host.slice(),
+            .imap_port = stored.port,
+            .username = stored.username.slice(),
+            .smtp_host = stored.smtp_host.slice(),
+            .smtp_port = stored.smtp_port,
+            .smtp = stored.smtp_enabled,
         };
         self.mail_count += 1;
 

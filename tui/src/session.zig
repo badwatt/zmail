@@ -1716,6 +1716,40 @@ test "the account form opens empty, validates, and saves through the port" {
     try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "added") != null);
 }
 
+test "the form shows the servers the source reported" {
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "work",
+        .mail = rig.fake_mail.mail(),
+        .imap_host = "imap.example.com",
+        .imap_port = 993,
+        .username = "alvaro",
+        .smtp_host = "smtp.example.com",
+        .smtp_port = 587,
+        .smtp = true,
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .loading_ms = 0,
+    });
+    defer rig.deinit();
+    rig.session.boot();
+
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = core.id.AccountId.from_int(1) } }});
+    const form = &rig.session.settings.?;
+    // No '?' and no blanks: the values survive into the form.
+    try testing.expectEqualStrings("imap.example.com", form.setup.imap_host.slice());
+    try testing.expectEqualStrings("smtp.example.com", form.setup.smtp_host.slice());
+    try testing.expectEqualStrings("alvaro", form.setup.username.slice());
+    try testing.expectEqualStrings("587", form.setup.smtp_port.slice());
+    try testing.expectEqualStrings("993", form.setup.imap_port.slice());
+}
+
 test "editing prefills the form and replaces the account" {
     var rig: Rig = .{};
     try rig.start();
