@@ -25,6 +25,17 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
     var posix = os.Posix.init(std.posix.STDIN_FILENO, std.posix.STDOUT_FILENO);
     const system = posix.system();
 
+    // `--oauth` talks to a human in a browser: it runs on the normal screen,
+    // before the alternate one, so the URL and the QR are actually visible.
+    if (options.oauth) {
+        const failure = run_oauth(gpa, io, options, system);
+        if (failure) |problem| {
+            std.debug.print("amail: {s}\n", .{problem.message});
+            return problem.code;
+        }
+        return 0;
+    }
+
     try system.enter_raw();
     try system.write(enter_screen);
 
@@ -42,7 +53,6 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
 
 /// Returns null on a clean exit, or what to report once the terminal is back.
 fn run_inside(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
-    if (options.oauth) return run_oauth(gpa, io, options, system);
     if (options.set_password) return run_set_password(io, options, system);
     if (options.add_account) return run_add_account(io, options, system);
     return switch (options.mode) {
@@ -647,6 +657,7 @@ fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Se
         (os.env("AMAIL_OAUTH_CLIENT_ID") orelse "")
     else
         entry.oauth_client_id.slice();
+    // Optional: without one we can still print the URL the user must build.
     if (client_id.len == 0) {
         return .{ .message = "Add oauth_client_id to the config (or set AMAIL_OAUTH_CLIENT_ID)" };
     }

@@ -637,13 +637,21 @@ pub const Session = struct {
 
     fn oauth_account(self: *Session, account: core.id.AccountId) void {
         const label = self.state.accounts.label_for(account);
+
+        // A client id is only needed to talk to the provider: say so instead of
+        // failing inside the flow.
+        const index = self.state.accounts.index_of(account) orelse 0;
+        if (self.state.accounts.items[index].oauth_client.is_empty()) {
+            self.state.set_alert("OAuth needs a Client ID (Advanced in the account form)", .{});
+            return;
+        }
         const accounts = self.deps.accounts_file orelse {
             self.state.set_alert("Accounts cannot be changed here", .{});
             return;
         };
         accounts.oauth_login(account) catch {
             self.invalidate_screen();
-            self.state.set_alert("OAuth failed: run amail --oauth with a client id", .{});
+            self.state.set_alert("OAuth failed: check the Client ID and try again", .{});
             return;
         };
         self.invalidate_screen();
@@ -911,14 +919,6 @@ pub const Session = struct {
             self.needs_render = true;
             return;
         };
-
-        // OAuth without a client id cannot even be written: the config would
-        // carry an empty key.
-        if (form.setup.oauth and form.setup.oauth_client_id.is_empty()) {
-            form.setup.problem.set("OAuth needs the Client ID of your registered app");
-            self.needs_render = true;
-            return;
-        }
 
         // Validate the whole account before writing anything.
         form.setup.step = .review;
@@ -2044,19 +2044,20 @@ test "a new OAuth account saves without a password and signs in" {
     form.setup.username.set("new@example.com");
     form.setup.set_oauth(true);
 
-    // OAuth without a client id is refused, and the form stays.
-    rig.session.save_settings(form);
-    try testing.expect(rig.session.settings != null);
-    try testing.expect(std.mem.indexOf(u8, rig.session.settings.?.setup.problem.slice(), "Client ID") != null);
-
-    // With one, the account is written and signed in through the port.
-    form.setup.oauth_client_id.set("client-123");
+    // The account saves without a client id (it is optional); the sign-in is
+    // what needs one, and the session says so.
     rig.session.save_settings(form);
     try testing.expectEqual(@as(u32, 1), port.saved);
+    try testing.expectEqual(core.id.AccountId.unknown, port.oauth);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Client ID") != null);
+
+    // With one, it signs in and attaches.
+    form.setup.oauth_client_id.set("client-123");
+    rig.session.state.accounts.items[0].oauth_client.set("client-123");
+    rig.session.oauth_account(core.id.AccountId.from_int(1));
     try testing.expectEqual(core.id.AccountId.from_int(1), port.oauth);
     // Signed in and attached: its mail is fetched from now on.
     try testing.expectEqual(@as(u8, 2), rig.session.source_count);
-    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "added") != null);
 }
 
 test "a new account is connected and listed without a restart" {

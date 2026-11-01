@@ -190,14 +190,14 @@ pub const Setup = struct {
                 self.step = .username;
             },
             .username => {
-                if (self.username.is_empty()) {
-                    self.problem.set("Enter the username for the mail server");
-                    return;
-                }
+                // Empty means "the same as the address", which is what nearly
+                // every provider expects. No reason to type it twice.
+                if (self.username.is_empty()) self.username.set(self.address.slice());
                 self.step = .password;
             },
             .password => {
-                if (self.password.is_empty()) {
+                // An OAuth account has no password: the token comes later.
+                if (self.password.is_empty() and !self.oauth) {
                     self.problem.set("Enter the password for the account");
                     return;
                 }
@@ -283,7 +283,8 @@ pub const Setup = struct {
             self.imap_port.slice(),
         }) catch return "";
 
-        if (self.oauth) {
+        // Only when there is one: an empty value is not a valid config line.
+        if (self.oauth and !self.oauth_client_id.is_empty()) {
             writer.print("oauth_client_id = {s}\n", .{self.oauth_client_id.slice()}) catch return "";
         }
         if (self.send_enabled and !self.smtp_host.is_empty()) {
@@ -414,6 +415,27 @@ test "skipping the SMTP host omits the SMTP block and the port step" {
     try testing.expect(std.mem.indexOf(u8, text, "username = alice") != null);
 }
 
+test "an empty username becomes the address, and OAuth needs no password" {
+    var setup = Setup.init();
+    defer setup.deinit();
+    setup.address.set("alice@example.com");
+    setup.next(); // imap_host
+    setup.next(); // imap_port
+    setup.next(); // smtp_host
+    setup.next(); // smtp_port
+    setup.next(); // username
+    setup.username.clear();
+    setup.next(); // username -> password, with the address filled in
+    try testing.expectEqualStrings("alice@example.com", setup.username.slice());
+    try testing.expectEqual(.password, setup.step);
+
+    setup.set_oauth(true);
+    setup.password = .{};
+    setup.next();
+    try testing.expectEqual(.review, setup.step);
+    try testing.expect(setup.problem.is_empty());
+}
+
 test "each step validates before advancing" {
     var setup = Setup.init();
     defer setup.deinit();
@@ -450,15 +472,20 @@ test "each step validates before advancing" {
 
     setup.smtp_port.set("465");
     setup.next();
+    // An empty username is not an error any more: it becomes the address.
     setup.username.clear();
     setup.next();
-    try testing.expectEqual(Step.username, setup.step);
+    try testing.expectEqual(Step.password, setup.step);
+    try testing.expectEqualStrings("alice@example.com", setup.username.slice());
 
-    setup.username.set("alice");
-    setup.next();
-    setup.next(); // empty password
+    setup.next(); // empty password, password mode
     try testing.expectEqual(Step.password, setup.step);
     try testing.expect(!setup.problem.is_empty());
+
+    // In OAuth mode there is nothing to type.
+    setup.set_oauth(true);
+    setup.next();
+    try testing.expectEqual(Step.review, setup.step);
 }
 
 test "back walks the steps and cancels from the first one" {
