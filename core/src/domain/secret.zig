@@ -33,6 +33,26 @@ pub const Secret = struct {
         self.len = 0;
     }
 
+    /// Appends one codepoint as UTF-8 while the user types a password.
+    pub fn append_codepoint(self: *Secret, codepoint: u21) void {
+        var encoded: [4]u8 = undefined;
+        const length = std.unicode.utf8Encode(codepoint, &encoded) catch return;
+        if (self.len + length > limits.secret_max) return;
+        @memcpy(self.buffer[self.len..][0..length], encoded[0..length]);
+        self.len += length;
+    }
+
+    /// Removes the last codepoint.
+    pub fn pop_codepoint(self: *Secret) void {
+        if (self.len == 0) return;
+        var index: u32 = self.len - 1;
+        while (index > 0) : (index -= 1) {
+            if (self.buffer[index] & 0b1100_0000 != 0b1000_0000) break;
+        }
+        @memset(self.buffer[index..self.len], 0);
+        self.len = index;
+    }
+
     /// Hands the plain bytes to the caller. Every call site is an audit point.
     pub fn expose(self: *const Secret) []const u8 {
         assert(self.len <= limits.secret_max);
@@ -109,6 +129,42 @@ test "Secret: reinitializing a secret does not leak the previous tail" {
     for (secret.buffer[secret.len..]) |byte| {
         try testing.expectEqual(@as(u8, 0), byte);
     }
+}
+
+test "Secret: append and pop work codepoint by codepoint" {
+    var secret: Secret = undefined;
+    try Secret.init("", &secret);
+    defer secret.deinit();
+
+    secret.append_codepoint('p');
+    secret.append_codepoint(0xe9);
+    secret.append_codepoint('s');
+    try testing.expectEqualStrings("pés", secret.expose());
+
+    secret.pop_codepoint();
+    secret.pop_codepoint();
+    try testing.expectEqualStrings("p", secret.expose());
+    secret.pop_codepoint();
+    secret.pop_codepoint();
+    try testing.expect(secret.is_empty());
+}
+
+test "Secret: append stops at the capacity" {
+    var secret: Secret = undefined;
+    try Secret.init("", &secret);
+    defer secret.deinit();
+
+    var index: u32 = 0;
+    while (index < limits.secret_max + 5) : (index += 1) secret.append_codepoint('x');
+    try testing.expectEqual(limits.secret_max, secret.len);
+}
+
+test "Secret: an unencodable codepoint is ignored" {
+    var secret: Secret = undefined;
+    try Secret.init("ab", &secret);
+    defer secret.deinit();
+    secret.append_codepoint(0xd800);
+    try testing.expectEqualStrings("ab", secret.expose());
 }
 
 test "Secret: formatting redacts the value" {

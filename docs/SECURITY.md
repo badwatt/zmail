@@ -72,9 +72,14 @@ milestone. There is no analytics, no update check, and no crash reporting.
   the system CA bundle validates the chain and the hostname is checked against
   the certificate. Plaintext is refused by config validation unless the user
   writes `allow_plaintext = true` for a local server.
-- **No password on disk.** The config file is refused if it contains a
-  `password` key (by name, with an actionable error). Today the password comes
-  from `AMAIL_PASSWORD`; the environment is a bridge, not the destination.
+- **The config never contains a password.** The parser refuses a `password`
+  key by name, with an actionable error. The setup assistant writes the
+  password to a separate `0600` file next to the config (`credential`), and
+  `AMAIL_PASSWORD` overrides it. A plaintext file with owner-only permissions is
+  a deliberate, temporary tradeoff: it is what makes first-run setup usable
+  without a secret service. The OS keyring and an `age`-encrypted file are the
+  next adapters behind the same `SecretStore` port; until then, the file is
+  guarded by `0600` and never printed, logged, or included in the config.
 - **SMTP AUTH PLAIN only inside TLS.** The credentials are base64-encoded in the
   command (as SMTP requires) and only sent after the TLS handshake. Plaintext
   SMTP follows the same `allow_plaintext` rule as IMAP. The encoded payload is

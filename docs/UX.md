@@ -101,6 +101,27 @@ cancels it. `↑`/`↓` still move the cursor while typing. Inside the help over
 `Esc` is never a quit key. The only ways out are `q` from the list (never from a
 text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
 
+## First run
+
+`amail --live` with no config opens the setup assistant, one field per screen:
+
+```
+ amail setup                                                     step 2/8
+────────────────────────────────────────────────────────────────────────
+ IMAP server
+ imap.example.com▏
+ Where mail is read from; TLS is required
+
+ Enter next  ·  Esc back  ·  Ctrl+U clear  ·  Ctrl+Q quit
+```
+
+It asks for the address, the IMAP server and port (prefilled `imap.<domain>`
+and `993`), the SMTP server and port (`smtp.<domain>` / `465`, leave the host
+empty to skip sending), the username (prefilled from the address), and the
+password (masked, never echoed). The last screen shows the config that will be
+written, the path, and where the password goes. `Enter` saves, `Esc` goes back,
+`Ctrl+Q` cancels without writing anything.
+
 ## Writing mail
 
 `c` (or `r`) opens a full-screen composer:

@@ -32,13 +32,16 @@ The port exists; this milestone fills it in.
   port over a socket and `std.crypto.tls.Client`, with the system CA bundle and
   hostname verification. Reads poll first and drain buffered records so a
   greeting that arrives with the handshake is not lost.
-- **Account setup (done: M2.3).** A strict `key = value` config parsed in
-  `core/config.zig` (unknown keys and passwords are refused), `--live` and
-  `--config` in the CLI, and the password from `AMAIL_PASSWORD`.
+- **Account setup (done: M2.3, first run in M3.2).** A strict `key = value`
+  config parsed in `core/config.zig` (unknown keys and passwords are refused),
+  `--live` and `--config` in the CLI. If the config is missing, a setup
+  assistant asks for the account fields, validates them with the same parser,
+  and writes the config plus a `0600` credential file next to it.
 - **STARTTLS (next).** Upgrade a plaintext connection on 143/587 with the same
   verification. Today only implicit TLS is accepted.
 - **SecretStore (next).** OS keyring, then an encrypted file, then the
-  self-hosted sync backend. The environment variable goes away.
+  self-hosted sync backend. This replaces the plaintext `0600` credential file
+  that setup writes today; `AMAIL_PASSWORD` stays as an override.
 - **IDLE** for new mail, and flag sync back to the server after a local change.
 - **TLS adapter.** `std.crypto.tls.Client` with certificate verification
   mandatory. STARTTLS upgrade. A bounded, line-oriented transport with

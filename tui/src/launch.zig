@@ -10,6 +10,7 @@ const net = @import("net");
 const cli = @import("cli.zig");
 const os = @import("os.zig");
 const session_mod = @import("session.zig");
+const setup_session = @import("setup_session.zig");
 const theme_mod = @import("theme.zig");
 
 const enter_screen = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h";
@@ -93,15 +94,50 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
     }
 
     var config_buffer: [8193]u8 = undefined;
-    const config_text = read_file(io, path, &config_buffer) catch
-        return .{ .message = "Could not read the config file" };
-    if (config_text.len == 8193) return .{ .message = "Config file is too large" };
+    var config_text: []const u8 = undefined;
+
+    var saved_setup: setup_session.Saved = undefined;
+    var have_saved_setup = false;
+    defer if (have_saved_setup) saved_setup.password.deinit();
+
+    if (read_file(io, path, &config_buffer)) |text| {
+        if (text.len == config_buffer.len) return .{ .message = "Config file is too large" };
+        config_text = text;
+    } else |err| switch (err) {
+        error.FileNotFound => {
+            // First run: create the config with the setup assistant.
+            const outcome = setup_session.run(system, theme_for_environment(), path) catch
+                return .{ .message = "Setup failed: terminal error" };
+            switch (outcome) {
+                .cancelled => return .{ .message = "Setup cancelled; no config was written" },
+                .saved => |saved| {
+                    saved_setup = saved;
+                    have_saved_setup = true;
+                    write_setup_files(io, path, &saved_setup) catch
+                        return .{ .message = "Could not write the config file" };
+                    config_text = saved_setup.config_text();
+                },
+            }
+        },
+        else => return .{ .message = "Could not read the config file" },
+    }
 
     const config = core.config.parse(config_text) catch |err|
         return .{ .message = config_message(err) };
 
-    const password = os.env("AMAIL_PASSWORD") orelse
-        return .{ .message = "Set AMAIL_PASSWORD to the account password" };
+    var credential: core.secret.Secret = .{};
+    var have_credential = false;
+    defer if (have_credential) credential.deinit();
+
+    const password: []const u8 = blk: {
+        if (os.env("AMAIL_PASSWORD")) |value| break :blk value;
+        if (have_saved_setup) break :blk saved_setup.password.expose();
+        if (read_credential(io, path, &credential)) |_| {
+            have_credential = true;
+            break :blk credential.expose();
+        } else |_| {}
+        return .{ .message = "No password found: run setup again or set AMAIL_PASSWORD" };
+    };
 
     if (config.imap.security != .tls) {
         return .{ .message = "Only implicit TLS (imap_security = tls) is supported today" };
@@ -144,6 +180,43 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
 
     const outbox: ?core.outbox_port.Outbox = if (smtp_ready) smtp_outbox.outbox() else null;
     return run_session(gpa, system, imap.mail(), outbox, config.address);
+}
+
+const file_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
+const directory_mode: std.Io.Dir.Permissions = @fromBackingInt(@intCast(0o700));
+
+fn write_setup_files(io: std.Io, config_path: []const u8, saved: *const setup_session.Saved) !void {
+    const dir = cli.parent_dir(config_path);
+    if (dir.len > 0) {
+        std.Io.Dir.cwd().createDir(io, dir, directory_mode) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+
+    try write_file(io, config_path, saved.config_text());
+
+    var credential_buffer: [512]u8 = undefined;
+    const credential = cli.credential_path(config_path, &credential_buffer);
+    if (credential.len == 0) return error.NameTooLong;
+    try write_file(io, credential, saved.password.expose());
+}
+
+fn write_file(io: std.Io, path: []const u8, bytes: []const u8) !void {
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{ .permissions = file_mode });
+    defer file.close(io);
+    try file.writeStreamingAll(io, bytes);
+}
+
+fn read_credential(io: std.Io, config_path: []const u8, out: *core.secret.Secret) !void {
+    var path_buffer: [512]u8 = undefined;
+    const path = cli.credential_path(config_path, &path_buffer);
+    if (path.len == 0) return error.NameTooLong;
+
+    var buffer: [1024]u8 = undefined;
+    const text = try read_file(io, path, &buffer);
+    const trimmed = std.mem.trimEnd(u8, text, "\r\n");
+    try core.secret.Secret.init(trimmed, out);
 }
 
 fn read_file(io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {

@@ -32,6 +32,7 @@ pub const command = @import("app/command.zig");
 pub const effect = @import("app/effect.zig");
 pub const state = @import("app/state.zig");
 pub const update = @import("app/update.zig");
+pub const setup = @import("app/setup.zig");
 pub const sync = @import("app/sync.zig");
 
 pub const imap = @import("protocol/imap.zig");
@@ -66,6 +67,7 @@ test {
     _ = @import("app/effect.zig");
     _ = @import("app/state.zig");
     _ = @import("app/update.zig");
+    _ = @import("app/setup.zig");
     _ = @import("app/sync.zig");
     _ = @import("protocol/imap.zig");
     _ = @import("protocol/smtp.zig");

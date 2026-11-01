@@ -31,7 +31,12 @@ every key (`/` inside the help filters it).
 
 ### Live mode
 
-`~/.config/amail/config` (or `--config PATH`):
+The first `amail --live` with no config starts a setup assistant: it asks for
+the address, derives the IMAP/SMTP servers, collects the password, and writes
+`~/.config/amail/config` plus a `0600` credential file next to it. Later runs
+read both; `AMAIL_PASSWORD` overrides the file.
+
+The config file (or `--config PATH`):
 
 ```ini
 address     = alice@example.com

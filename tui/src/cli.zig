@@ -70,6 +70,21 @@ pub fn parse(args: []const []const u8) Action {
     return .{ .launch = launch };
 }
 
+/// Directory part of a path, or "" when the path has none.
+pub fn parent_dir(path: []const u8) []const u8 {
+    const index = std.mem.lastIndexOfScalar(u8, path, '/') orelse return "";
+    if (index == 0) return "/";
+    return path[0..index];
+}
+
+/// The credential file lives next to the config, never inside it.
+pub fn credential_path(config_path: []const u8, buffer: []u8) []const u8 {
+    const dir = parent_dir(config_path);
+    if (dir.len == 0) return std.fmt.bufPrint(buffer, "credential", .{}) catch "";
+    const separator: []const u8 = if (dir[dir.len - 1] == '/') "" else "/";
+    return std.fmt.bufPrint(buffer, "{s}{s}credential", .{ dir, separator }) catch "";
+}
+
 /// `$XDG_CONFIG_HOME/amail/config`, or `$HOME/.config/amail/config`. Empty when
 /// neither variable is set, which the launcher reports.
 pub fn default_config_path(buffer: []u8, xdg_config_home: ?[]const u8, home: ?[]const u8) []const u8 {
@@ -216,6 +231,29 @@ test "default config path follows XDG, then HOME" {
     );
     try testing.expectEqualStrings("", default_config_path(&buffer, null, null));
     try testing.expectEqualStrings("", default_config_path(&buffer, null, ""));
+}
+
+test "parent_dir keeps the directory part" {
+    try testing.expectEqualStrings("/home/me/.config/amail", parent_dir("/home/me/.config/amail/config"));
+    try testing.expectEqualStrings("a", parent_dir("a/config"));
+    try testing.expectEqualStrings("/", parent_dir("/config"));
+    try testing.expectEqualStrings("", parent_dir("config"));
+}
+
+test "credential_path sits next to the config" {
+    var buffer: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "/home/me/.config/amail/credential",
+        credential_path("/home/me/.config/amail/config", &buffer),
+    );
+    try testing.expectEqualStrings("credential", credential_path("config", &buffer));
+    try testing.expectEqualStrings("/credential", credential_path("/config", &buffer));
+    try testing.expectEqualStrings("a/credential", credential_path("a/b", &buffer));
+}
+
+test "credential_path degrades to empty when the buffer is too small" {
+    var buffer: [4]u8 = undefined;
+    try testing.expectEqualStrings("", credential_path("/home/me/config", &buffer));
 }
 
 test "default config path degrades to empty when the buffer is too small" {
