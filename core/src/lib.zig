@@ -25,6 +25,7 @@ pub const mail_port = @import("ports/mail.zig");
 pub const outbox_port = @import("ports/outbox.zig");
 pub const cache_port = @import("ports/cache.zig");
 pub const bodies_port = @import("ports/bodies.zig");
+pub const accounts_port = @import("ports/accounts.zig");
 pub const transport_port = @import("ports/transport.zig");
 pub const memory_mail = @import("adapters/memory_mail.zig");
 pub const imap_mail = @import("adapters/imap_mail.zig");
@@ -69,6 +70,7 @@ test {
     _ = @import("ports/outbox.zig");
     _ = @import("ports/cache.zig");
     _ = @import("ports/bodies.zig");
+    _ = @import("ports/accounts.zig");
     _ = @import("adapters/memory_mail.zig");
     _ = @import("adapters/imap_mail.zig");
     _ = @import("adapters/smtp_outbox.zig");

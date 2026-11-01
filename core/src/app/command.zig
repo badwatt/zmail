@@ -48,6 +48,13 @@ pub const Command = union(enum) {
     delete_forever,
     /// Trash only: remove everything in it.
     empty_trash,
+    /// The accounts overlay: open it, move in it, pick, remove, add, close.
+    open_accounts,
+    accounts_move: Move,
+    accounts_select,
+    accounts_remove,
+    accounts_add,
+    accounts_close,
     begin_search,
     search_char: u8,
     search_backspace,
@@ -112,6 +119,11 @@ test "every command is classified for status clearing" {
         .{ .command = .delete_selected, .clears = true },
         .{ .command = .delete_forever, .clears = true },
         .{ .command = .empty_trash, .clears = true },
+        .{ .command = .open_accounts, .clears = true },
+        .{ .command = .accounts_select, .clears = true },
+        .{ .command = .accounts_remove, .clears = true },
+        .{ .command = .accounts_add, .clears = true },
+        .{ .command = .accounts_close, .clears = true },
         .{ .command = .begin_search, .clears = true },
         .{ .command = .{ .search_char = 'a' }, .clears = true },
         .{ .command = .search_backspace, .clears = true },
@@ -141,5 +153,5 @@ test "every command is classified for status clearing" {
     for (commands) |case| {
         try testing.expectEqual(case.clears, case.command.clears_status());
     }
-    try testing.expectEqual(@as(usize, 40), commands.len);
+    try testing.expectEqual(@as(usize, 45), commands.len);
 }

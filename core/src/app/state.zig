@@ -17,7 +17,7 @@ const Address = @import("../domain/address.zig").Address;
 const AccountId = @import("../domain/id.zig").AccountId;
 const Compose = @import("compose.zig").Compose;
 
-pub const View = enum { list, reader, help, compose };
+pub const View = enum { list, reader, help, compose, accounts };
 
 pub const accounts_max: u8 = 4;
 
@@ -58,6 +58,26 @@ pub const Accounts = struct {
 
     /// Longest label, or zero when there is nothing to tell apart. The list
     /// uses it to size the account column so "personal" is not "perso…".
+    /// Drops an account from the list (it was removed from the config).
+    pub fn remove(self: *Accounts, id: AccountId) void {
+        var index: u8 = 0;
+        while (index < self.len) : (index += 1) {
+            if (self.items[index].id != id) continue;
+            var cursor = index;
+            while (cursor + 1 < self.len) : (cursor += 1) {
+                self.items[cursor] = self.items[cursor + 1];
+            }
+            self.len -= 1;
+            self.items[self.len] = .{};
+            return;
+        }
+    }
+
+    pub fn at(self: *const Accounts, index: u8) ?AccountInfo {
+        if (index >= self.len) return null;
+        return self.items[index];
+    }
+
     pub fn max_label(self: *const Accounts) u8 {
         if (self.len < 2) return 0;
         var longest: u8 = 0;
@@ -117,6 +137,8 @@ pub const State = struct {
     booting: bool = false,
     /// True while a background refresh runs: the footer shows a spinner.
     refreshing: bool = false,
+    /// Row in the accounts overlay: 0 is "All accounts", then each account.
+    accounts_cursor: u8 = 0,
     /// Set by the first `empty_trash`; the second press does it. Anything else
     /// cancels it, so a stray key cannot empty a mailbox.
     pending_empty: bool = false,
@@ -239,6 +261,27 @@ fn fill(store: *Store) !void {
         .{ .id = MessageId.from_int(4), .account = AccountId.from_int(1), .mailbox = .inbox, .timestamp_unix = 200, .subject = Text(limits.subject_max).init("Invoice reminder") },
     };
     for (messages) |message| try store.insert(&message);
+}
+
+test "Accounts.remove drops one account, and at() reports the rest" {
+    var accounts: Accounts = .{};
+    accounts.add(AccountId.from_int(1), "home", .{});
+    accounts.add(AccountId.from_int(2), "work", .{});
+    accounts.add(AccountId.from_int(3), "club", .{});
+
+    try testing.expectEqualStrings("work", accounts.at(1).?.label.slice());
+    try testing.expect(accounts.at(9) == null);
+
+    // Removing the middle one shifts the rest down.
+    accounts.remove(AccountId.from_int(2));
+    try testing.expectEqual(@as(u8, 2), accounts.len);
+    try testing.expectEqualStrings("home", accounts.at(0).?.label.slice());
+    try testing.expectEqualStrings("club", accounts.at(1).?.label.slice());
+    try testing.expectEqualStrings("", accounts.label_for(AccountId.from_int(2)));
+
+    // Removing something that is not there is a no-op.
+    accounts.remove(AccountId.from_int(9));
+    try testing.expectEqual(@as(u8, 2), accounts.len);
 }
 
 test "rebuild shows only the selected mailbox, in store order" {

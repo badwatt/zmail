@@ -86,9 +86,11 @@ The port exists; this milestone fills it in.
   plain `EXPUNGE` fallback for servers without UIDPLUS.
 - **Sealed at rest, everything (done).** Envelopes, bodies, and the password
   file share one key file; nothing secret is plaintext on disk.
-- **Accounts in the TUI (next).** Adding, removing, and editing accounts is
-  still `--add-account` plus hand-editing the config; the overlay is the
-  missing piece.
+- **Accounts in the TUI (done).** `A` opens an overlay that lists every account
+  with its address, marks the active scope, and offers select/remove/add. It is
+  the account picker too: one list instead of blind cycling with `a`.
+- **Editing an account (next).** Changing a host or port still means editing the
+  config; the overlay only adds and removes.
 - **An account picker (next).** `a` cycles the scope; a small overlay listing
   every account (and "All accounts") would be clearer than cycling.
 - **Lazy connections (done).** The launcher builds accounts without touching

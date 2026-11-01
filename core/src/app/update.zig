@@ -41,6 +41,12 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .delete_selected => move_selected(state, store, .trash, "Moved to Trash", &effects),
         .delete_forever => delete_forever(state, store, &effects),
         .empty_trash => empty_trash(state, store, &effects),
+        .open_accounts => open_accounts(state),
+        .accounts_move => |move| accounts_move(state, move),
+        .accounts_select => accounts_select(state),
+        .accounts_remove => accounts_remove(state, &effects),
+        .accounts_add => effects.add(.{ .add_account = .{} }),
+        .accounts_close => state.view = .list,
         .begin_search => begin_search(state),
         .search_char => |byte| search_char(state, store, byte),
         .search_backspace => search_backspace(state, store),
@@ -112,6 +118,7 @@ fn apply_move(state: *State, move: Move) void {
     switch (state.view) {
         .list => move_cursor(state, move),
         .reader => scroll_reader(state, move),
+        .accounts => accounts_move(state, move),
         .help, .compose => {},
     }
 }
@@ -191,6 +198,7 @@ fn apply_dismiss(state: *State, store: *Store) void {
                 state.reader_scroll = 0;
             },
             .compose => cancel_compose(state),
+            .accounts => state.view = .list,
             // `q` at the top level quits. Esc never reaches this branch: the
             // key map does not translate it to `dismiss` in the list.
             .list => state.quit = true,
@@ -242,6 +250,56 @@ fn toggle_flag(state: *State, store: *Store, effects: *Effects) void {
     } else {
         state.set_status("Unstarred", .{});
     }
+}
+
+fn open_accounts(state: *State) void {
+    state.view = .accounts;
+    state.mode = .normal;
+    state.accounts_cursor = 0;
+}
+
+fn accounts_move(state: *State, move: Move) void {
+    const last: u8 = state.accounts.len;
+    state.accounts_cursor = switch (move) {
+        .up => state.accounts_cursor -| 1,
+        .down => @min(last, state.accounts_cursor + 1),
+        .top => 0,
+        .bottom => last,
+        else => state.accounts_cursor,
+    };
+}
+
+fn accounts_select(state: *State) void {
+    const cursor = state.accounts_cursor;
+    state.view = .list;
+    if (cursor == 0) {
+        state.account_filter = null;
+        state.cursor = 0;
+        state.offset = 0;
+        state.set_status("All accounts", .{});
+        return;
+    }
+    const account = state.accounts.at(cursor - 1) orelse {
+        state.set_status("No account there", .{});
+        return;
+    };
+    state.account_filter = account.id;
+    state.cursor = 0;
+    state.offset = 0;
+    state.set_status("{s}", .{account.label.slice()});
+}
+
+fn accounts_remove(state: *State, effects: *Effects) void {
+    if (state.accounts_cursor == 0) {
+        state.set_status("All accounts cannot be removed", .{});
+        return;
+    }
+    const account = state.accounts.at(state.accounts_cursor - 1) orelse {
+        state.set_status("No account there", .{});
+        return;
+    };
+    effects.add(.{ .remove_account = .{ .account = account.id } });
+    state.set_status("Removing {s}…", .{account.label.slice()});
 }
 
 /// Only in Trash: there is no "undo" here, so it is a separate command.
@@ -570,6 +628,90 @@ fn ready() !struct { store: Store, state: State } {
     var state: State = .{ .list_rows = 3 };
     state.rebuild(&store);
     return .{ .store = store, .state = state };
+}
+
+test "the accounts overlay opens, moves, selects, and closes" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.accounts.add(AccountId.from_int(1), "home", .{});
+    fixture.state.accounts.add(AccountId.from_int(2), "work", .{});
+    fixture.state.accounts_cursor = 1;
+
+    _ = apply(&fixture.state, &fixture.store, .open_accounts);
+    try testing.expectEqual(View.accounts, fixture.state.view);
+    try testing.expectEqual(@as(u8, 0), fixture.state.accounts_cursor);
+
+    _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .down });
+    _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .down });
+    _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .down });
+    try testing.expectEqual(@as(u8, 2), fixture.state.accounts_cursor); // clamped at len
+    _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .top });
+    try testing.expectEqual(@as(u8, 0), fixture.state.accounts_cursor);
+    _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .bottom });
+    try testing.expectEqual(@as(u8, 2), fixture.state.accounts_cursor);
+    _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .up });
+    try testing.expectEqual(@as(u8, 1), fixture.state.accounts_cursor);
+
+    _ = apply(&fixture.state, &fixture.store, .accounts_select);
+    try testing.expectEqual(View.list, fixture.state.view);
+    try testing.expectEqual(AccountId.from_int(1), fixture.state.account_filter.?);
+    try testing.expectEqualStrings("home", fixture.state.status.slice());
+
+    _ = apply(&fixture.state, &fixture.store, .open_accounts);
+    _ = apply(&fixture.state, &fixture.store, .accounts_select);
+    try testing.expect(fixture.state.account_filter == null);
+    try testing.expectEqualStrings("All accounts", fixture.state.status.slice());
+
+    fixture.state.accounts_cursor = 9;
+    _ = apply(&fixture.state, &fixture.store, .accounts_select);
+    try testing.expectEqualStrings("No account there", fixture.state.status.slice());
+
+    _ = apply(&fixture.state, &fixture.store, .open_accounts);
+    _ = apply(&fixture.state, &fixture.store, .accounts_close);
+    try testing.expectEqual(View.list, fixture.state.view);
+}
+
+test "dismissing the accounts overlay returns to the list" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.view = .accounts;
+
+    _ = apply(&fixture.state, &fixture.store, .dismiss);
+    try testing.expectEqual(View.list, fixture.state.view);
+}
+
+test "moving the accounts cursor with an unmapped move leaves it alone" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.accounts.add(AccountId.from_int(1), "home", .{});
+    fixture.state.view = .accounts;
+    fixture.state.accounts_cursor = 1;
+
+    _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .page_down });
+    try testing.expectEqual(@as(u8, 1), fixture.state.accounts_cursor);
+}
+
+test "removing and adding accounts emits the effects the session runs" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.accounts.add(AccountId.from_int(1), "home", .{});
+
+    fixture.state.accounts_cursor = 0;
+    const refused = apply(&fixture.state, &fixture.store, .accounts_remove);
+    try testing.expect(refused.is_empty());
+    try testing.expectEqualStrings("All accounts cannot be removed", fixture.state.status.slice());
+
+    fixture.state.accounts_cursor = 1;
+    const remove = apply(&fixture.state, &fixture.store, .accounts_remove);
+    try expect_effects(&remove, &.{.{ .remove_account = .{ .account = AccountId.from_int(1) } }});
+    try testing.expectEqualStrings("Removing home…", fixture.state.status.slice());
+
+    fixture.state.accounts_cursor = 7;
+    _ = apply(&fixture.state, &fixture.store, .accounts_remove);
+    try testing.expectEqualStrings("No account there", fixture.state.status.slice());
+
+    const add = apply(&fixture.state, &fixture.store, .accounts_add);
+    try expect_effects(&add, &.{.{ .add_account = .{} }});
 }
 
 test "delete_forever removes the message and asks the server, in Trash only" {

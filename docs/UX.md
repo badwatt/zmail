@@ -191,11 +191,22 @@ terminals the header names the current scope. The composer shows the sending
 account on a `From` line, chosen from the scope (or from the message being
 replied to).
 
-Adding an account does not touch the existing ones:
+Press `A` for the accounts overlay:
 
-```sh
-amail --add-account      # asks for the account and appends it to the config
 ```
+            ╭─ Accounts ───────────────────────────╮
+            │*All accounts                         │
+            │ home  me@home.example                │
+            │ work  me@work.example                │
+            │ Enter select · d remove · n add · Esc│
+            ╰──────────────────────────────────────╯
+```
+
+`Enter` picks the scope (all accounts, or just one), `d` removes the selected
+account (it rewrites the config, deletes its credential, and drops its mail from
+the view), and `n` runs the assistant and appends a new one — the new account
+connects on the next start. The same can be done outside the TUI with
+`amail --add-account`.
 
 Accounts live in the same file as `[account <label>]` sections, so they can also
 be written by hand; the label must be unique.

@@ -99,6 +99,24 @@ pub const Store = struct {
         return removed;
     }
 
+    /// Removes every message of one account, compacting in one pass.
+    pub fn remove_account(self: *Store, account: AccountId) u32 {
+        assert(account.is_known());
+        var read: u32 = 0;
+        var write: u32 = 0;
+        while (read < self.len) : (read += 1) {
+            if (self.messages[read].account == account) continue;
+            self.messages[write] = self.messages[read];
+            write += 1;
+        }
+        const removed = self.len - write;
+        while (self.len > write) {
+            self.len -= 1;
+            self.messages[self.len] = std.mem.zeroes(Message);
+        }
+        return removed;
+    }
+
     /// Removes every message of `account` in `mailbox`, compacting in one pass.
     pub fn remove_in(self: *Store, account: AccountId, mailbox: Mailbox) u32 {
         assert(account.is_known());
@@ -243,6 +261,23 @@ test "Store: the same uid in two accounts is two messages" {
     try testing.expect(store.index_of(account_two, MessageId.from_int(8)) == null);
     try testing.expect(store.get(account_one, MessageId.from_int(7)) != null);
     try testing.expect(store.get_const(account_two, MessageId.from_int(7)) != null);
+}
+
+test "Store: remove_account removes every mailbox of one account" {
+    var store = try Store.init(testing.allocator, 8);
+    defer store.deinit(testing.allocator);
+
+    var first = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(1), .mailbox = .inbox };
+    var second = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(2), .mailbox = .inbox };
+    var third = Message{ .id = MessageId.from_int(2), .account = AccountId.from_int(1), .mailbox = .sent };
+    try store.insert(&first);
+    try store.insert(&second);
+    try store.insert(&third);
+
+    try testing.expectEqual(@as(u32, 2), store.remove_account(AccountId.from_int(1)));
+    try testing.expectEqual(@as(u32, 1), store.len);
+    try testing.expectEqual(AccountId.from_int(2), store.at(0).account);
+    try testing.expectEqual(@as(u32, 0), store.remove_account(AccountId.from_int(9)));
 }
 
 test "Store: remove_by_id removes the right account's copy" {

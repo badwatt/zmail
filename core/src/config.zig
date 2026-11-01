@@ -190,6 +190,35 @@ fn smtp_server(entry: *Entry) *account.Server {
     return &entry.smtp.?;
 }
 
+/// The same file with the `[account label]` section removed. A flat
+/// (section-less) file has nothing to remove, so it yields "".
+pub fn without(text: []const u8, label: []const u8, buffer: []u8) []const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    var skipping = false;
+    var saw_section = false;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len > 0 and line[0] == '[') {
+            saw_section = true;
+            const inside = std.mem.trim(u8, line[1..], " \t]");
+            const matches = std.mem.startsWith(u8, inside, "account ") and
+                std.mem.eql(u8, std.mem.trim(u8, inside["account ".len..], " \t"), label);
+            skipping = matches;
+            if (matches) continue;
+        }
+        if (skipping) continue;
+        writer.print("{s}\n", .{raw_line}) catch return "";
+    }
+    if (!saw_section) return "";
+    const trimmed = std.mem.trim(u8, writer.buffered(), "\r\n");
+    if (trimmed.len == 0) return "";
+    // Keep a trailing newline so the file stays well-formed.
+    writer.writeByte('\n') catch return "";
+    return writer.buffered();
+}
+
 /// Whether a config file already uses `label`, so an added account cannot
 /// silently shadow or collide with an existing one.
 pub fn has_label(text: []const u8, label: []const u8) bool {
@@ -239,6 +268,40 @@ const minimal =
     \\imap_security = tls
     \\
 ;
+
+test "without removes exactly one section and keeps the rest" {
+    const text =
+        \\# amail accounts
+        \\[account work]
+        \\address = a@work.example
+        \\username = a
+        \\
+        \\[account home]
+        \\address = a@home.example
+        \\username = a
+        \\
+    ;
+    var buffer: [1024]u8 = undefined;
+    const kept = without(text, "work", &buffer);
+    try testing.expect(std.mem.indexOf(u8, kept, "work.example") == null);
+    try testing.expect(std.mem.indexOf(u8, kept, "[account home]") != null);
+    try testing.expect(std.mem.indexOf(u8, kept, "home.example") != null);
+
+    // Removing the last one leaves only the comment header: no accounts.
+    var second: [1024]u8 = undefined;
+    const last = without(kept, "home", &second);
+    try testing.expect(std.mem.indexOf(u8, last, "[account") == null);
+    try testing.expect(std.mem.indexOf(u8, last, "home.example") == null);
+
+    // The kept text is a slice of the buffer it was written to: copying it into
+    // a different buffer keeps both valid.
+    var third: [1024]u8 = undefined;
+    @memcpy(third[0..kept.len], kept);
+    try testing.expect(std.mem.indexOf(u8, third[0..kept.len], "home.example") != null);
+
+    // A flat file has no sections to remove.
+    try testing.expectEqualStrings("", without("address = a@b.c\n", "account", &buffer));
+}
 
 test "has_label finds an account by its section" {
     const text =

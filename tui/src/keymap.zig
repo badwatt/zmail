@@ -24,6 +24,7 @@ pub fn translate(key: Key, context: Context) ?Command {
     if (context.mode == .help_search) return help_search_key(key);
     if (context.view == .compose) return compose_key(key);
     if (context.view == .help) return help_key(key);
+    if (context.view == .accounts) return accounts_key(key);
     return normal_key(key, context.view);
 }
 
@@ -108,6 +109,7 @@ fn char_command(codepoint: u21, view: View) ?Command {
         '/' => .begin_search,
         '?' => .toggle_help,
         'a' => .cycle_account,
+        'A' => .open_accounts,
         '[' => .previous_mailbox,
         ']' => .next_mailbox,
         '1'...'6' => .{ .select_mailbox = Mailbox.from_index(@intCast(codepoint - '1')) },
@@ -125,6 +127,29 @@ fn ctrl_command(letter: u8) ?Command {
         'n' => .{ .move = .down },
         'p' => .{ .move = .up },
         'r' => .refresh,
+        else => null,
+    };
+}
+
+fn accounts_key(key: Key) ?Command {
+    return switch (key) {
+        .char => |codepoint| switch (codepoint) {
+            'j' => .{ .accounts_move = .down },
+            'k' => .{ .accounts_move = .up },
+            'g' => .{ .accounts_move = .top },
+            'G' => .{ .accounts_move = .bottom },
+            'd' => .accounts_remove,
+            'n' => .accounts_add,
+            'q' => .accounts_close,
+            else => null,
+        },
+        .enter => .accounts_select,
+        .escape => .accounts_close,
+        .up => .{ .accounts_move = .up },
+        .down => .{ .accounts_move = .down },
+        .home => .{ .accounts_move = .top },
+        .end => .{ .accounts_move = .bottom },
+        .ctrl => |letter| if (letter == 'c' or letter == 'q') .quit else null,
         else => null,
     };
 }
@@ -243,6 +268,31 @@ test "mailbox switching" {
         .{ .key = .{ .char = '0' }, .expected = null },
     };
     for (cases) |case| try check(case);
+}
+
+test "accounts view: movement, select, remove, add, close" {
+    const context = Context{ .view = .accounts, .mode = .normal };
+    const cases = [_]struct { key: Key, expected: Command }{
+        .{ .key = .{ .char = 'j' }, .expected = .{ .accounts_move = .down } },
+        .{ .key = .{ .char = 'k' }, .expected = .{ .accounts_move = .up } },
+        .{ .key = .{ .char = 'g' }, .expected = .{ .accounts_move = .top } },
+        .{ .key = .{ .char = 'G' }, .expected = .{ .accounts_move = .bottom } },
+        .{ .key = .{ .char = 'd' }, .expected = .accounts_remove },
+        .{ .key = .{ .char = 'n' }, .expected = .accounts_add },
+        .{ .key = .{ .char = 'q' }, .expected = .accounts_close },
+        .{ .key = .enter, .expected = .accounts_select },
+        .{ .key = .escape, .expected = .accounts_close },
+        .{ .key = .up, .expected = .{ .accounts_move = .up } },
+        .{ .key = .down, .expected = .{ .accounts_move = .down } },
+        .{ .key = .home, .expected = .{ .accounts_move = .top } },
+        .{ .key = .end, .expected = .{ .accounts_move = .bottom } },
+        .{ .key = .{ .ctrl = 'q' }, .expected = .quit },
+    };
+    for (cases) |case| {
+        try testing.expectEqual(case.expected, translate(case.key, context).?);
+    }
+    try testing.expect(translate(.{ .char = 'z' }, context) == null);
+    try testing.expect(translate(.{ .ctrl = 'd' }, context) == null);
 }
 
 test "actions: unread, flag, archive, delete, search, help, refresh" {

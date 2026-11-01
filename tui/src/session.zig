@@ -58,6 +58,9 @@ pub const Deps = struct {
     /// Sealed bodies on disk: reading a message twice must not touch the
     /// network twice.
     bodies: ?core.bodies_port.BodyCache = null,
+    /// Adding and removing accounts writes the config: a port, so the core
+    /// still never touches the filesystem.
+    accounts_file: ?core.accounts_port.Accounts = null,
     /// Paint the spinner while an effect runs, and keep it up this long (ms) so
     /// even an instant fetch reads as "working", not as a jump.
     loading_ms: u32 = 90,
@@ -451,6 +454,8 @@ pub const Session = struct {
                 .move_message => |args| self.move_message(args.account, args.id, args.to),
                 .delete_message => |args| self.delete_message(args.account, args.mailbox, args.id),
                 .empty_mailbox => |args| self.empty_mailbox(args.account, args.mailbox),
+                .remove_account => |args| self.remove_account(args.account),
+                .add_account => self.add_account(),
                 .refresh => self.start_refresh(),
                 .send => |outgoing| self.send(&outgoing),
             }
@@ -531,6 +536,41 @@ pub const Session = struct {
             return;
         }
         self.state.set_status("Trash emptied", .{});
+    }
+
+    fn remove_account(self: *Session, account: core.id.AccountId) void {
+        const label = self.state.accounts.label_for(account);
+        const accounts = self.deps.accounts_file orelse {
+            self.state.set_alert("Accounts cannot be changed here", .{});
+            return;
+        };
+        accounts.remove(account) catch {
+            self.state.set_alert("Could not rewrite the config", .{});
+            return;
+        };
+
+        // Gone from the config and from the view: its mail goes with it.
+        self.state.accounts.remove(account);
+        if (self.state.account_filter) |filter| {
+            if (filter == account) self.state.account_filter = null;
+        }
+        _ = self.store.remove_account(account);
+        self.state.accounts_cursor = 0;
+        self.state.rebuild(&self.store);
+        self.state.set_status("{s} removed · restart to apply", .{label});
+    }
+
+    fn add_account(self: *Session) void {
+        const accounts = self.deps.accounts_file orelse {
+            self.state.set_alert("Accounts cannot be changed here", .{});
+            return;
+        };
+        var label: [core.limits.label_max]u8 = undefined;
+        const added = accounts.add(&label) catch {
+            self.state.set_alert("Could not add the account", .{});
+            return;
+        };
+        self.state.set_status("{s} added · restart to connect it", .{added});
     }
 
     fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags) void {
@@ -1367,6 +1407,60 @@ test "delete and empty reach the account's server" {
         .mailbox = .sent,
     } }});
     try testing.expectEqual(@as(u32, 1), rig.session.deps.accounts.len);
+}
+
+test "removing an account rewrites the config and drops its mail" {
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "home",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .loading_ms = 0,
+        .accounts_file = null,
+    });
+    defer rig.deinit();
+    rig.session.boot();
+    rig.session.render();
+
+    // No port: refuse and say so.
+    rig.session.run_effects_for_test(&.{.{ .remove_account = .{ .account = core.id.AccountId.from_int(1) } }});
+    try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
+
+    var port: core.accounts_port.Memory = .{};
+    rig.session.deps.accounts_file = port.accounts();
+    rig.session.state.account_filter = core.id.AccountId.from_int(1);
+    const before = rig.session.store.len;
+    rig.session.run_effects_for_test(&.{.{ .remove_account = .{ .account = core.id.AccountId.from_int(1) } }});
+
+    try testing.expectEqual(@as(u32, 1), port.removed);
+    try testing.expectEqual(@as(u32, 0), rig.session.store.len);
+    try testing.expectEqual(@as(u8, 0), rig.session.state.accounts.len);
+    try testing.expect(rig.session.state.account_filter == null);
+    try testing.expect(before > 0);
+    try testing.expect(std.mem.endsWith(u8, rig.session.state.status.slice(), "removed · restart to apply"));
+
+    // A failing port leaves everything alone.
+    port.fail = true;
+    rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
+    try testing.expectEqualStrings("Could not add the account", rig.session.state.status.slice());
+    rig.session.run_effects_for_test(&.{.{ .remove_account = .{ .account = core.id.AccountId.from_int(2) } }});
+    try testing.expectEqualStrings("Could not rewrite the config", rig.session.state.status.slice());
+
+    port.fail = false;
+    rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
+    try testing.expectEqual(@as(u32, 2), port.added);
+    try testing.expect(std.mem.endsWith(u8, rig.session.state.status.slice(), "added · restart to connect it"));
+
+    rig.session.deps.accounts_file = null;
+    rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
+    try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
 }
 
 test "delete and empty report server errors and unknown accounts" {

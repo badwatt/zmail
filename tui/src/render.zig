@@ -61,6 +61,10 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
             render_help(inputs, lay, out);
         },
         .compose => render_compose(inputs, lay, out),
+        .accounts => {
+            render_list(inputs, lay, out);
+            render_accounts(inputs, lay, out);
+        },
     }
     render_footer(inputs, lay, out);
 }
@@ -448,6 +452,14 @@ const Hint = struct {
     action: []const u8,
 };
 
+const accounts_hints = [_]Hint{
+    .{ .keys = "j/k", .action = "move" },
+    .{ .keys = "Enter", .action = "select" },
+    .{ .keys = "d", .action = "remove" },
+    .{ .keys = "n", .action = "add" },
+    .{ .keys = "Esc", .action = "close" },
+};
+
 const trash_hints = [_]Hint{
     .{ .keys = "j/k", .action = "move" },
     .{ .keys = "Enter", .action = "open" },
@@ -504,6 +516,7 @@ fn hints_for(state: *const State) []const Hint {
     if (state.mode == .search) return &search_hints;
     if (state.mode == .help_search) return &help_search_hints;
     return switch (state.view) {
+        .accounts => &accounts_hints,
         .list => if (state.mailbox == .trash) &trash_hints else &list_hints,
         .reader => &reader_hints,
         .help => &help_hints,
@@ -602,6 +615,65 @@ const help_rows = [_]Hint{
     .{ .keys = "Ctrl+R", .action = "refresh" },
     .{ .keys = "Ctrl+Q / C", .action = "quit" },
 };
+
+const account_rows_max = 8;
+
+/// The accounts overlay: pick the scope, add one, remove one.
+fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    const rows = @min(inputs.state.accounts.len + 1, account_rows_max);
+    const card_width: u16 = @min(52, lay.columns - 4);
+    const card_height: u16 = rows + 4; // title, rows, hints
+    const rect = Rect{
+        .x = (lay.columns - card_width) / 2,
+        .y = (lay.rows - card_height) / 2,
+        .width = card_width,
+        .height = card_height,
+    };
+
+    out.fill_rect(rect, ' ', inputs.theme.text);
+    out.box(rect, inputs.theme.border);
+    _ = out.put_text(rect.x + 2, rect.y, " Accounts ", card_width -| 4, inputs.theme.accent.with_bold());
+
+    var index: u8 = 0;
+    while (index < rows) : (index += 1) {
+        const y = rect.y + 1 + index;
+        const selected = index == inputs.state.accounts_cursor;
+        const style = if (selected) inputs.theme.selection else inputs.theme.text;
+        if (selected) {
+            out.fill_rect(.{ .x = rect.x + 1, .y = y, .width = rect.width - 2, .height = 1 }, ' ', style);
+        }
+
+        var buffer: [96]u8 = undefined;
+        const text = if (index == 0)
+            "All accounts"
+        else blk: {
+            const account = inputs.state.accounts.at(index - 1) orelse break :blk "";
+            var address_buffer: [core.limits.address_max]u8 = undefined;
+            break :blk std.fmt.bufPrint(&buffer, "{s}  {s}", .{
+                account.label.slice(),
+                account.address.addr_spec(&address_buffer),
+            }) catch account.label.slice();
+        };
+        _ = out.put_text(rect.x + 2, y, text, rect.width -| 4, style);
+
+        // The scope in use gets a marker.
+        const active = if (index == 0)
+            inputs.state.account_filter == null
+        else if (inputs.state.accounts.at(index - 1)) |account|
+            inputs.state.account_filter != null and inputs.state.account_filter.? == account.id
+        else
+            false;
+        if (active) out.put(rect.x + 1, y, '*', inputs.theme.accent);
+    }
+
+    _ = out.put_text(
+        rect.x + 2,
+        rect.y + rect.height - 1,
+        "Enter select · d remove · n add · Esc close",
+        rect.width -| 4,
+        inputs.theme.dim,
+    );
+}
 
 fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const card_width: u16 = @min(64, lay.columns - 4);
@@ -1173,6 +1245,39 @@ test "the boot splash shows the wordmark, the server, and a spinner" {
     // The list is not drawn behind it.
     var row_buffer: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
+}
+
+test "the accounts overlay lists every account and marks the scope" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", try core.address.Address.init("me@home.example"));
+    f.state.accounts.add(core.id.AccountId.from_int(2), "work", try core.address.Address.init("me@work.example"));
+    f.state.account_filter = core.id.AccountId.from_int(2);
+    f.state.accounts_cursor = 1;
+    f.state.view = .accounts;
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+    try row_contains(&out, 9, "All accounts");
+    try row_contains(&out, 10, "home");
+    try row_contains(&out, 10, "me@home.example");
+    try row_contains(&out, 11, "work  me@work.example");
+    try row_contains(&out, 14, "d remove");
+    // The scope in use is marked, and the cursor row is filled.
+    var marker: [512]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, out.row_text(11, &marker), "*") != null);
+    try testing.expectEqual(screen.Color{ .ansi256 = 237 }, out.cells[10][30].style.bg);
+}
+
+test "the accounts overlay with no accounts still offers All accounts" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .accounts;
+
+    var out = Screen.init(80, 24);
+    frame(f.inputs(80, 24), &out);
+    try row_contains(&out, 10, "All accounts");
+    try row_contains(&out, 23, "n add");
 }
 
 test "the help filter caret sits after the text, not at the left edge" {

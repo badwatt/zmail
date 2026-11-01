@@ -80,7 +80,7 @@ fn run_demo(gpa: std.mem.Allocator, system: SessionSystem) ?Failure {
     demo.outboxes[0] = .{ .id = core.id.AccountId.from_int(1), .outbox = demo.outbox[0].outbox() };
     demo.outboxes[1] = .{ .id = core.id.AccountId.from_int(2), .outbox = demo.outbox[1].outbox() };
 
-    return run_session(gpa, system, &demo.sources, &demo.outboxes, null, null, false);
+    return run_session(gpa, system, &demo.sources, &demo.outboxes, null, null, null, false);
 }
 
 fn run_session(
@@ -90,6 +90,7 @@ fn run_session(
     outboxes: []const session_mod.OutboxSource,
     cache: ?core.cache_port.Cache,
     bodies: ?core.bodies_port.BodyCache,
+    accounts_file: ?core.accounts_port.Accounts,
     splash: bool,
 ) ?Failure {
     // The session owns megabytes of bounded buffers; keeping it on the stack
@@ -102,6 +103,7 @@ fn run_session(
         .outboxes = outboxes,
         .cache = cache,
         .bodies = bodies,
+        .accounts_file = accounts_file,
         .splash = splash,
         .system = system,
         .theme = theme_for_environment(),
@@ -381,6 +383,9 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         bodies = file_bodies.cache();
     }
 
+    var accounts_file = FileAccounts{ .io = io, .path = path, .system = system };
+    const account_port: ?core.accounts_port.Accounts = if (live.len > 0) accounts_file.accounts() else null;
+
     const outcome = run_session(
         gpa,
         system,
@@ -388,6 +393,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         live.outboxes[0..live.outbox_count],
         cache,
         bodies,
+        account_port,
         true,
     );
     if (outcome != null) return outcome;
@@ -494,6 +500,60 @@ fn open_credential(io: std.Io, text: []const u8, out: *core.secret.Secret) !bool
 
 const file_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
 const directory_mode: std.Io.Dir.Permissions = @fromBackingInt(@intCast(0o700));
+
+/// The accounts port for a real config file: removing rewrites the file and
+/// deletes the credential, adding runs the assistant and appends the section.
+const FileAccounts = struct {
+    io: std.Io,
+    path: []const u8,
+    system: SessionSystem,
+
+    fn accounts(self: *FileAccounts) core.accounts_port.Accounts {
+        return .{ .context = self, .vtable = &.{ .remove = removeThunk, .add = addThunk } };
+    }
+
+    fn removeThunk(context: *anyopaque, account: core.id.AccountId) core.accounts_port.Error!void {
+        const self: *FileAccounts = @ptrCast(@alignCast(context));
+        const index: usize = @intCast(account.to_int() - 1);
+
+        var buffer: [8193]u8 = undefined;
+        const text = read_file(self.io, self.path, &buffer) catch return error.Unavailable;
+        const file = core.config.parse(text) catch return error.Unavailable;
+        const entry = file.items()[index];
+
+        var rewritten: [8193]u8 = undefined;
+        const kept = core.config.without(text, entry.label.slice(), &rewritten);
+        write_file(self.io, self.path, kept) catch return error.Unavailable;
+
+        var credential_buffer: [512]u8 = undefined;
+        const credential = cli.credential_path(self.path, entry.label.slice(), &credential_buffer);
+        std.Io.Dir.cwd().deleteFile(self.io, credential) catch {};
+    }
+
+    fn addThunk(context: *anyopaque, label: []u8) core.accounts_port.Error![]const u8 {
+        const self: *FileAccounts = @ptrCast(@alignCast(context));
+        var buffer: [8193]u8 = undefined;
+        const existing = read_file(self.io, self.path, &buffer) catch return error.Unavailable;
+        _ = core.config.parse(existing) catch return error.Unavailable;
+
+        var saved: setup_session.Saved = undefined;
+        const outcome = setup_session.run(self.system, theme_mod.Theme.dark(), self.path) catch
+            return error.Unavailable;
+        switch (outcome) {
+            .cancelled => return error.Cancelled,
+            .saved => |result| saved = result,
+        }
+        defer saved.password.deinit();
+
+        if (core.config.has_label(existing, saved.label.slice())) return error.Unavailable;
+        append_file(self.io, self.path, saved.config_text()) catch return error.Unavailable;
+        write_credential(self.io, self.path, &saved) catch return error.Unavailable;
+
+        const length = @min(saved.label.slice().len, label.len);
+        @memcpy(label[0..length], saved.label.slice()[0..length]);
+        return label[0..length];
+    }
+};
 
 /// `--add-account`: ask for one more account and append it to the config.
 /// Existing accounts, their credentials, and their cache are untouched.
