@@ -255,6 +255,7 @@ const Live = struct {
             .smtp_host = stored.smtp_host.slice(),
             .smtp_port = stored.smtp_port,
             .smtp = stored.smtp_enabled,
+            .hint = login_hint(stored.host.slice()),
         };
         self.mail_count += 1;
 
@@ -975,6 +976,29 @@ fn config_message(err: anyerror) []const u8 {
         error.InvalidPort => "Invalid imap_port in the config file",
         else => "Invalid config file",
     };
+}
+
+/// Some providers stopped accepting passwords: say which and how to fix it.
+fn login_hint(host: []const u8) []const u8 {
+    if (containsIgnoreCase(host, "office365") or containsIgnoreCase(host, "outlook")) {
+        return "Microsoft needs OAuth2 or an app password";
+    }
+    if (containsIgnoreCase(host, "gmail") or containsIgnoreCase(host, "googlemail")) {
+        return "Google needs an app password when 2FA is on";
+    }
+    if (containsIgnoreCase(host, "yahoo")) {
+        return "Yahoo needs an app password";
+    }
+    return "check the password";
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or haystack.len < needle.len) return false;
+    var index: usize = 0;
+    while (index + needle.len <= haystack.len) : (index += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[index..][0..needle.len], needle)) return true;
+    }
+    return false;
 }
 
 fn login_message(err: core.imap.client.Error) []const u8 {

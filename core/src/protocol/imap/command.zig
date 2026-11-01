@@ -96,6 +96,25 @@ const Render = struct {
     }
 };
 
+/// AUTHENTICATE XOAUTH2 with the initial response, which is what Microsoft 365
+/// and Gmail accept now that password LOGIN is gone.
+pub fn authenticate_xoauth2(buffer: []u8, tag: []const u8, user: []const u8, token: []const u8, out: []u8) Error![]const u8 {
+    // SASL payload: "user=<user>\x01auth=Bearer <token>\x01\x01"
+    var payload = std.Io.Writer.fixed(out);
+    payload.print("user={s}\x01auth=Bearer {s}\x01\x01", .{ user, token }) catch
+        return error.BufferTooSmall;
+
+    var encoded: [512]u8 = undefined;
+    const encoder = std.base64.standard.Encoder;
+    const length = encoder.calcSize(payload.buffered().len);
+    if (length > encoded.len) return error.BufferTooSmall;
+    const b64 = encoder.encode(encoded[0..length], payload.buffered());
+
+    var render = Render.begin(buffer, tag, "AUTHENTICATE XOAUTH2 ");
+    render.text(b64);
+    return render.finish();
+}
+
 pub fn login(buffer: []u8, tag: []const u8, user: []const u8, password: []const u8) Error![]const u8 {
     var render = Render.begin(buffer, tag, "LOGIN ");
     render.astring(user);

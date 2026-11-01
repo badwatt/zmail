@@ -46,6 +46,8 @@ pub const MailSource = struct {
     smtp_host: []const u8 = "",
     smtp_port: u16 = 0,
     smtp: bool = false,
+    /// Why this server is known to reject password logins, if it is.
+    hint: []const u8 = "",
 };
 
 /// Text the session owns for a source: slices in `MailSource` point here, so an
@@ -203,7 +205,15 @@ pub const Session = struct {
         });
     }
 
-    fn live_sources(self: *Session) []const MailSource {
+    /// The most useful thing we can say about a refused login.
+    fn login_hint(self: *const Session) []const u8 {
+        for (self.live_sources()) |source| {
+            if (source.hint.len > 0) return source.hint;
+        }
+        return "check the password";
+    }
+
+    fn live_sources(self: anytype) []const MailSource {
         return self.sources[0..self.source_count];
     }
 
@@ -965,7 +975,7 @@ pub const Session = struct {
         if (failed and !loaded_any) {
             // A refused login is the most useful thing we know: say it.
             if (login_failed) {
-                self.state.set_alert("Login failed: check the password", .{});
+                self.state.set_alert("Login failed: {s}", .{self.login_hint()});
             } else {
                 self.state.set_alert("Could not load {s}", .{mailbox.title()});
             }
@@ -1750,6 +1760,29 @@ test "loop without a splash paints only the data" {
     rig.session.loop();
     try testing.expectEqual(@as(u32, 2), rig.session.store.len);
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "connecting") == null);
+}
+
+test "a refused login explains the provider, when the provider is known" {
+    var rig: Rig = .{};
+    try rig.seed();
+    var source = MailSource{ .id = core.id.AccountId.from_int(1), .label = "outlook", .mail = rig.rejecting_mail() };
+    source.hint = "Microsoft needs OAuth2 or an app password";
+    rig.sources[0] = source;
+
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .loading_ms = 0,
+    });
+    defer rig.deinit();
+
+    rig.session.boot();
+    try testing.expectEqualStrings(
+        "Login failed: Microsoft needs OAuth2 or an app password",
+        rig.session.state.status.slice(),
+    );
 }
 
 test "a refused login is named, not hidden behind a generic error" {
