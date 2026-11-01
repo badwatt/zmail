@@ -39,8 +39,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
     const pkce = core.oauth.make_pkce(random);
     var state_random: [8]u8 = undefined;
     io.random(&state_random);
-    var state: [16]u8 = undefined;
-    _ = std.base64.url_safe_no_pad.Encoder.encode(&state, &state_random);
+    var state_buffer: [16]u8 = undefined;
+    // Use the encoder's slice, not the whole array: the rest is uninitialised.
+    const state = std.base64.url_safe_no_pad.Encoder.encode(&state_buffer, &state_random);
 
     // No listener: this Zig's network streams cannot be read here yet, so the
     // redirect is pasted back. Headless and phone (QR) friendly.
@@ -54,7 +55,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
         options.provider,
         options.client_id,
         redirect,
-        state[0..],
+        state,
         pkce.verifier_slice(),
     );
     if (url.len == 0) return error.Unavailable;

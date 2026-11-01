@@ -698,7 +698,10 @@ fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Se
         .write = Io.write,
         .read = Io.read,
         .context = &callbacks,
-    }, &token) catch return .{ .message = "OAuth failed: check the client id and try again" };
+    }, &token) catch |err| return .{ .message = switch (err) {
+        error.Cancelled => "No authorization code in that URL: paste the whole address",
+        else => "OAuth failed: check the client id, the redirect URI and try again",
+    } };
 
     write_token(io, path, entry.label.slice(), &token) catch
         return .{ .message = "Could not save the token" };

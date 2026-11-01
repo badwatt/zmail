@@ -105,15 +105,43 @@ pub fn auth_url(
 ) []const u8 {
     const e = endpoints(provider);
     const challenge = challenge_for(verifier);
+    // Providers join scopes with a space; a URL cannot carry one.
+    var scope_buffer: [256]u8 = undefined;
+    const scope = percent_encode(e.scope, &scope_buffer);
     return std.fmt.bufPrint(buffer, "{s}?client_id={s}&response_type=code&redirect_uri={s}" ++
         "&response_mode=query&scope={s}&state={s}&code_challenge={s}&code_challenge_method=S256", .{
         e.auth_url,
         client_id,
         redirect_uri,
-        e.scope,
+        scope,
         state,
         challenge[0..],
     }) catch "";
+}
+
+/// Encodes the characters that cannot appear in a query string. Enough for
+/// scopes and ids: spaces, slashes stay readable, everything else is escaped.
+fn percent_encode(text: []const u8, out: []u8) []const u8 {
+    const hex = "0123456789ABCDEF";
+    var length: usize = 0;
+    for (text) |byte| {
+        const unsafe = switch (byte) {
+            ' ', '"', '<', '>', '#', '%', '&', '+', '?' => true,
+            else => byte < 0x21 or byte > 0x7e,
+        };
+        if (unsafe) {
+            if (length + 3 > out.len) break;
+            out[length] = '%';
+            out[length + 1] = hex[byte >> 4];
+            out[length + 2] = hex[byte & 0x0f];
+            length += 3;
+        } else {
+            if (length + 1 > out.len) break;
+            out[length] = byte;
+            length += 1;
+        }
+    }
+    return out[0..length];
 }
 
 /// `application/x-www-form-urlencoded` body for the code exchange.
@@ -267,6 +295,9 @@ test "the authorization URL carries PKCE, scope, and state" {
     try testing.expect(std.mem.indexOf(u8, url, "client_id=client-123") != null);
     try testing.expect(std.mem.indexOf(u8, url, "code_challenge_method=S256") != null);
     try testing.expect(std.mem.indexOf(u8, url, "state=state-9") != null);
+    // A space inside the scope would break the request: it must be escaped.
+    try testing.expect(std.mem.indexOfScalar(u8, url, ' ') == null);
+    try testing.expect(std.mem.indexOf(u8, url, "%20") != null);
     try testing.expect(std.mem.indexOf(u8, url, "IMAP.AccessAsUser.All") != null);
 
     const google = auth_url(&buffer, .google, "c", "http://127.0.0.1/", "s", "v");
