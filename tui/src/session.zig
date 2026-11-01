@@ -252,9 +252,11 @@ pub const Session = struct {
     pub fn loop(self: *Session) void {
         const needs_network = self.needs_boot;
         if (self.deps.splash) {
-            // Paint first (cached mail, or the splash), then do the slow part.
-            self.state.booting = self.needs_boot;
-            self.render();
+            // The welcome screen shows on every start, with the spinner moving
+            // for a moment before the slow part. A frozen one-frame splash read
+            // as a bug.
+            self.state.booting = true;
+            self.play_splash(4);
             self.boot();
         } else {
             // Nothing here can block: no empty frame, no splash.
@@ -349,6 +351,17 @@ pub const Session = struct {
     fn invalidate_screen(self: *Session) void {
         self.screen.pristine = true;
         self.needs_render = true;
+    }
+
+    /// Paints `frames` splash frames with a short pause between them, so the
+    /// spinner is visibly alive even when the wait that follows is short.
+    fn play_splash(self: *Session, frames: u8) void {
+        var frame: u8 = 0;
+        while (frame < frames) : (frame += 1) {
+            self.state.spinner = frame * 2;
+            self.render();
+            os.sleep_ms(55);
+        }
     }
 
     fn sync_size(self: *Session) void {
