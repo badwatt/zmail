@@ -95,9 +95,13 @@ pub fn challenge_for(verifier: []const u8) [challenge_max]u8 {
     return out;
 }
 
+/// The tenant comes from the config: `common` covers work and personal
+/// accounts only when the app registration allows both, which is why the
+/// provider's own refusal is surfaced instead of guessed at.
 pub fn auth_url(
     buffer: []u8,
     provider: Provider,
+    tenant: []const u8,
     client_id: []const u8,
     redirect_uri: []const u8,
     state: []const u8,
@@ -105,18 +109,83 @@ pub fn auth_url(
 ) []const u8 {
     const e = endpoints(provider);
     const challenge = challenge_for(verifier);
+    var base_buffer: [256]u8 = undefined;
+    const base = auth_base(provider, tenant, &base_buffer);
     // Providers join scopes with a space; a URL cannot carry one.
     var scope_buffer: [256]u8 = undefined;
     const scope = percent_encode(e.scope, &scope_buffer);
     return std.fmt.bufPrint(buffer, "{s}?client_id={s}&response_type=code&redirect_uri={s}" ++
         "&response_mode=query&scope={s}&state={s}&code_challenge={s}&code_challenge_method=S256", .{
-        e.auth_url,
+        base,
         client_id,
         redirect_uri,
         scope,
         state,
         challenge[0..],
     }) catch "";
+}
+
+/// Microsoft puts the tenant in the path; everyone else ignores it.
+fn auth_base(provider: Provider, tenant: []const u8, buffer: []u8) []const u8 {
+    if (provider != .microsoft) return endpoints(provider).auth_url;
+    const chosen = if (tenant.len == 0) "common" else tenant;
+    return std.fmt.bufPrint(
+        buffer,
+        "https://login.microsoftonline.com/{s}/oauth2/v2.0/authorize",
+        .{chosen},
+    ) catch endpoints(provider).auth_url;
+}
+
+/// The provider explains refusals in the redirect: read that, not a guess.
+/// Returns the human text after `error_description=`.
+pub fn parse_provider_error(query: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, query, "error_description=") orelse
+        std.mem.indexOf(u8, query, "error=") orelse return null;
+    const equals = std.mem.indexOfScalar(u8, query[at..], '=') orelse return null;
+    const rest = query[at + equals + 1 ..];
+    // A value ends at the next parameter, or where the request line does.
+    var end = rest.len;
+    for (rest, 0..) |byte, index| {
+        if (byte == '&' or byte == ' ' or byte == '\r' or byte == '\n') {
+            end = index;
+            break;
+        }
+    }
+    if (end == 0) return null;
+    return rest[0..end];
+}
+
+/// Decodes %XX and '+' in place-ish: returns a slice of `buffer`.
+pub fn url_decode(text: []const u8, buffer: []u8) []const u8 {
+    var length: usize = 0;
+    var index: usize = 0;
+    while (index < text.len and length < buffer.len) : (index += 1) {
+        const byte = text[index];
+        if (byte == '+') {
+            buffer[length] = ' ';
+            length += 1;
+            continue;
+        }
+        if (byte == '%' and index + 2 < text.len) {
+            const high = std.fmt.charToDigit(text[index + 1], 16) catch {
+                buffer[length] = byte;
+                length += 1;
+                continue;
+            };
+            const low = std.fmt.charToDigit(text[index + 2], 16) catch {
+                buffer[length] = byte;
+                length += 1;
+                continue;
+            };
+            buffer[length] = @as(u8, high) * 16 + @as(u8, low);
+            length += 1;
+            index += 2;
+            continue;
+        }
+        buffer[length] = byte;
+        length += 1;
+    }
+    return buffer[0..length];
 }
 
 /// Encodes the characters that cannot appear in a query string. Enough for
@@ -281,11 +350,30 @@ test "PKCE from random bytes is 43 characters and changes every time" {
     try testing.expectEqualSlices(u8, expected[0..], a.challenge[0..]);
 }
 
+test "a provider refusal is read from the redirect" {
+    const url = "GET /?error=unauthorized_client&error_description=The+client+does" ++
+        "%20not%20exist%20or%20is%20not%20enabled+for+consumers HTTP/1.1";
+    const raw = parse_provider_error(url).?;
+    var buffer: [256]u8 = undefined;
+    const text = url_decode(raw, &buffer);
+    try testing.expectEqualStrings("The client does not exist or is not enabled for consumers", text);
+    try testing.expect(parse_provider_error("GET /?code=abc HTTP/1.1") == null);
+}
+
+test "the Microsoft tenant comes from the config" {
+    var buffer: [1024]u8 = undefined;
+    const consumers = auth_url(&buffer, .microsoft, "consumers", "c", "http://127.0.0.1:8123/", "s", "v");
+    try testing.expect(std.mem.startsWith(u8, consumers, "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"));
+    const fallback = auth_url(&buffer, .microsoft, "", "c", "http://127.0.0.1:8123/", "s", "v");
+    try testing.expect(std.mem.indexOf(u8, fallback, "/common/") != null);
+}
+
 test "the authorization URL carries PKCE, scope, and state" {
     var buffer: [1024]u8 = undefined;
     const url = auth_url(
         &buffer,
         .microsoft,
+        "common",
         "client-123",
         "http://127.0.0.1:8123/",
         "state-9",
@@ -300,7 +388,7 @@ test "the authorization URL carries PKCE, scope, and state" {
     try testing.expect(std.mem.indexOf(u8, url, "%20") != null);
     try testing.expect(std.mem.indexOf(u8, url, "IMAP.AccessAsUser.All") != null);
 
-    const google = auth_url(&buffer, .google, "c", "http://127.0.0.1/", "s", "v");
+    const google = auth_url(&buffer, .google, "", "c", "http://127.0.0.1/", "s", "v");
     try testing.expect(std.mem.indexOf(u8, google, "https://mail.google.com/") != null);
 }
 

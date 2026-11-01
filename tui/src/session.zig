@@ -649,9 +649,17 @@ pub const Session = struct {
             self.state.set_alert("Accounts cannot be changed here", .{});
             return;
         };
-        accounts.oauth_login(account) catch {
+        // The provider's own words are worth more than a generic failure.
+        var problem: core.text.Text(256) = .{};
+        accounts.oauth_login(account, &problem) catch {
             self.invalidate_screen();
-            self.state.set_alert("OAuth failed: check the Client ID and try again", .{});
+            // The account is saved either way: the sign-in is what failed.
+            self.attach_new_account(account, label);
+            if (problem.is_empty()) {
+                self.state.set_alert("{s} saved; sign-in failed. Press o to retry", .{label});
+            } else {
+                self.state.set_alert("{s} saved; {s}", .{ label, problem.slice() });
+            }
             return;
         };
         self.invalidate_screen();
@@ -2044,6 +2052,30 @@ test "with OAuth the password row is skipped" {
     try testing.expect(form.setup.show_advanced);
     _ = rig.session.settings_key(form, .tab);
     try testing.expectEqual(Session.Field.client_id, form.field);
+}
+
+test "a failed OAuth sign-in keeps the account and shows the provider's words" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var port: core.accounts_port.Memory = .{ .fail = true };
+    rig.session.deps.accounts_file = port.accounts();
+    rig.session.state.accounts.add(
+        core.id.AccountId.from_int(1),
+        "work",
+        core.address.Address.init("me@outlook.com") catch core.address.Address{},
+        .{},
+    );
+    rig.session.state.accounts.items[0].oauth_client.set("client-1");
+    rig.session.state.accounts.items[0].label.set("work");
+
+    rig.session.oauth_account(core.id.AccountId.from_int(1));
+    // Not "could not save": the account exists, the sign-in is what failed.
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "saved") != null);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "retry") != null);
+    try testing.expect(rig.session.settings == null);
 }
 
 test "a new OAuth account saves without a password and signs in" {

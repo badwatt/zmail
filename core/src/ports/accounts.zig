@@ -7,6 +7,7 @@
 const std = @import("std");
 const AccountId = @import("../domain/id.zig").AccountId;
 const limits = @import("../limits.zig");
+const Text = @import("../domain/text.zig").Text;
 
 pub const Error = error{ Unavailable, Cancelled };
 
@@ -52,7 +53,7 @@ pub const Accounts = struct {
         disconnect: *const fn (context: *anyopaque, account: AccountId) Error!void,
         /// Runs the provider's OAuth2 flow for this account (browser or QR) and
         /// stores the resulting token.
-        oauth_login: *const fn (context: *anyopaque, account: AccountId) Error!void,
+        oauth_login: *const fn (context: *anyopaque, account: AccountId, problem: *Text(256)) Error!void,
     };
 
     pub fn remove(self: Accounts, account: AccountId) Error!void {
@@ -75,8 +76,9 @@ pub const Accounts = struct {
         return self.vtable.disconnect(self.context, account);
     }
 
-    pub fn oauth_login(self: Accounts, account: AccountId) Error!void {
-        return self.vtable.oauth_login(self.context, account);
+    /// On failure `problem` carries the provider's own words, when it had any.
+    pub fn oauth_login(self: Accounts, account: AccountId, problem: *Text(256)) Error!void {
+        return self.vtable.oauth_login(self.context, account, problem);
     }
 };
 
@@ -128,9 +130,10 @@ pub const Memory = struct {
         };
     }
 
-    fn oauthThunk(context: *anyopaque, account: AccountId) Error!void {
+    fn oauthThunk(context: *anyopaque, account: AccountId, problem: *Text(256)) Error!void {
         const self: *Memory = @ptrCast(@alignCast(context));
         self.oauth = account;
+        _ = problem;
         if (self.fail) return error.Unavailable;
     }
 
@@ -188,7 +191,8 @@ test "Memory accounts: remove and save record what they were asked" {
     try testing.expectEqual(AccountId.from_int(1), memory.connected);
     try testing.expectEqualStrings("imap.example.com", opened.imap_host);
     try accounts.disconnect(AccountId.from_int(1));
-    try accounts.oauth_login(AccountId.from_int(1));
+    var problem: Text(256) = .{};
+    try accounts.oauth_login(AccountId.from_int(1), &problem);
     try testing.expectEqual(AccountId.from_int(1), memory.oauth);
     try testing.expectEqual(AccountId.from_int(1), memory.disconnected);
 

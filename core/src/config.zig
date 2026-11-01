@@ -26,6 +26,8 @@ pub const Entry = struct {
     smtp: ?account.Server = null,
     /// OAuth2 client id for providers that need one (Microsoft, Google).
     oauth_client_id: Text(256) = .{},
+    /// Microsoft tenant for the authorize URL (`common`, `consumers`, an id).
+    oauth_tenant: Text(64) = .{},
     policy: account.Policy = .{},
 
     pub fn validate(self: *const Entry) account.RuleError!void {
@@ -139,6 +141,8 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
             entry.label.set(value);
         } else if (std.mem.eql(u8, key, "oauth_client_id")) {
             entry.oauth_client_id.set(value);
+        } else if (std.mem.eql(u8, key, "oauth_tenant")) {
+            entry.oauth_tenant.set(value);
         } else if (std.mem.eql(u8, key, "username")) {
             entry.account.username.set(value);
             pending_entry.seen_username = true;

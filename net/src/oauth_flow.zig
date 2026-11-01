@@ -13,7 +13,11 @@ pub const Error = error{ Unavailable, Cancelled };
 
 pub const Options = struct {
     provider: core.oauth.Provider = .microsoft,
+    /// Microsoft tenant: `common`, `consumers`, `organizations`, or an id.
+    tenant: []const u8 = "common",
     client_id: []const u8 = "",
+    /// Where the provider's own refusal lands, when the caller wants it.
+    problem: ?*core.text.Text(256) = null,
     /// Where to print the URL/QR (the terminal).
     write: *const fn (context: *anyopaque, bytes: []const u8) void = noop,
     /// Reads one line (the pasted redirect URL).
@@ -59,6 +63,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
     const url = core.oauth.auth_url(
         &url_buffer,
         options.provider,
+        options.tenant,
         options.client_id,
         redirect,
         state,
@@ -88,6 +93,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
             // The request line alone carries the code.
             const request = reader.interface.takeDelimiterExclusive('\n') catch "";
             code = core.oauth.parse_redirect(request);
+            // Microsoft explains itself ("unauthorized_client: The client does
+            // not exist or is not enabled for consumers"): keep that text.
+            if (core.oauth.parse_provider_error(request)) |raw| {
+                var decoded: [256]u8 = undefined;
+                if (options.problem) |slot| slot.set(core.oauth.url_decode(raw, &decoded));
+            }
             var reply_buffer: [256]u8 = undefined;
             var writer = stream.writer(io, &reply_buffer);
             writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n" ++

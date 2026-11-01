@@ -692,15 +692,21 @@ fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Se
     var callbacks = Io{ .system = system };
 
     var token: core.oauth.Token = .{};
+    var problem: core.text.Text(256) = .{};
     net.oauth_flow.run(gpa, io, .{
         .provider = provider,
+        .tenant = if (entry.oauth_tenant.len > 0) entry.oauth_tenant.slice() else "common",
         .client_id = client_id,
+        .problem = &problem,
         .write = Io.write,
         .read = Io.read,
         .context = &callbacks,
-    }, &token) catch |err| return .{ .message = switch (err) {
-        error.Cancelled => "No authorization code in that URL: paste the whole address",
-        else => "OAuth failed: check the client id, the redirect URI and try again",
+    }, &token) catch |err| return .{ .message = blk: {
+        if (!problem.is_empty()) break :blk problem.slice();
+        break :blk switch (err) {
+            error.Cancelled => "No authorization code in that URL: paste the whole address",
+            else => "OAuth failed: check the client id, the redirect URI and try again",
+        };
     } };
 
     write_token(io, path, entry.label.slice(), &token) catch
@@ -958,7 +964,11 @@ const FileAccounts = struct {
         out.* = self.connected;
     }
 
-    fn oauthThunk(context: *anyopaque, account: core.id.AccountId) core.accounts_port.Error!void {
+    fn oauthThunk(
+        context: *anyopaque,
+        account: core.id.AccountId,
+        problem: *core.text.Text(256),
+    ) core.accounts_port.Error!void {
         const self: *FileAccounts = @ptrCast(@alignCast(context));
 
         var buffer: [8193]u8 = undefined;
@@ -971,7 +981,13 @@ const FileAccounts = struct {
         const provider = provider_for(entry.account.imap.host.slice());
         if (provider == .custom) return error.Unavailable;
         const client_id = entry.oauth_client_id.slice();
-        if (client_id.len == 0) return error.Unavailable;
+        if (client_id.len == 0) {
+            problem.set("OAuth needs a Client ID: set it under Advanced in the account form");
+            return error.Unavailable;
+        }
+        // Microsoft needs the tenant that matches the app registration:
+        // `common`, `consumers`, `organizations`, or the tenant id.
+        const tenant = if (entry.oauth_tenant.len > 0) entry.oauth_tenant.slice() else "common";
 
         // A terminal writer, so the URL and the QR land on screen.
         const WriteContext = struct {
@@ -986,7 +1002,9 @@ const FileAccounts = struct {
         var token: core.oauth.Token = .{};
         net.oauth_flow.run(self.gpa, self.io, .{
             .provider = provider,
+            .tenant = tenant,
             .client_id = client_id,
+            .problem = problem,
             .write = WriteContext.write,
             .context = &writer,
         }, &token) catch return error.Unavailable;
