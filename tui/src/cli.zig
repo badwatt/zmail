@@ -21,6 +21,8 @@ pub const Launch = struct {
     /// Live is the default: `amail` with a config is a real client, and
     /// without one it opens the setup assistant.
     mode: Mode = .live,
+    /// `--add-account`: run the assistant and append the account to the config.
+    add_account: bool = false,
     /// Null means "the default path", resolved at launch time.
     config_path: ?[]const u8 = null,
 };
@@ -48,6 +50,10 @@ pub fn parse(args: []const []const u8) Action {
         }
         if (std.mem.eql(u8, arg, "--live")) {
             launch.mode = .live;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--add-account")) {
+            launch.add_account = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--config")) {
@@ -157,11 +163,13 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\Options:
         \\  -h, --help       Show this help and exit
         \\  -V, --version    Show the version and exit
-        \\      --demo       Open the built-in demo mailbox (default)
-        \\      --live       Connect to the account in the config file
-        \\      --config P   Use config file P (implies --live)
+        \\      --demo          Open the built-in demo mailbox
+        \\      --live          Connect to the accounts in the config (default)
+        \\      --config P      Use config file P (implies --live)
+        \\      --add-account   Append another account to the config
         \\
-        \\The password is read from AMAIL_PASSWORD, never from the config.
+        \\Accounts live in P as [account <label>] sections; add more with
+        \\--add-account or by hand. The password is never in the config.
         \\Inside amail, press ? for the key map.
         \\
     ,
@@ -216,6 +224,12 @@ test "--config takes the next argument and implies live" {
 test "--config=path works too" {
     const action = parse(&[_][]const u8{ meta.name, "--config=/tmp/amail.conf" });
     try testing.expectEqualStrings("/tmp/amail.conf", action.launch.config_path.?);
+}
+
+test "--add-account asks the assistant to append an account" {
+    const action = parse(&[_][]const u8{ meta.name, "--add-account" });
+    try testing.expect(action.launch.add_account);
+    try testing.expectEqual(Mode.live, action.launch.mode);
 }
 
 test "--demo after --live returns to the demo" {

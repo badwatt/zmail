@@ -23,6 +23,7 @@ pub const render = @import("render.zig");
 pub const system = @import("system.zig");
 pub const os = @import("os.zig");
 pub const session = @import("session.zig");
+pub const refresh = @import("refresh.zig");
 pub const setup_session = @import("setup_session.zig");
 pub const launch = @import("launch.zig");
 pub const run = @import("run.zig");

@@ -104,6 +104,12 @@ pub fn login(buffer: []u8, tag: []const u8, user: []const u8, password: []const 
     return render.finish();
 }
 
+/// Every mailbox on the server, with its SPECIAL-USE flags when supported.
+pub fn list(buffer: []u8, tag: []const u8) Error![]const u8 {
+    var render = Render.begin(buffer, tag, "LIST \"\" \"*\"");
+    return render.finish();
+}
+
 pub fn select(buffer: []u8, tag: []const u8, mailbox: []const u8) Error![]const u8 {
     var render = Render.begin(buffer, tag, "SELECT ");
     render.astring(mailbox);

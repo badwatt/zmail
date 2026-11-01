@@ -16,6 +16,9 @@ pub const Theme = struct {
     border: Style = .{},
     flagged: Style = .{},
     alert: Style = .{},
+    /// One hue per account, so the unified list says who a row belongs to at a
+    /// glance even before reading the label.
+    account_colors: [4]screen.Color = @splat(screen.Color.default),
     colored: bool = false,
 
     /// Muted blue accent, warm amber for stars, dim gray for metadata.
@@ -29,6 +32,12 @@ pub const Theme = struct {
             .border = (Style{}).with_fg(.{ .ansi256 = 238 }),
             .flagged = (Style{}).with_fg(.{ .ansi256 = 179 }),
             .alert = (Style{}).with_fg(.{ .ansi256 = 167 }),
+            .account_colors = .{
+                .{ .ansi256 = 74 },
+                .{ .ansi256 = 180 },
+                .{ .ansi256 = 141 },
+                .{ .ansi256 = 108 },
+            },
             .colored = true,
         };
     }
@@ -43,6 +52,7 @@ pub const Theme = struct {
             .border = .{},
             .flagged = (Style{}).with_bold(),
             .alert = (Style{}).with_bold().with_underline(),
+            .account_colors = @splat(screen.Color.default),
             .colored = false,
         };
     }

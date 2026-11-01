@@ -164,6 +164,7 @@ fn addE2eTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 /// every measured line is covered.
 ///
 /// The process boundary is excluded by name, not by accident: `tui/src/launch.zig`
+/// and `tui/src/refresh.zig` (the only thread)
 /// (raw mode, alternate screen, session lifecycle) and `tui/src/main.zig` (three
 /// lines of wiring) are executed by the end-to-end PTY test, not by unit tests.
 ///
@@ -196,7 +197,7 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         \\export CORE_BIN="$1" TUI_BIN="$2" REPORT_BIN="$3"
         \\nix-shell --quiet -p kcov --run '
         \\  PATTERN="core/src,tui/src"
-        \\  SKIP="tui/src/launch.zig,tui/src/main.zig"
+        \\  SKIP="tui/src/launch.zig,tui/src/main.zig,tui/src/refresh.zig"
         \\  kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/core "$CORE_BIN" &&
         \\  kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/tui "$TUI_BIN" &&
         \\  kcov --merge coverage .coverage/core .coverage/tui

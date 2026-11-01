@@ -56,6 +56,17 @@ pub const Accounts = struct {
         return "";
     }
 
+    /// Longest label, or zero when there is nothing to tell apart. The list
+    /// uses it to size the account column so "personal" is not "perso…".
+    pub fn max_label(self: *const Accounts) u8 {
+        if (self.len < 2) return 0;
+        var longest: u8 = 0;
+        for (self.items[0..self.len]) |*entry| {
+            longest = @max(longest, @as(u8, @intCast(@min(entry.label.len, 255))));
+        }
+        return longest;
+    }
+
     pub fn index_of(self: *const Accounts, id: AccountId) ?u8 {
         for (self.items[0..self.len], 0..) |entry, index| {
             if (entry.id == id) return @intCast(index);
@@ -104,6 +115,8 @@ pub const State = struct {
 
     /// True while the first network load runs: the frame becomes a splash.
     booting: bool = false,
+    /// True while a background refresh runs: the footer shows a spinner.
+    refreshing: bool = false,
     /// Free-running tick for the splash spinner.
     spinner: u8 = 0,
     status: Text(limits.status_max) = .{},

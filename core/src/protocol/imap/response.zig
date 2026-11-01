@@ -13,6 +13,7 @@ const std = @import("std");
 const tokenizer = @import("tokenizer.zig");
 const time = @import("../../domain/time.zig");
 const Flags = @import("../../domain/message.zig").Flags;
+const Mailbox = @import("../../domain/mailbox.zig").Mailbox;
 
 pub const Kind = enum { ok, no, bad };
 
@@ -43,6 +44,13 @@ pub const Fetch = struct {
     body: ?[]const u8 = null,
 };
 
+/// One `LIST` result: the mailbox name plus, when the server supports
+/// SPECIAL-USE, which logical mailbox it is.
+pub const ListEntry = struct {
+    name: []const u8 = "",
+    mailbox: ?Mailbox = null,
+};
+
 pub const Untagged = union(enum) {
     ok: []const u8,
     no: []const u8,
@@ -53,6 +61,7 @@ pub const Untagged = union(enum) {
     recent: u32,
     expunge: u32,
     fetch: Fetch,
+    list: ListEntry,
     capabilities: []const u8,
     other: []const u8,
 };
@@ -119,6 +128,10 @@ fn untagged(rest: []const u8, scratch: []u8) Error!Untagged {
     if (std.ascii.eqlIgnoreCase(first, "BYE")) return .{ .bye = tail };
     if (std.ascii.eqlIgnoreCase(first, "PREAUTH")) return .{ .preauth = tail };
     if (std.ascii.eqlIgnoreCase(first, "CAPABILITY")) return .{ .capabilities = tail };
+    if (std.ascii.eqlIgnoreCase(first, "LIST")) {
+        var list_len: usize = 0;
+        return .{ .list = try parseList(tail, scratch, &list_len) };
+    }
     return .{ .other = rest };
 }
 
@@ -132,6 +145,51 @@ fn sequenceResponse(sequence: u32, tail: []const u8, scratch: []u8) Error!Untagg
     if (std.ascii.eqlIgnoreCase(verb, "EXPUNGE")) return .{ .expunge = sequence };
     if (std.ascii.eqlIgnoreCase(verb, "FETCH")) return .{ .fetch = try parseFetch(sequence, rest, scratch) };
     return .{ .other = tail };
+}
+
+/// `(\Sent \HasNoChildren) "/" "Sent"`: flags, delimiter, name.
+fn parseList(text: []const u8, scratch: []u8, scratch_len: *usize) Error!ListEntry {
+    var tokens = tokenizer.Tokenizer.init(text);
+    var entry = ListEntry{};
+
+    const open = try next(&tokens);
+    if (open != .open_paren) return error.Malformed;
+    while (true) {
+        const token = try next(&tokens);
+        switch (token) {
+            .close_paren => break,
+            .atom => |flag| {
+                if (specialUse(flag)) |mailbox| entry.mailbox = mailbox;
+            },
+            else => {},
+        }
+    }
+
+    // Delimiter: NIL, a quoted string, or an atom. Unused.
+    _ = try next(&tokens);
+
+    // Unescape into the caller's scratch: the response buffer is reused, so a
+    // borrowed slice would not survive the next read.
+    const name = try next(&tokens);
+    entry.name = switch (name) {
+        .literal => |payload| payload,
+        .quoted => |quoted| tokenizer.unescape(quoted, scratch[scratch_len.*..]) catch
+            return error.Malformed,
+        .atom => |atom| atom,
+        else => return error.Malformed,
+    };
+    scratch_len.* += entry.name.len;
+    return entry;
+}
+
+fn specialUse(flag: []const u8) ?Mailbox {
+    if (std.ascii.eqlIgnoreCase(flag, "\\Sent")) return .sent;
+    if (std.ascii.eqlIgnoreCase(flag, "\\Drafts")) return .drafts;
+    if (std.ascii.eqlIgnoreCase(flag, "\\Trash")) return .trash;
+    if (std.ascii.eqlIgnoreCase(flag, "\\Junk")) return .junk;
+    if (std.ascii.eqlIgnoreCase(flag, "\\Archive")) return .archive;
+    if (std.ascii.eqlIgnoreCase(flag, "\\All")) return .archive;
+    return null;
 }
 
 fn parseFetch(sequence: u32, text: []const u8, scratch: []u8) Error!Fetch {
@@ -529,6 +587,17 @@ test "FETCH with a NIL envelope and an empty address list" {
 
     const empty = (try parse_test("* 1 FETCH (UID 2 ENVELOPE (NIL NIL () () () () () NIL NIL NIL))")).untagged.fetch;
     try testing.expect(empty.envelope.?.from_name == null);
+}
+
+test "LIST carries the name and the special-use flag" {
+    var scratch: [256]u8 = undefined;
+    const response = try parse("* LIST (\\Sent \\HasNoChildren) \"/\" \"Sent Items\"\r\n", &scratch);
+    try testing.expectEqualStrings("Sent Items", response.untagged.list.name);
+    try testing.expectEqual(Mailbox.sent, response.untagged.list.mailbox.?);
+
+    const plain = try parse("* LIST () \"/\" \"INBOX\"\r\n", &scratch);
+    try testing.expect(plain.untagged.list.mailbox == null);
+    try testing.expectEqualStrings("INBOX", plain.untagged.list.name);
 }
 
 test "FETCH captures a body literal" {

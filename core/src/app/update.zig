@@ -422,8 +422,9 @@ fn toggle_help(state: *State) void {
 }
 
 fn apply_refresh(state: *State, effects: *Effects) void {
+    // No status line: the footer's spinner says it, in the same place as the
+    // other hints, without stealing the row.
     effects.add(.{ .refresh = .{ .account = state.account_filter, .mailbox = state.mailbox, .force = true } });
-    state.set_status("Refreshing...", .{});
 }
 
 fn apply_viewport(state: *State, viewport: Viewport) void {
@@ -1190,13 +1191,13 @@ test "a successful send closes the draft; a failure keeps it and alerts" {
     try testing.expectEqualStrings("Message sent · 2 opens Sent", fixture.state.status.slice());
 }
 
-test "refresh asks for the current mailbox and says so" {
+test "refresh asks for the current mailbox" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
 
     const effects = apply(&fixture.state, &fixture.store, .refresh);
     try expect_effects(&effects, &.{.{ .refresh = .{ .account = null, .mailbox = .inbox, .force = true } }});
-    try testing.expectEqualStrings("Refreshing...", fixture.state.status.slice());
+    try testing.expect(fixture.state.status.is_empty());
 }
 
 test "set_viewport clamps the cursor and the reader scroll, and keeps the status" {

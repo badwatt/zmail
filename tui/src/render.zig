@@ -35,7 +35,7 @@ pub const Inputs = struct {
 
 pub fn frame(inputs: Inputs, out: *Screen) void {
     out.resize(inputs.columns, inputs.rows);
-    const lay = layout_mod.Layout.compute(out.columns, out.rows, inputs.state.accounts.len > 1);
+    const lay = layout_mod.Layout.compute(out.columns, out.rows, inputs.state.accounts.max_label());
     if (lay.too_small) {
         render_too_small(inputs, out);
         return;
@@ -90,7 +90,7 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
         if (address.len > 0) put_centered(out, middle +| 1, address, theme.dim.with_dim());
     }
 
-    put_centered(out, middle +| 3, "cached mail opens instantly · R refreshes", theme.dim.with_dim());
+    put_centered(out, middle +| 3, "cached mail opens instantly · Ctrl+R refreshes", theme.dim.with_dim());
 }
 
 fn account_labels(state: *const State, buffer: []u8) []const u8 {
@@ -220,7 +220,16 @@ fn render_row(inputs: Inputs, lay: layout_mod.Layout, message: *const core.messa
     if (lay.account_tags) {
         const label = inputs.state.accounts.label_for(message.account);
         if (label.len > 0) {
-            out.put(lay.account_x, y, std.ascii.toUpper(label[0]), selected_style(theme.dim, theme, selected));
+            const index = inputs.state.accounts.index_of(message.account) orelse 0;
+            const color = theme.account_colors[index % theme.account_colors.len];
+            const style = (Style{}).with_fg(color);
+            out.put_text_truncated(
+                lay.account_x,
+                y,
+                label,
+                lay.account_width,
+                selected_style(style, theme, selected),
+            );
         }
     }
 
@@ -440,6 +449,7 @@ const list_hints = [_]Hint{
     .{ .keys = "Enter", .action = "open" },
     .{ .keys = "c", .action = "compose" },
     .{ .keys = "r", .action = "reply" },
+    .{ .keys = "^R", .action = "refresh" },
     .{ .keys = "/", .action = "search" },
     .{ .keys = "?", .action = "help" },
 };
@@ -450,6 +460,7 @@ const reader_hints = [_]Hint{
     .{ .keys = "r", .action = "reply" },
     .{ .keys = "q", .action = "back" },
     .{ .keys = "u", .action = "unread" },
+    .{ .keys = "^R", .action = "refresh" },
 };
 
 const search_hints = [_]Hint{
@@ -490,7 +501,14 @@ fn hints_for(state: *const State) []const Hint {
 fn render_footer(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const y = lay.footer_y;
     var right_buffer: [16]u8 = undefined;
-    const right = position_text(inputs.state, &right_buffer);
+    const position = position_text(inputs.state, &right_buffer);
+    // A refresh in progress turns the position into "⠹ 3/24": no new row, no
+    // transient message, just the spinner next to where you are.
+    var spinner_buffer: [32]u8 = undefined;
+    const right = if (inputs.state.refreshing) blk: {
+        const glyph = spinner_frames[inputs.state.spinner % spinner_frames.len];
+        break :blk std.fmt.bufPrint(&spinner_buffer, "{s} {s}", .{ glyph, position }) catch position;
+    } else position;
     const right_width = screen.text_columns(right);
     const limit = lay.columns -| (right_width + 3);
     put_right(out, lay.columns - 2, y, right, inputs.theme.dim);
@@ -777,12 +795,26 @@ test "frame marks unread rows with a dot and flagged rows with a star" {
 test "with several accounts, each row carries its account tag" {
     var f = try fixture();
     defer f.deinit();
-    f.state.accounts.add(core.id.AccountId.from_int(1), "personal", .{});
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", .{});
     f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{});
+    for (0..3) |index| {
+        f.store.at(@intCast(index)).account = core.id.AccountId.from_int(if (index == 1) 2 else 1);
+    }
+    f.state.rebuild(&f.store);
 
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
-    try testing.expectEqual(@as(u21, 'P'), out.cells[2][2].ch);
+    // The whole label, not just its initial, in its account's hue.
+    try row_contains(&out, 2, "home");
+    try row_contains(&out, 3, "work");
+    try testing.expectEqual(
+        screen.Color{ .ansi256 = 74 },
+        out.cells[2][2].style.fg,
+    );
+    try testing.expectEqual(
+        screen.Color{ .ansi256 = 180 },
+        out.cells[3][2].style.fg,
+    );
     try row_contains(&out, 0, "all accounts");
 }
 
@@ -1124,6 +1156,18 @@ test "the boot splash shows the wordmark, the server, and a spinner" {
     // The list is not drawn behind it.
     var row_buffer: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
+}
+
+test "a refresh paints a spinner next to the position" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.refreshing = true;
+    f.state.spinner = 4;
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+    try row_contains(&out, 23, spinner_frames[4]);
+    try row_contains(&out, 23, "1/3");
 }
 
 test "the splash spinner advances with the tick" {

@@ -40,6 +40,8 @@ pub const Layout = struct {
 
     show_tabs: bool = false,
     account_x: u16 = 2,
+    /// Width of the account label column (0 when the view is one account).
+    account_width: u16 = 0,
     account_tags: bool = false,
     sender_x: u16 = 3,
     sender_width: u16 = 0,
@@ -50,7 +52,10 @@ pub const Layout = struct {
     flag_x: u16 = 0,
     dot_x: u16 = 1,
 
-    pub fn compute(columns: u16, rows: u16, account_tags: bool) Layout {
+    /// `label_width` is the longest account label (0 = single account, no
+    /// column): the column sizes itself to the names, bounded.
+    pub fn compute(columns: u16, rows: u16, label_width: u8) Layout {
+        const account_tags = label_width > 0;
         var layout: Layout = .{ .columns = columns, .rows = rows };
         layout.too_small = columns < min_columns or rows < min_rows;
         if (layout.too_small) return layout;
@@ -66,7 +71,13 @@ pub const Layout = struct {
         layout.show_tabs = columns >= tab_start + tabs_width() + 1;
 
         layout.account_tags = account_tags;
-        layout.sender_x = if (account_tags) 5 else 3;
+        // The full account label ("work", "personal") when it fits, at least
+        // two characters so accounts stay distinguishable.
+        layout.account_width = if (account_tags)
+            @min(@max(@as(u16, label_width), 2), @min(10, columns / 6))
+        else
+            0;
+        layout.sender_x = layout.dot_x + 1 + layout.account_width + @as(u16, if (account_tags) 1 else 1);
         layout.sender_width = @max(8, @min(24, columns / 4) - @as(u16, if (account_tags) 2 else 0));
         layout.subject_x = layout.sender_x + layout.sender_width + 1;
         layout.flag_x = columns - 1;
@@ -130,13 +141,13 @@ pub fn tabs_width() u16 {
 const testing = std.testing;
 
 test "compute marks tiny terminals as too small" {
-    try testing.expect(Layout.compute(39, 40, false).too_small);
-    try testing.expect(Layout.compute(80, 9, false).too_small);
-    try testing.expect(!Layout.compute(40, 10, false).too_small);
+    try testing.expect(Layout.compute(39, 40, 0).too_small);
+    try testing.expect(Layout.compute(80, 9, 0).too_small);
+    try testing.expect(!Layout.compute(40, 10, 0).too_small);
 }
 
 test "compute divides the screen into header, body, and footer" {
-    const layout = Layout.compute(100, 30, false);
+    const layout = Layout.compute(100, 30, 0);
     try testing.expectEqual(@as(u16, 0), layout.header_y);
     try testing.expectEqual(@as(u16, 1), layout.top_rule_y);
     try testing.expectEqual(@as(u16, 2), layout.body_y);
@@ -147,7 +158,7 @@ test "compute divides the screen into header, body, and footer" {
 }
 
 test "compute keeps the list columns inside the screen" {
-    const layout = Layout.compute(80, 24, false);
+    const layout = Layout.compute(80, 24, 0);
     try testing.expectEqual(@as(u16, 3), layout.sender_x);
     try testing.expectEqual(@as(u16, 20), layout.sender_width);
     try testing.expectEqual(@as(u16, 24), layout.subject_x);
@@ -158,16 +169,16 @@ test "compute keeps the list columns inside the screen" {
 }
 
 test "compute hides tabs on narrow terminals and shows them when they fit" {
-    const narrow = Layout.compute(74, 24, false);
+    const narrow = Layout.compute(74, 24, 0);
     try testing.expect(!narrow.show_tabs);
     try testing.expect(narrow.mailbox_at(10) == null);
 
-    const wide = Layout.compute(76, 24, false);
+    const wide = Layout.compute(76, 24, 0);
     try testing.expect(wide.show_tabs);
 }
 
 test "tab geometry puts each count right after its own title" {
-    const layout = Layout.compute(120, 30, false);
+    const layout = Layout.compute(120, 30, 0);
 
     try testing.expectEqual(@as(u16, 8), layout.tab_x(.inbox));
     try testing.expectEqual(@as(u16, 14), layout.tab_count_x(.inbox));
@@ -188,19 +199,25 @@ test "tab geometry puts each count right after its own title" {
 }
 
 test "account tags shift the sender column right" {
-    const plain = Layout.compute(100, 30, false);
+    const plain = Layout.compute(100, 30, 0);
     try testing.expectEqual(@as(u16, 3), plain.sender_x);
     try testing.expectEqual(@as(u16, 24), plain.sender_width);
 
-    const tagged = Layout.compute(100, 30, true);
+    const tagged = Layout.compute(100, 30, 8);
     try testing.expect(tagged.account_tags);
-    try testing.expectEqual(@as(u16, 5), tagged.sender_x);
-    try testing.expectEqual(@as(u16, 22), tagged.sender_width);
+    try testing.expectEqual(@as(u16, 8), tagged.account_width);
     try testing.expectEqual(@as(u16, 2), tagged.account_x);
+    try testing.expectEqual(@as(u16, 11), tagged.sender_x);
+    try testing.expectEqual(@as(u16, 22), tagged.sender_width);
+
+    // Narrow: the label column shrinks but never disappears.
+    const narrow = Layout.compute(60, 30, 8);
+    try testing.expectEqual(@as(u16, 8), narrow.account_width);
+    try testing.expectEqual(@as(u16, 11), narrow.sender_x);
 }
 
 test "reader geometry uses the full screen and leaves room for the body" {
-    const layout = Layout.compute(60, 12, false);
+    const layout = Layout.compute(60, 12, 0);
     try testing.expectEqual(@as(u16, 0), layout.reader_subject_y);
     try testing.expectEqual(@as(u16, 1), layout.reader_meta_y);
     try testing.expectEqual(@as(u16, 2), layout.reader_rule_y);

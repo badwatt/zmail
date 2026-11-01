@@ -42,6 +42,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
 
 /// Returns null on a clean exit, or what to report once the terminal is back.
 fn run_inside(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
+    if (options.add_account) return run_add_account(io, options, system);
     return switch (options.mode) {
         .demo => run_demo(gpa, system),
         .live => run_live(gpa, io, options, system),
@@ -79,7 +80,7 @@ fn run_demo(gpa: std.mem.Allocator, system: SessionSystem) ?Failure {
     demo.outboxes[0] = .{ .id = core.id.AccountId.from_int(1), .outbox = demo.outbox[0].outbox() };
     demo.outboxes[1] = .{ .id = core.id.AccountId.from_int(2), .outbox = demo.outbox[1].outbox() };
 
-    return run_session(gpa, system, &demo.sources, &demo.outboxes, null);
+    return run_session(gpa, system, &demo.sources, &demo.outboxes, null, false);
 }
 
 fn run_session(
@@ -88,12 +89,14 @@ fn run_session(
     accounts: []const session_mod.MailSource,
     outboxes: []const session_mod.OutboxSource,
     cache: ?core.cache_port.Cache,
+    splash: bool,
 ) ?Failure {
     var session: session_mod.Session = undefined;
     session.init(gpa, .{
         .accounts = accounts,
         .outboxes = outboxes,
         .cache = cache,
+        .splash = splash,
         .system = system,
         .theme = theme_for_environment(),
         .now = os.now_unix,
@@ -374,6 +377,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         live.sources[0..live.mail_count],
         live.outboxes[0..live.outbox_count],
         cache,
+        true,
     );
     if (outcome != null) return outcome;
     // A connection that never worked left nothing on screen: say why.
@@ -420,6 +424,74 @@ fn read_password(
 
 const file_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
 const directory_mode: std.Io.Dir.Permissions = @fromBackingInt(@intCast(0o700));
+
+/// `--add-account`: ask for one more account and append it to the config.
+/// Existing accounts, their credentials, and their cache are untouched.
+fn run_add_account(io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
+    var path_buffer: [512]u8 = undefined;
+    const path = options.config_path orelse cli.default_config_path(
+        &path_buffer,
+        os.env("XDG_CONFIG_HOME"),
+        os.env("HOME"),
+    );
+    if (path.len == 0) {
+        return .{ .message = "No config path: pass --config or set XDG_CONFIG_HOME" };
+    }
+
+    var config_buffer: [8193]u8 = undefined;
+    const existing = read_file(io, path, &config_buffer) catch |err| switch (err) {
+        error.FileNotFound => return .{ .message = "No config yet: run amail once to create one" },
+        else => return .{ .message = "Could not read the config file" },
+    };
+    _ = core.config.parse(existing) catch |err| return .{ .message = config_message(err) };
+
+    var saved: setup_session.Saved = undefined;
+    const outcome = setup_session.run(system, theme_for_environment(), path) catch
+        return .{ .message = "Setup failed: terminal error" };
+    switch (outcome) {
+        .cancelled => return .{ .message = "No account added", .code = 0 },
+        .saved => |result| {
+            saved = result;
+        },
+    }
+    defer saved.password.deinit();
+
+    if (core.config.has_label(existing, saved.label.slice())) {
+        return .{ .message = "That account already exists; give the new one another label" };
+    }
+
+    append_file(io, path, saved.config_text()) catch
+        return .{ .message = "Could not write the config file" };
+    write_credential(io, path, &saved) catch
+        return .{ .message = "Could not write the password file" };
+
+    std.debug.print("amail: added account \"{s}\"\n", .{saved.label.slice()});
+    return null;
+}
+
+fn append_file(io: std.Io, path: []const u8, text: []const u8) !void {
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
+    defer file.close(io);
+    const size = try file.stat(io);
+    const separator = if (size.size > 0) "\n" else "";
+    try file.writePositionalAll(io, separator, size.size);
+    try file.writePositionalAll(io, text, size.size + separator.len);
+}
+
+fn write_credential(io: std.Io, config_path: []const u8, saved: *const setup_session.Saved) !void {
+    var credential_buffer: [512]u8 = undefined;
+    const credential = cli.credential_path(config_path, saved.label.slice(), &credential_buffer);
+    if (credential.len == 0) return error.NameTooLong;
+
+    const dir = cli.parent_dir(credential);
+    if (dir.len > 0) {
+        std.Io.Dir.cwd().createDir(io, dir, directory_mode) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+    try write_file(io, credential, saved.password.expose());
+}
 
 fn write_setup_files(io: std.Io, config_path: []const u8, saved: *const setup_session.Saved) !void {
     const dir = cli.parent_dir(config_path);

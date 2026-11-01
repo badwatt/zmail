@@ -190,6 +190,16 @@ fn smtp_server(entry: *Entry) *account.Server {
     return &entry.smtp.?;
 }
 
+/// Whether a config file already uses `label`, so an added account cannot
+/// silently shadow or collide with an existing one.
+pub fn has_label(text: []const u8, label: []const u8) bool {
+    const file = parse(text) catch return false;
+    for (file.items()) |entry| {
+        if (std.mem.eql(u8, entry.label.slice(), label)) return true;
+    }
+    return false;
+}
+
 fn valid_label(label: []const u8) bool {
     if (label.len == 0 or label.len > limits.label_max) return false;
     for (label) |byte| {
@@ -229,6 +239,14 @@ const minimal =
     \\imap_security = tls
     \\
 ;
+
+test "has_label finds an account by its section" {
+    const text =
+        "[account work]\naddress = a@b.c\nusername = a\nimap_host = h\nimap_port = 993\nimap_security = tls\n";
+    try testing.expect(has_label(text, "work"));
+    try testing.expect(!has_label(text, "home"));
+    try testing.expect(!has_label("not a config", "work"));
+}
 
 test "a flat file is one account labelled account" {
     const file = try parse(minimal);

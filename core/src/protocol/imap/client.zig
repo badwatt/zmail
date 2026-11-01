@@ -55,6 +55,9 @@ pub const Client = struct {
     /// Envelope strings unescaped from one response point here, so they stay
     /// valid while the message is built (see response.parse).
     parse_scratch: [1024]u8 = undefined,
+    /// Mailbox names are copied here: the parser's scratch is reused per
+    /// response, so a LIST of twenty mailboxes would otherwise alias one slice.
+    list_names: [limits.mailboxes_max][limits.mailbox_name_max]u8 = undefined,
     /// Per-read wait, and how many of those in a row mean "give up".
     timeout_ms: u32 = 100,
     max_timeouts: u32 = 100,
@@ -83,9 +86,15 @@ pub const Client = struct {
 
     /// SELECT: returns the message count the server reports.
     pub fn select(self: *Client, mailbox: Mailbox) Error!u32 {
+        return self.select_name(mailbox.title());
+    }
+
+    /// Selects by the server's name, which is not always our title ("Sent
+    /// Items", "[Gmail]/Sent Mail", ...).
+    pub fn select_name(self: *Client, name: []const u8) Error!u32 {
         var tag_buffer: [16]u8 = undefined;
         const tag = self.beginCommand(&tag_buffer);
-        const bytes = command.select(self.command_slice(), tag, mailbox.title()) catch
+        const bytes = command.select(self.command_slice(), tag, name) catch
             return error.ProtocolError;
         try self.send(bytes);
 
@@ -102,6 +111,35 @@ pub const Client = struct {
             }
         }
         return exists;
+    }
+
+    /// Lists every mailbox, with SPECIAL-USE flags when the server sends them.
+    pub fn list(self: *Client, out: []response.ListEntry) Error!u32 {
+        var tag_buffer: [16]u8 = undefined;
+        const tag = self.beginCommand(&tag_buffer);
+        const bytes = command.list(self.command_slice(), tag) catch return error.ProtocolError;
+        try self.send(bytes);
+
+        var count: u32 = 0;
+        while (true) {
+            const maybe = try self.pump(tag);
+            const untagged = maybe orelse break;
+            switch (untagged) {
+                .list => |entry| {
+                    if (count < out.len and entry.name.len <= limits.mailbox_name_max) {
+                        const slot = &self.list_names[count];
+                        @memcpy(slot[0..entry.name.len], entry.name);
+                        out[count] = .{
+                            .name = slot[0..entry.name.len],
+                            .mailbox = entry.mailbox,
+                        };
+                        count += 1;
+                    }
+                },
+                else => {},
+            }
+        }
+        return count;
     }
 
     /// Fetches envelopes for `first..last` (1-based sequence numbers) into
@@ -169,9 +207,13 @@ pub const Client = struct {
     }
 
     pub fn move_message(self: *Client, uid: u32, to: Mailbox) Error!void {
+        return self.move_message_to(uid, to.title());
+    }
+
+    pub fn move_message_to(self: *Client, uid: u32, name: []const u8) Error!void {
         var tag_buffer: [16]u8 = undefined;
         const tag = self.beginCommand(&tag_buffer);
-        const bytes = command.move_message(self.command_slice(), tag, uid, to.title()) catch
+        const bytes = command.move_message(self.command_slice(), tag, uid, name) catch
             return error.ProtocolError;
         try self.send(bytes);
         try self.wait_ok(tag);

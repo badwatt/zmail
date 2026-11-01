@@ -12,6 +12,8 @@ const std = @import("std");
 const client_mod = @import("../protocol/imap/client.zig");
 const transport_mod = @import("../ports/transport.zig");
 const port = @import("../ports/mail.zig");
+const response_mod = @import("../protocol/imap/response.zig");
+const Text = @import("../domain/text.zig").Text;
 const mime = @import("../mime.zig");
 const limits = @import("../limits.zig");
 
@@ -33,6 +35,10 @@ pub const ImapMail = struct {
     scratch: [limits.body_max]u8 = undefined,
     selected: ?Mailbox = null,
     exists: u32 = 0,
+    /// Mailbox names learned from LIST: "Sent" is "Sent Items" on some servers.
+    listed: bool = false,
+    entries: [limits.mailboxes_max]Entry = undefined,
+    entry_count: u32 = 0,
 
     /// Logs in. The caller owns the transport from here on.
     pub fn open(transport: transport_mod.Transport, account: AccountId, user: []const u8, password: []const u8) client_mod.Error!ImapMail {
@@ -55,17 +61,69 @@ pub const ImapMail = struct {
         } };
     }
 
-    fn selectIfNeeded(self: *ImapMail, mailbox: Mailbox) port.Error!void {
-        if (self.selected) |current| {
-            if (current == mailbox) return;
+    const Entry = struct {
+        mailbox: ?Mailbox = null,
+        name: Text(limits.mailbox_name_max) = .{},
+    };
+
+    fn listOnce(self: *ImapMail) void {
+        if (self.listed) return;
+        self.listed = true;
+
+        var raw: [limits.mailboxes_max]response_mod.ListEntry = undefined;
+        const count = self.client.list(&raw) catch return;
+        const bounded = @min(count, @as(u32, raw.len));
+        for (raw[0..bounded], 0..) |entry, index| {
+            self.entries[index] = .{ .mailbox = entry.mailbox };
+            self.entries[index].name.set(entry.name);
         }
-        self.exists = self.client.select(mailbox) catch |err| return mapError(err);
+        self.entry_count = bounded;
+    }
+
+    /// The server's name for a logical mailbox, or null when LIST says the
+    /// server has no such mailbox (which is empty mail, not an error).
+    fn serverName(self: *ImapMail, mailbox: Mailbox) ?[]const u8 {
+        var index: u32 = 0;
+        while (index < self.entry_count) : (index += 1) {
+            const entry = &self.entries[index];
+            if (entry.mailbox) |mapped| {
+                if (mapped == mailbox) return entry.name.slice();
+            }
+        }
+        index = 0;
+        while (index < self.entry_count) : (index += 1) {
+            const entry = &self.entries[index];
+            if (matchesAlias(mailbox, entry.name.slice())) return entry.name.slice();
+        }
+        // Nothing listed yet: try our own title. After a LIST, absence is fact.
+        if (self.listed) return null;
+        return mailbox.title();
+    }
+
+    /// Selects the mailbox, learning the server's names on the first refusal.
+    /// Returns false when the mailbox does not exist on this server.
+    fn selectIfNeeded(self: *ImapMail, mailbox: Mailbox) port.Error!bool {
+        if (self.selected) |current| {
+            if (current == mailbox) return true;
+        }
+
+        const name = self.serverName(mailbox) orelse return false;
+        self.exists = self.client.select_name(name) catch |err| switch (err) {
+            error.NotFound => blk: {
+                if (self.listed) return false;
+                self.listOnce();
+                const retry = self.serverName(mailbox) orelse return false;
+                break :blk self.client.select_name(retry) catch |second| return mapError(second);
+            },
+            else => return mapError(err),
+        };
         self.selected = mailbox;
+        return true;
     }
 
     fn fetchThunk(context: *anyopaque, mailbox: Mailbox, out: []Message) port.Error!u32 {
         const self: *ImapMail = @ptrCast(@alignCast(context));
-        try self.selectIfNeeded(mailbox);
+        if (!try self.selectIfNeeded(mailbox)) return 0;
 
         const total = @min(self.exists, @as(u32, @intCast(out.len)));
         if (total == 0) return 0;
@@ -83,7 +141,7 @@ pub const ImapMail = struct {
         const self: *ImapMail = @ptrCast(@alignCast(context));
         // UIDs are per mailbox, and after a cached start no mailbox may be
         // selected yet: select before fetching, always.
-        try self.selectIfNeeded(mailbox);
+        if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
         const raw = self.client.fetch_body(try uid_of(id), &self.raw) catch |err| return mapError(err);
         return mime.text_body(raw, out, &self.scratch);
     }
@@ -95,7 +153,8 @@ pub const ImapMail = struct {
 
     fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) port.Error!void {
         const self: *ImapMail = @ptrCast(@alignCast(context));
-        self.client.move_message(try uid_of(id), to) catch |err| return mapError(err);
+        const name = self.serverName(to) orelse return error.NotFound;
+        self.client.move_message_to(try uid_of(id), name) catch |err| return mapError(err);
     }
 };
 
@@ -103,6 +162,33 @@ pub const ImapMail = struct {
 /// stale reference, not a protocol error.
 fn uid_of(id: MessageId) port.Error!u32 {
     return std.math.cast(u32, id.to_int()) orelse error.NotFound;
+}
+
+/// Names servers use for the same logical mailbox.
+fn matchesAlias(mailbox: Mailbox, name: []const u8) bool {
+    const candidates: []const []const u8 = switch (mailbox) {
+        .inbox => &.{"inbox"},
+        .sent => &.{ "sent", "sent items", "sent messages", "sent mail", "outbox" },
+        .drafts => &.{ "drafts", "draft" },
+        .archive => &.{ "archive", "archives", "all mail" },
+        .trash => &.{ "trash", "deleted", "deleted items", "deleted messages", "bin" },
+        .junk => &.{ "junk", "spam", "junk e-mail", "bulk mail" },
+    };
+
+    // Compare the whole name and its last path component ("INBOX.Sent",
+    // "[Gmail]/Sent Mail").
+    const tail = blk: {
+        const slash = std.mem.lastIndexOfScalar(u8, name, '/');
+        const dot = std.mem.lastIndexOfScalar(u8, name, '.');
+        const start = if (slash) |at| at + 1 else if (dot) |at| at + 1 else 0;
+        if (start >= name.len) break :blk name else break :blk name[start..];
+    };
+
+    for (candidates) |candidate| {
+        if (std.ascii.eqlIgnoreCase(name, candidate)) return true;
+        if (std.ascii.eqlIgnoreCase(tail, candidate)) return true;
+    }
+    return false;
 }
 
 fn mapError(err: client_mod.Error) port.Error {
@@ -223,18 +309,50 @@ test "login failure is reported as Rejected through the port, and open fails" {
     try testing.expectError(error.LoginFailed, ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "wrong"));
 }
 
-test "a rejected select is NotFound, and a missing body too" {
-    var rejected: Scripted = .{ .input = login_ok ++ "a2 NO [CANNOT] no\r\n" };
-    var imap_rejected = try ImapMail.open(rejected.transport(), AccountId.from_int(1), "me", "pw");
-    defer imap_rejected.close();
-    var messages: [1]Message = undefined;
-    try testing.expectError(error.NotFound, imap_rejected.mail().fetch(.inbox, &messages));
+test "a mailbox the server does not have is empty, not an error" {
+    // "Sent" is "Sent Items" on many servers. The first SELECT fails, LIST
+    // teaches us the real name, and the retry lands on the right mailbox.
+    var scripted: Scripted = .{ .input = login_ok ++
+        "a2 NO [NONEXISTENT] no such mailbox\r\n" ++
+        "* LIST (\\Sent) \"/\" \"Sent Items\"\r\n" ++
+        "* LIST () \"/\" \"INBOX\"\r\n" ++
+        "a3 OK LIST done\r\n" ++
+        "* 1 EXISTS\r\n" ++
+        "a4 OK selected\r\n" ++
+        "* 1 FETCH (UID 4 ENVELOPE (NIL \"hi\" NIL NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
+        "a5 OK fetched\r\n" };
 
-    var missing: Scripted = .{ .input = login_ok ++ "* 1 EXISTS\r\na2 OK\r\na3 OK\r\n" };
-    var imap_missing = try ImapMail.open(missing.transport(), AccountId.from_int(1), "me", "pw");
-    defer imap_missing.close();
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+    const mail = imap.mail();
+
+    var messages: [2]Message = undefined;
+    try testing.expectEqual(@as(u32, 1), try mail.fetch(.sent, &messages));
+    try testing.expectEqualStrings("hi", messages[0].subject.slice());
+    try testing.expectEqual(Mailbox.sent, messages[0].mailbox);
+
+    const output = scripted.output_text();
+    try testing.expect(std.mem.indexOf(u8, output, "SELECT \"Sent\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "LIST \"\" \"*\"") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "SELECT \"Sent Items\"") != null);
+}
+
+test "a mailbox absent from LIST is empty, and its body is NotFound" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "a2 NO [NONEXISTENT] no such mailbox\r\n" ++
+        "* LIST (\\Sent) \"/\" \"Sent Items\"\r\n" ++
+        "a3 OK LIST done\r\n" };
+
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+    const mail = imap.mail();
+
+    var messages: [1]Message = undefined;
+    try testing.expectEqual(@as(u32, 0), try mail.fetch(.inbox, &messages));
+
     var body: [8]u8 = undefined;
-    try testing.expectError(error.NotFound, imap_missing.mail().fetch_body(.inbox, MessageId.from_int(9), &body));
+    try testing.expectError(error.NotFound, mail.fetch_body(.inbox, MessageId.from_int(9), &body));
+    try testing.expectError(error.NotFound, mail.move_message(MessageId.from_int(9), .inbox));
 }
 
 test "every client error maps onto one of the port's three cases" {

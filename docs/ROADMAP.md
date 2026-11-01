@@ -68,6 +68,12 @@ The port exists; this milestone fills it in.
   multipart trees (plain first, HTML stripped as a fallback). Bodies are
   fetched with `BODY.PEEK[]` from the message's own mailbox, so reading Sent
   works and a cached start still opens messages.
+- **Accounts and background refresh (done).** `--add-account` appends an account
+  without touching the others; the unified list labels every row with its
+  account, in that account's hue; `Ctrl+R` pulls in a worker thread with a
+  footer spinner; mailboxes resolve their real server names via `LIST`.
+- **An account picker (next).** `a` cycles the scope; a small overlay listing
+  every account (and "All accounts") would be clearer than cycling.
 - **Lazy connections (done).** The launcher builds accounts without touching
   the network; ports open on first use, so a warm cache starts in milliseconds
   with no socket, and a cold start shows a splash while it connects.

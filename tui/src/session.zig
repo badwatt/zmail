@@ -14,6 +14,7 @@ const render_mod = @import("render.zig");
 const screen_mod = @import("screen.zig");
 const system_mod = @import("system.zig");
 const theme_mod = @import("theme.zig");
+const refresh_mod = @import("refresh.zig");
 const wrap = @import("wrap.zig");
 
 const Mailbox = core.mailbox.Mailbox;
@@ -48,8 +49,11 @@ pub const Deps = struct {
     accounts: []const MailSource,
     outboxes: []const OutboxSource = &.{},
     /// Optional on-disk cache: startup and mailbox switches come from here
-    /// first, and `R` refreshes from the network.
+    /// first, and `Ctrl+R` refreshes from the network.
     cache: ?core.cache_port.Cache = null,
+    /// Whether connecting can block for long enough to deserve a splash. The
+    /// demo's mail is in memory, so it boots straight to the list.
+    splash: bool = true,
     system: System,
     theme: theme_mod.Theme = theme_mod.Theme.dark(),
     now: Now = fixed_now,
@@ -80,6 +84,14 @@ pub const Session = struct {
     /// Set when the cache could not fill the current mailbox.
     needs_boot: bool = false,
 
+    /// Background refresh: the worker writes into `refresh_scratch`; the UI
+    /// thread swaps the result into the store when the job reports done.
+    refreshing: bool = false,
+    refresh_job: refresh_mod.Job = .{},
+    refresh_scratch: []Message = undefined,
+    refresh_sources: [core.state.accounts_max]refresh_mod.Source = undefined,
+    refresh_mailbox: Mailbox = .inbox,
+
     /// One row of encoded ANSI. Bounded by the widest row times the longest
     /// possible style run, so a frame never allocates.
     row_buffer: [screen_mod.max_columns * 40]u8 = undefined,
@@ -99,6 +111,9 @@ pub const Session = struct {
 
         self.scratch = try gpa.alloc(Message, core.limits.messages_max);
         errdefer gpa.free(self.scratch);
+
+        self.refresh_scratch = try gpa.alloc(Message, core.limits.messages_max);
+        errdefer gpa.free(self.refresh_scratch);
 
         self.state = .{};
         self.state.from_address = deps.from_address;
@@ -121,7 +136,6 @@ pub const Session = struct {
     /// Fills the store from the on-disk cache and remembers whether the network
     /// is still needed.
     fn load_cached(self: *Session, mailbox: Mailbox) void {
-        var served: u32 = 0;
         for (self.deps.accounts, 0..) |source, index| {
             const mask = mask_bit(@intCast(index), @backingInt(mailbox));
             if (self.deps.cache) |cache| {
@@ -129,7 +143,6 @@ pub const Session = struct {
                 if (cached > 0) {
                     core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..cached]);
                     self.loaded_mask |= mask;
-                    served += 1;
                     continue;
                 }
             }
@@ -137,10 +150,6 @@ pub const Session = struct {
         }
 
         self.state.rebuild(&self.store);
-        if (served > 0 and !self.needs_boot) {
-            self.state.status.set("Cached · R refreshes");
-            self.state.status_alert = false;
-        }
         self.needs_render = true;
     }
 
@@ -152,25 +161,35 @@ pub const Session = struct {
 
         // `loop` already painted the splash for this boot; only paint it here
         // when boot is driven from somewhere else (tests, future front ends).
-        if (!self.state.booting) {
+        if (self.deps.splash and !self.state.booting) {
             self.state.booting = true;
             self.render();
         }
 
-        self.reload(null, self.state.mailbox, true);
+        self.reload(self.state.mailbox);
 
         self.state.booting = false;
         self.needs_render = true;
     }
 
     pub fn deinit(self: *Session) void {
+        // A running worker touches `refresh_scratch`; wait for it before freeing.
+        if (self.refreshing) {
+            while (!self.refresh_job.finished()) std.atomic.spinLoopHint();
+            self.refresh_job.join();
+        }
         self.store.deinit(self.gpa);
+        self.gpa.free(self.refresh_scratch);
         self.gpa.free(self.scratch);
         self.* = undefined;
     }
 
     /// Advances the loop by one step. Returns false when the session is over.
     pub fn step(self: *Session) bool {
+        self.poll_refresh();
+        // While a refresh runs the spinner must move, so every tick redraws.
+        if (self.refreshing) self.needs_render = true;
+
         var read_buffer: [256]u8 = undefined;
         if (self.deps.system.read(&read_buffer, system_mod.read_timeout_ms)) |read| {
             if (read > 0) {
@@ -197,11 +216,78 @@ pub const Session = struct {
     /// Runs until the user quits. `run.zig` wraps this with raw mode and the
     /// alternate screen.
     pub fn loop(self: *Session) void {
-        // Paint first (cached mail, or the splash), then do the slow part.
-        self.state.booting = self.needs_boot;
-        self.render();
-        self.boot();
+        if (self.deps.splash) {
+            // Paint first (cached mail, or the splash), then do the slow part.
+            self.state.booting = self.needs_boot;
+            self.render();
+            self.boot();
+        } else {
+            // Nothing here can block: no empty frame, no splash.
+            self.boot();
+            self.render();
+        }
         while (self.step()) {}
+    }
+
+    fn start_refresh(self: *Session) void {
+        if (self.refreshing) return;
+        const count = self.deps.accounts.len;
+        if (count == 0) return;
+
+        for (self.deps.accounts, 0..) |source, index| {
+            self.refresh_sources[index] = .{ .id = source.id, .mail = source.mail };
+        }
+        // Paint what the cache has first: switching mailboxes stays instant.
+        self.load_cached(self.state.mailbox);
+
+        self.refresh_mailbox = self.state.mailbox;
+        self.refresh_job.start(self.refresh_sources[0..count], self.refresh_mailbox, self.refresh_scratch);
+        self.refreshing = true;
+        self.state.refreshing = true;
+        self.needs_render = true;
+    }
+
+    fn poll_refresh(self: *Session) void {
+        if (!self.refreshing) return;
+        if (!self.refresh_job.finished()) return;
+        self.finish_refresh();
+    }
+
+    fn finish_refresh(self: *Session) void {
+        self.refresh_job.join();
+
+        for (self.deps.accounts, 0..) |source, index| {
+            // A failed account keeps whatever the cache already showed.
+            if (!self.refresh_job.ok[index]) continue;
+
+            const offset = self.refresh_job.offsets[index];
+            const count = self.refresh_job.counts[index];
+            const fetched = self.refresh_scratch[offset..][0..count];
+
+            core.sync.replace_mailbox(&self.store, source.id, self.refresh_mailbox, fetched);
+            self.loaded_mask |= mask_bit(@intCast(index), @backingInt(self.refresh_mailbox));
+            if (self.deps.cache) |cache| {
+                cache.save(source.id, self.refresh_mailbox, fetched) catch {};
+            }
+        }
+
+        const failures = self.refresh_job.failures;
+        self.refreshing = false;
+        self.state.refreshing = false;
+        self.state.rebuild(&self.store);
+        self.needs_render = true;
+
+        if (failures > 0) {
+            self.state.set_alert("Could not refresh {s}", .{self.refresh_mailbox.title()});
+        }
+    }
+
+    /// Test helper: waits for the worker, then applies its results.
+    pub fn settle_refresh_for_test(self: *Session) void {
+        while (self.refreshing) {
+            self.poll_refresh();
+            std.atomic.spinLoopHint();
+        }
     }
 
     fn sync_size(self: *Session) void {
@@ -243,7 +329,7 @@ pub const Session = struct {
             else => return false,
         }
 
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.len > 1);
+        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
         if (lay.too_small) return false;
 
         if (self.state.view == .list) {
@@ -290,11 +376,23 @@ pub const Session = struct {
 
     fn run_effects(self: *Session, effects: []const core.effect.Effect) void {
         for (effects) |effect| {
+            // One connection: while the worker uses it, cached mail is readable
+            // but no other request may touch the transport.
+            if (self.refreshing) {
+                switch (effect) {
+                    .refresh => {},
+                    else => {
+                        self.state.set_alert("Refreshing mail…", .{});
+                        continue;
+                    },
+                }
+            }
+
             switch (effect) {
                 .fetch_body => |args| self.fetch_body(args.account, args.mailbox, args.id),
                 .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags),
                 .move_message => |args| self.move_message(args.account, args.id, args.to),
-                .refresh => |args| self.reload(args.account, args.mailbox, args.force),
+                .refresh => self.start_refresh(),
                 .send => |outgoing| self.send(&outgoing),
             }
         }
@@ -361,40 +459,19 @@ pub const Session = struct {
         self.needs_render = true;
     }
 
-    fn reload(self: *Session, account_filter: ?core.id.AccountId, mailbox: Mailbox, force: bool) void {
+    /// Boot only: the first load, synchronous, with the splash on screen. A
+    /// worker thread would need a store the splash could already read.
+    fn reload(self: *Session, mailbox: Mailbox) void {
         var loaded_any = false;
         var failed = false;
 
         for (self.deps.accounts, 0..) |source, index| {
-            if (account_filter) |filter| {
-                if (source.id != filter) continue;
-            }
-            const mask = mask_bit(@intCast(index), @backingInt(mailbox));
-            if (!force and (self.loaded_mask & mask) != 0) {
-                loaded_any = true;
-                continue;
-            }
-
-            // Cached envelopes first: a switch or a restart should not wait for
-            // the network. Only an explicit refresh (or a miss) fetches.
-            if (!force) {
-                if (self.deps.cache) |cache| {
-                    const cached = cache.load(source.id, mailbox, self.scratch) catch 0;
-                    if (cached > 0) {
-                        core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..cached]);
-                        self.loaded_mask |= mask;
-                        loaded_any = true;
-                        continue;
-                    }
-                }
-            }
-
             const count = source.mail.fetch(mailbox, self.scratch) catch {
                 failed = true;
                 continue;
             };
             core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..count]);
-            self.loaded_mask |= mask;
+            self.loaded_mask |= mask_bit(@intCast(index), @backingInt(mailbox));
             loaded_any = true;
             if (self.deps.cache) |cache| {
                 cache.save(source.id, mailbox, self.scratch[0..count]) catch {};
@@ -409,7 +486,7 @@ pub const Session = struct {
     }
 
     fn render(self: *Session) void {
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.len > 1);
+        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
         if (self.body_loaded) {
             wrap.wrap(self.body[0..self.body_len], lay.reader_text_width, &self.wrapped);
         }
@@ -551,9 +628,15 @@ const Rig = struct {
         self.session.deinit();
     }
 
+    fn send_without_settle(self: *Rig, bytes: []const u8) void {
+        self.fake_system.push_input(bytes);
+        _ = self.session.step();
+    }
+
     fn send(self: *Rig, bytes: []const u8) void {
         self.fake_system.push_input(bytes);
         _ = self.session.step();
+        self.session.settle_refresh_for_test();
     }
 };
 
@@ -811,7 +894,7 @@ test "two accounts share one unified list, and a cycles the scope" {
     try testing.expectEqualStrings("from personal", session.store.at(session.state.visible[0]).subject.slice());
 
     // A forced refresh with a filter skips the other account.
-    fake_system.push_input("R");
+    fake_system.push_input("\x12");
     _ = session.step();
     try testing.expectEqual(core.id.AccountId.from_int(1), session.state.account_filter.?);
     try testing.expectEqual(@as(u32, 2), session.store.len);
@@ -865,7 +948,7 @@ test "starting from a cache does not touch the network, and R refreshes and save
     try testing.expectEqual(@as(u32, 2), rig.session.state.visible_len);
     try testing.expectEqual(@as(u32, 0), cache.saves);
 
-    rig.send("R");
+    rig.send("\x12");
     try testing.expectEqual(@as(u32, 1), cache.saves);
     try testing.expectEqual(@as(u32, 2), cache.last_saved);
 }
@@ -889,22 +972,25 @@ test "switching to an unloaded mailbox reads the cache, not the network" {
     });
     defer rig.deinit();
 
-    // Warm cache: no boot, and the footer says where the mail came from.
+    // Warm cache: no boot, and no transient status either.
     try testing.expect(!rig.session.needs_boot);
-    try testing.expectEqualStrings("Cached · R refreshes", rig.session.state.status.slice());
+    try testing.expect(rig.session.state.status.is_empty());
     rig.session.boot();
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
     try testing.expectEqualStrings("cached", rig.session.store.at(0).subject.slice());
 
-    // Sent is not loaded yet, so the switch goes through `reload`: the cache
-    // serves it and no socket is touched.
-    rig.send("]");
+    // Switching paints the cached copy first (instant), then refreshes.
+    rig.send_without_settle("]");
     try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
     try testing.expectEqual(@as(u32, 2), cache.loads);
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
     const row = rig.session.state.visible[0];
     try testing.expectEqualStrings("cached", rig.session.store.at(row).subject.slice());
     try testing.expectEqual(Mailbox.sent, rig.session.store.at(row).mailbox);
+
+    // The worker then replaces that mailbox with the server's truth.
+    rig.session.settle_refresh_for_test();
+    try testing.expectEqual(@as(u32, 0), rig.session.state.visible_len);
 }
 
 test "a cache miss falls back to the network and fills the cache" {
@@ -1004,6 +1090,134 @@ test "a failed move becomes an alert" {
     try testing.expectEqualStrings("Could not move the message", rig.session.state.status.slice());
 }
 
+test "an in-memory source boots without a splash" {
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .splash = false,
+    });
+    defer rig.deinit();
+
+    // Same order as `loop` for a source that cannot block.
+    rig.session.boot();
+    rig.session.render();
+    try testing.expectEqual(@as(u32, 2), rig.session.store.len);
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "connecting") == null);
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Inbox") != null);
+}
+
+test "loop without a splash paints only the data" {
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    rig.fake_system.push_input("\x11"); // quit on the first step
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .splash = false,
+    });
+    defer rig.deinit();
+
+    rig.session.loop();
+    try testing.expectEqual(@as(u32, 2), rig.session.store.len);
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "connecting") == null);
+}
+
+test "a cold boot that cannot connect says so, and shows an empty list" {
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.fake_mail.fail_fetch = true;
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+    });
+    defer rig.deinit();
+
+    rig.session.boot();
+    try testing.expectEqualStrings("Could not load Inbox", rig.session.state.status.slice());
+    try testing.expectEqual(@as(u32, 0), rig.session.store.len);
+
+    // And the failure does not leave the session stuck in boot mode.
+    try testing.expect(!rig.session.state.booting);
+    try testing.expect(!rig.session.needs_boot);
+}
+
+test "a request while the refresh runs is refused, not raced" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // Start the refresh but do not wait for it.
+    rig.fake_system.push_input("\x12");
+    _ = rig.session.step();
+    try testing.expect(rig.session.refreshing);
+    try testing.expect(rig.session.state.refreshing);
+
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(1),
+    } }});
+    try testing.expectEqualStrings("Refreshing mail…", rig.session.state.status.slice());
+
+    rig.session.settle_refresh_for_test();
+    try testing.expect(!rig.session.refreshing);
+    try testing.expect(!rig.session.state.refreshing);
+}
+
+test "init frees what it took when a buffer cannot be allocated" {
+    var fakery: Fake = .{ .size_value = .{ .columns = 100, .rows = 24 } };
+    var fail_index: usize = 0;
+    while (fail_index < 4) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var session: Session = undefined;
+        const result = session.init(failing.allocator(), .{
+            .accounts = &.{},
+            .system = fakery.system(),
+            .theme = theme_mod.Theme.dark(),
+            .now = fixed_now,
+        });
+        if (result) |_| {
+            session.deinit();
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+        }
+    }
+}
+
+test "deinit waits for a running refresh" {
+    var rig: Rig = .{};
+    try rig.start();
+    rig.fake_system.push_input("\x12");
+    _ = rig.session.step();
+    try testing.expect(rig.session.refreshing);
+    // No settle: deinit must join the worker itself.
+    rig.deinit();
+}
+
 test "a failed refresh becomes an alert and keeps the cache" {
     var rig: Rig = .{};
     try rig.start();
@@ -1011,8 +1225,8 @@ test "a failed refresh becomes an alert and keeps the cache" {
     _ = rig.session.step();
     rig.fake_mail.fail_fetch = true;
 
-    rig.send("R");
-    try testing.expectEqualStrings("Could not load Inbox", rig.session.state.status.slice());
+    rig.send("\x12");
+    try testing.expectEqualStrings("Could not refresh Inbox", rig.session.state.status.slice());
     try testing.expectEqual(@as(u32, 2), rig.session.store.len);
 }
 
@@ -1026,7 +1240,7 @@ test "a successful refresh refreshes the mailbox" {
     const extra = Message{ .id = MessageId.from_int(9), .account = core.id.AccountId.from_int(1), .mailbox = .inbox, .timestamp_unix = 1_699_999_950 };
     try rig.fake_mail.inner.seed(&extra);
 
-    rig.send("R");
+    rig.send("\x12");
     try testing.expectEqual(@as(u32, 3), rig.session.store.len);
     try testing.expectEqual(@as(u32, 3), rig.session.state.visible_len);
 }

@@ -105,7 +105,6 @@ fn char_command(codepoint: u21, view: View) ?Command {
         '#' => .delete_selected,
         '/' => .begin_search,
         '?' => .toggle_help,
-        'R' => .refresh,
         'a' => .cycle_account,
         '[' => .previous_mailbox,
         ']' => .next_mailbox,
@@ -123,6 +122,7 @@ fn ctrl_command(letter: u8) ?Command {
         'b' => .{ .move = .page_up },
         'n' => .{ .move = .down },
         'p' => .{ .move = .up },
+        'r' => .refresh,
         else => null,
     };
 }
@@ -253,7 +253,7 @@ test "actions: unread, flag, archive, delete, search, help, refresh" {
         .{ .key = .delete, .expected = .delete_selected },
         .{ .key = .{ .char = '/' }, .expected = .begin_search },
         .{ .key = .{ .char = '?' }, .expected = .toggle_help },
-        .{ .key = .{ .char = 'R' }, .expected = .refresh },
+        .{ .key = .{ .ctrl = 'r' }, .expected = .refresh },
         .{ .key = .{ .char = 'a' }, .expected = .cycle_account },
     };
     for (cases) |case| try check(case);

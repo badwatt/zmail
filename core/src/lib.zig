@@ -7,6 +7,8 @@
 const std = @import("std");
 
 pub const limits = @import("limits.zig");
+/// Accounts a single amail process can talk to at once.
+pub const app_max_accounts: u8 = 4;
 pub const meta = @import("meta.zig");
 pub const text = @import("domain/text.zig");
 pub const id = @import("domain/id.zig");

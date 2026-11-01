@@ -105,8 +105,9 @@ text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
 ## Opening
 
 With a cache, amail opens instantly: the first frame is the last known mail,
-read from disk, and **no socket is opened**. The footer says so — `Cached · R
-refreshes` — and `R` is the only thing that touches the network.
+read from disk, and **no socket is opened**. `Ctrl+R` is what talks to the
+server — it pulls the current mailbox for every account, in the background,
+while the footer's position turns into a spinner.
 
 Without a cache (first run, or a new account) the network is unavoidable, so
 the first frame is a splash instead of an empty list:
@@ -117,7 +118,7 @@ the first frame is a splash instead of an empty list:
                     ⠋  connecting to work
                        alice@example.com
 
-         cached mail opens instantly · R refreshes
+         cached mail opens instantly · Ctrl+R refreshes
 ```
 
 A connection that fails no longer refuses to start: cached mail stays readable
@@ -168,11 +169,29 @@ written, the path, and where the password goes. `Enter` saves, `Esc` goes back,
 | `Ctrl+S` | send (validates the recipient first) |
 | `Esc` | cancel the draft |
 
-With more than one account the list is unified by default: each row starts with
-its account initial (`P`, `W`), and the header shows the current scope on wide
-terminals. `a` narrows it to one account; the same key returns to all. The
-composer shows the sending account on a `From` line, chosen from the account
-scope (or from the message being replied to).
+## Accounts
+
+With more than one account the list is unified by default. Each row starts with
+its account label, in that account's own hue, so a glance is enough:
+
+```
+ ●home   Alice Rivera       Re: design tokens review                   1m
+  work   GitHub            [amail] TUI skeleton merged (#42)          2h
+```
+
+`a` cycles the scope: all accounts → account one → account two → all. On wide
+terminals the header names the current scope. The composer shows the sending
+account on a `From` line, chosen from the scope (or from the message being
+replied to).
+
+Adding an account does not touch the existing ones:
+
+```sh
+amail --add-account      # asks for the account and appends it to the config
+```
+
+Accounts live in the same file as `[account <label>]` sections, so they can also
+be written by hand; the label must be unique.
 
 A reply prefills the recipient and `Re: <subject>` and starts in the body. The
 draft survives a failed send. Non-ASCII text is sent as UTF-8; a subject with

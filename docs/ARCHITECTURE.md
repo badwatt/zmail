@@ -65,6 +65,19 @@ I/O at all and a failed connection is an ordinary port error instead of a
 startup failure. The process boundary (`tui/src/launch.zig`) keeps the
 password, the TLS transports, and the error messages that the opener needs.
 
+**Refreshing.** `Ctrl+R` starts one worker thread (`tui/src/refresh.zig`): it
+fetches the current mailbox for every account into a second buffer, and the UI
+thread swaps the result into the store when an atomic flag says done. The store
+is only ever touched by the UI thread, other mail requests are refused while the
+worker runs ("Refreshing mail…"), and a failed account keeps the mail already on
+screen.
+
+**Mailbox names.** IMAP mailbox names are server-defined: "Sent" is "Sent
+Items", "Sent Messages", or "[Gmail]/Sent Mail". The adapter tries our title
+first and, on refusal, runs `LIST` once and resolves by SPECIAL-USE flag
+(`\Sent`) or by a known alias; a mailbox the server does not have is simply
+empty, not an error.
+
 **Caching.** `cache.zig` is the versioned TSV codec; `ports/cache.zig` is the
 port; the session reads it at startup and on mailbox switches and writes it
 after every network refresh. `net/src/cache_file.zig` is the file adapter

@@ -27,7 +27,10 @@ amail --demo         # the built-in demo inbox: no account, no network
 ```
 
 Once the cache is warm, startup opens no socket: the first frame is the mail you
-already had, and `R` is what talks to the server.
+already had, and `Ctrl+R` pulls from the server in the background (a spinner
+sits where the position is). `--add-account` appends another account; the list
+is unified by default, with every row labelled and coloured by account, and `a`
+narrows it to one.
 
 `q` quits from the list, `Ctrl+Q`/`Ctrl+C` quit from anywhere, and `?` shows
 every key (`/` inside the help filters it).

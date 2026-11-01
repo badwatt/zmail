@@ -29,6 +29,13 @@ pub const address_max: u32 = 254;
 /// Maximum bytes of a host name (IMAP/SMTP server), per RFC 1035.
 pub const host_max: u32 = 253;
 
+/// Maximum mailboxes learned from a server's LIST.
+pub const mailboxes_max: u32 = 64;
+
+/// Maximum bytes of a server mailbox name ("[Gmail]/Sent Mail"). IMAP itself
+/// has no limit; 128 bytes holds every real-world name.
+pub const mailbox_name_max: u32 = 128;
+
 /// Maximum bytes of a message body shown in the reader.
 pub const body_max: u32 = 64 * 1024;
 
