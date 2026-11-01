@@ -195,15 +195,14 @@ pub const Session = struct {
         self.needs_boot = false;
         if (self.deps.accounts.len == 0) return;
 
-        // The first fetch runs in the worker thread too, so the splash keeps
-        // breathing instead of freezing the terminal while TLS and LOGIN run.
-        self.state.booting = true;
-        self.start_refresh();
-
-        if (!self.deps.splash) {
-            self.wait_refresh();
-            self.state.booting = false;
-        }
+        // The first connection must be made on this thread: the transport's
+        // Io belongs to the event loop, and opening it from the worker leaves
+        // both waiting forever (no mail, spinner forever). Later refreshes
+        // reuse the open connection, so those can run in the background.
+        self.state.booting = self.deps.splash;
+        self.reload(self.state.mailbox);
+        self.state.booting = false;
+        self.needs_render = true;
     }
 
     pub fn deinit(self: *Session) void {
@@ -1446,8 +1445,8 @@ test "a cache miss falls back to the network and fills the cache" {
     rig.session.settle_refresh_for_test();
     defer rig.deinit();
 
-    // A read at init and another when the refresh starts; one save after.
-    try testing.expectEqual(@as(u32, 2), cache.loads);
+    // One cache read at init, one save after the fetch.
+    try testing.expectEqual(@as(u32, 1), cache.loads);
     try testing.expectEqual(@as(u32, 1), cache.saves);
     try testing.expectEqual(@as(u32, 2), rig.session.state.visible_len);
 }
@@ -1640,8 +1639,7 @@ test "a cold boot that cannot connect says so, and shows an empty list" {
     defer rig.deinit();
 
     rig.session.boot();
-    rig.session.settle_refresh_for_test();
-    try testing.expectEqualStrings("Could not refresh Inbox", rig.session.state.status.slice());
+    try testing.expectEqualStrings("Could not load Inbox", rig.session.state.status.slice());
     try testing.expectEqual(@as(u32, 0), rig.session.store.len);
 
     // And the failure does not leave the session stuck in boot mode.

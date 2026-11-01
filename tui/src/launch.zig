@@ -341,6 +341,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
 
     var live: Live = .{};
     defer live.close();
+    var missing_password: ?[]const u8 = null;
 
     for (file.items(), 0..) |entry, index_u| {
         const index: u8 = @intCast(index_u);
@@ -370,6 +371,9 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         }
         read_password(io, path, entry.label.slice(), file.len == 1, &account.password) catch {};
         account.password_ready = !account.password.is_empty();
+        if (!account.password_ready and missing_password == null) {
+            missing_password = "No password for an account: set AMAIL_PASSWORD or run amail --add-account";
+        }
 
         live.add(account);
     }
@@ -410,7 +414,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         bodies,
         account_port,
         true,
-        null,
+        missing_password,
     );
     if (outcome != null) return outcome;
     // A connection that never worked left nothing on screen: say why.
@@ -431,13 +435,15 @@ fn read_password(
     const path = cli.credential_path(config_path, label, &path_buffer);
     if (path.len > 0) {
         if (read_file(io, path, &buffer)) |text| {
-            if (try open_credential(io, text, out)) return;
+            if (try open_credential(io, text, out, config_path)) return;
         } else |_| {}
     }
 
     if (allow_env) {
         if (os.env("AMAIL_PASSWORD")) |value| {
             try core.secret.Secret.init(value, out);
+            // Re-seal it: a lost or replaced key heals on the next start.
+            if (path.len > 0) seal_in_place(io, path, value) catch {};
             return;
         }
     }
@@ -446,10 +452,13 @@ fn read_password(
     const legacy = cli.legacy_credential_path(config_path, &legacy_buffer);
     if (legacy.len > 0) {
         if (read_file(io, legacy, &buffer)) |text| {
-            // An older install wrote the password in the clear. Accept it, then
-            // immediately replace the file with a sealed copy: no plaintext
-            // secret stays on disk after the first run.
+            // Sealed first; then a real plaintext file from an older install.
+            if (try open_credential(io, text, out, config_path)) return;
+
             const trimmed = std.mem.trimEnd(u8, text, "\r\n");
+            // Only accept it as a password if it *looks* like one: a sealed
+            // blob that cannot be opened must not become a garbage password.
+            if (!looks_like_password(trimmed)) return error.NoPassword;
             try core.secret.Secret.init(trimmed, out);
             seal_in_place(io, legacy, trimmed) catch {};
             if (path.len > 0) write_sealed_credential(io, config_path, out, label) catch {};
@@ -460,13 +469,50 @@ fn read_password(
     return error.NoPassword;
 }
 
-/// Seals an existing plaintext file (used to migrate the old credential).
-fn seal_in_place(io: std.Io, path: []const u8, secret: []const u8) !void {
+/// The key that protects credentials lives next to the config: the cache is
+/// disposable, and deleting it must never make a password unreadable.
+fn key_dir(io: std.Io, config_path: []const u8, buffer: []u8) ?[]const u8 {
+    const dir = cli.parent_dir(config_path);
+    if (dir.len == 0) return null;
+
+    // Migration: an older build kept the key in the cache directory. Copy it
+    // over the first time so sealed credentials keep opening.
+    var target_buffer: [512]u8 = undefined;
+    const target = std.fmt.bufPrint(&target_buffer, "{s}/key", .{dir}) catch return null;
+    if (std.Io.Dir.cwd().openFile(io, target, .{})) |file| {
+        file.close(io);
+        return std.fmt.bufPrint(buffer, "{s}", .{dir}) catch null;
+    } else |_| {}
+
     var cache_buffer: [512]u8 = undefined;
     const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
-    if (cache_dir.len == 0) return error.NameTooLong;
+    if (cache_dir.len > 0) {
+        var source_buffer: [512]u8 = undefined;
+        const source = std.fmt.bufPrint(&source_buffer, "{s}/key", .{cache_dir}) catch "";
+        if (source.len > 0) {
+            if (std.Io.Dir.cwd().openFile(io, source, .{})) |file| {
+                defer file.close(io);
+                var key: [32]u8 = undefined;
+                if (file.readPositionalAll(io, &key, 0) catch 0 == 32) {
+                    _ = std.Io.Dir.cwd().createDirPathStatus(io, dir, directory_mode) catch {};
+                    const copy = std.Io.Dir.cwd().createFile(io, target, .{ .permissions = file_mode }) catch null;
+                    if (copy) |out| {
+                        defer out.close(io);
+                        out.writeStreamingAll(io, &key) catch {};
+                    }
+                }
+            } else |_| {}
+        }
+    }
+    return std.fmt.bufPrint(buffer, "{s}", .{dir}) catch null;
+}
 
-    var keys = net.keyfile.KeyFile.init(undefined, io, cache_dir);
+/// Seals an existing plaintext file (used to migrate the old credential).
+fn seal_in_place(io: std.Io, path: []const u8, secret: []const u8) !void {
+    var dir_buffer: [512]u8 = undefined;
+    const dir = key_dir(io, path, &dir_buffer) orelse return error.NameTooLong;
+
+    var keys = net.keyfile.KeyFile.init(undefined, io, dir);
     const key = keys.get() orelse return error.NameTooLong;
 
     var sealed_buffer: [core.limits.secret_max + core.sealed.overhead]u8 = undefined;
@@ -474,6 +520,15 @@ fn seal_in_place(io: std.Io, path: []const u8, secret: []const u8) !void {
     io.random(&nonce);
     const sealed_secret = try core.sealed.seal(key, nonce, secret, &sealed_buffer);
     try write_file(io, path, sealed_secret);
+}
+
+/// A password typed by a human: printable UTF-8, no control bytes.
+fn looks_like_password(text: []const u8) bool {
+    if (text.len == 0 or !std.unicode.utf8ValidateSlice(text)) return false;
+    for (text) |byte| {
+        if (byte < 0x20 or byte == 0x7f) return false;
+    }
+    return true;
 }
 
 /// Writes (or rewrites) the sealed credential for `label`.
@@ -502,12 +557,11 @@ fn write_credential_bytes(io: std.Io, config_path: []const u8, label: []const u8
 
 /// Opens a sealed credential; a plaintext file from an older version is still
 /// accepted so nobody is locked out by the upgrade.
-fn open_credential(io: std.Io, text: []const u8, out: *core.secret.Secret) !bool {
-    var cache_buffer: [512]u8 = undefined;
-    const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
-    if (cache_dir.len == 0) return false;
+fn open_credential(io: std.Io, text: []const u8, out: *core.secret.Secret, config_path: []const u8) !bool {
+    var dir_buffer: [512]u8 = undefined;
+    const dir = key_dir(io, config_path, &dir_buffer) orelse return false;
 
-    var keys = net.keyfile.KeyFile.init(undefined, io, cache_dir);
+    var keys = net.keyfile.KeyFile.init(undefined, io, dir);
     const key = keys.get() orelse return false;
 
     var plain: [core.limits.secret_max]u8 = undefined;
