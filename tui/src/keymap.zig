@@ -106,6 +106,7 @@ fn char_command(codepoint: u21, view: View) ?Command {
         '/' => .begin_search,
         '?' => .toggle_help,
         'R' => .refresh,
+        'a' => .cycle_account,
         '[' => .previous_mailbox,
         ']' => .next_mailbox,
         '1'...'6' => .{ .select_mailbox = Mailbox.from_index(@intCast(codepoint - '1')) },
@@ -253,6 +254,7 @@ test "actions: unread, flag, archive, delete, search, help, refresh" {
         .{ .key = .{ .char = '/' }, .expected = .begin_search },
         .{ .key = .{ .char = '?' }, .expected = .toggle_help },
         .{ .key = .{ .char = 'R' }, .expected = .refresh },
+        .{ .key = .{ .char = 'a' }, .expected = .cycle_account },
     };
     for (cases) |case| try check(case);
 }

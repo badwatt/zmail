@@ -80,6 +80,11 @@ milestone. There is no analytics, no update check, and no crash reporting.
   without a secret service. The OS keyring and an `age`-encrypted file are the
   next adapters behind the same `SecretStore` port; until then, the file is
   guarded by `0600` and never printed, logged, or included in the config.
+- **Per-account credentials.** One `0600` file per account label under
+  `credentials/`; the config still refuses a `password` key.
+- **The cache is private data.** `~/.cache/amail/<label>/<mailbox>.tsv` holds
+  senders, subjects, and snippets in plaintext, mode `0600` inside a `0700`
+  directory. It is only a copy of what the server sends, and `R` replaces it.
 - **SMTP AUTH PLAIN only inside TLS.** The credentials are base64-encoded in the
   command (as SMTP requires) and only sent after the TLS handshake. Plaintext
   SMTP follows the same `allow_plaintext` rule as IMAP. The encoded payload is

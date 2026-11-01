@@ -59,6 +59,13 @@ The port exists; this milestone fills it in.
 - **Compose and reply (done).** Full-screen composer with three fields, UTF-8
   body, validation, `Ctrl+S` to send, a draft that survives a failed send, and
   `r` prefilling recipient and subject. Demo mode sends into Sent.
+- **Multi-account and cache (done).** `[account <label>]` sections, one
+  credential file per account, a unified list with an `a` scope switch, and a
+  TSV envelope cache under `~/.cache/amail`. Switching to a loaded mailbox no
+  longer refetches it, and startup reads the cache before the network.
+- **Lazy connections (next).** The launcher still logs in before the UI opens,
+  so a dead server delays startup. Sources should connect on demand and show
+  cached mail immediately.
 - **M3.2 next.** Quote the original in replies; `Cc`/`Bcc` and multiple
   recipients; RFC 2047 encoding for non-ASCII subjects; drafts persisted in the
   Drafts mailbox; reply-all and forward; threading by `Message-ID`.

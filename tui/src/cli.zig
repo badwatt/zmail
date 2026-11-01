@@ -18,7 +18,9 @@ pub const Mode = enum { demo, live };
 
 /// What to start, and with which config.
 pub const Launch = struct {
-    mode: Mode = .demo,
+    /// Live is the default: `amail` with a config is a real client, and
+    /// without one it opens the setup assistant.
+    mode: Mode = .live,
     /// Null means "the default path", resolved at launch time.
     config_path: ?[]const u8 = null,
 };
@@ -77,12 +79,32 @@ pub fn parent_dir(path: []const u8) []const u8 {
     return path[0..index];
 }
 
-/// The credential file lives next to the config, never inside it.
-pub fn credential_path(config_path: []const u8, buffer: []u8) []const u8 {
+/// The credential file lives next to the config, never inside it. One file per
+/// account: `credentials/<label>`.
+pub fn credential_path(config_path: []const u8, label: []const u8, buffer: []u8) []const u8 {
+    const dir = parent_dir(config_path);
+    if (dir.len == 0) return std.fmt.bufPrint(buffer, "credentials/{s}", .{label}) catch "";
+    const separator: []const u8 = if (dir[dir.len - 1] == '/') "" else "/";
+    return std.fmt.bufPrint(buffer, "{s}{s}credentials/{s}", .{ dir, separator, label }) catch "";
+}
+
+/// The pre-multi-account location, still read for a single-account config.
+pub fn legacy_credential_path(config_path: []const u8, buffer: []u8) []const u8 {
     const dir = parent_dir(config_path);
     if (dir.len == 0) return std.fmt.bufPrint(buffer, "credential", .{}) catch "";
     const separator: []const u8 = if (dir[dir.len - 1] == '/') "" else "/";
     return std.fmt.bufPrint(buffer, "{s}{s}credential", .{ dir, separator }) catch "";
+}
+
+/// `$XDG_CACHE_HOME/amail`, or `$HOME/.cache/amail`. Empty when neither is set.
+pub fn default_cache_dir(buffer: []u8, xdg_cache_home: ?[]const u8, home: ?[]const u8) []const u8 {
+    if (xdg_cache_home) |xdg| {
+        if (xdg.len > 0) return std.fmt.bufPrint(buffer, "{s}/amail", .{xdg}) catch "";
+    }
+    if (home) |base| {
+        if (base.len > 0) return std.fmt.bufPrint(buffer, "{s}/.cache/amail", .{base}) catch "";
+    }
+    return "";
 }
 
 /// `$XDG_CONFIG_HOME/amail/config`, or `$HOME/.config/amail/config`. Empty when
@@ -169,9 +191,9 @@ const testing = std.testing;
 const no_args = [_][]const u8{meta.name};
 const demo_args = [_][]const u8{ meta.name, "--demo" };
 
-test "no arguments launches the demo client" {
+test "no arguments launches live, which falls back to setup without a config" {
     const action = parse(&no_args);
-    try testing.expectEqual(Mode.demo, action.launch.mode);
+    try testing.expectEqual(Mode.live, action.launch.mode);
     try testing.expect(action.launch.config_path == null);
 }
 
@@ -215,6 +237,14 @@ test "--config without a value and repeated --config are usage errors" {
     try testing.expectEqualStrings("--config", empty.usage_error.missing_value);
 }
 
+test "default cache dir follows XDG_CACHE_HOME, then HOME" {
+    var buffer: [256]u8 = undefined;
+    try testing.expectEqualStrings("/xdg/amail", default_cache_dir(&buffer, "/xdg", "/home/me"));
+    try testing.expectEqualStrings("/home/me/.cache/amail", default_cache_dir(&buffer, null, "/home/me"));
+    try testing.expectEqualStrings("", default_cache_dir(&buffer, null, null));
+    try testing.expectEqualStrings("", default_cache_dir(&buffer, "", ""));
+}
+
 test "default config path follows XDG, then HOME" {
     var buffer: [256]u8 = undefined;
     try testing.expectEqualStrings(
@@ -240,20 +270,22 @@ test "parent_dir keeps the directory part" {
     try testing.expectEqualStrings("", parent_dir("config"));
 }
 
-test "credential_path sits next to the config" {
+test "credential_path is one file per account, next to the config" {
     var buffer: [256]u8 = undefined;
     try testing.expectEqualStrings(
-        "/home/me/.config/amail/credential",
-        credential_path("/home/me/.config/amail/config", &buffer),
+        "/home/me/.config/amail/credentials/work",
+        credential_path("/home/me/.config/amail/config", "work", &buffer),
     );
-    try testing.expectEqualStrings("credential", credential_path("config", &buffer));
-    try testing.expectEqualStrings("/credential", credential_path("/config", &buffer));
-    try testing.expectEqualStrings("a/credential", credential_path("a/b", &buffer));
+    try testing.expectEqualStrings("credentials/work", credential_path("config", "work", &buffer));
+    try testing.expectEqualStrings("/credentials/work", credential_path("/config", "work", &buffer));
+    try testing.expectEqualStrings("a/credentials/work", credential_path("a/b", "work", &buffer));
+    try testing.expectEqualStrings("/home/me/credential", legacy_credential_path("/home/me/config", &buffer));
+    try testing.expectEqualStrings("credential", legacy_credential_path("config", &buffer));
 }
 
 test "credential_path degrades to empty when the buffer is too small" {
     var buffer: [4]u8 = undefined;
-    try testing.expectEqualStrings("", credential_path("/home/me/config", &buffer));
+    try testing.expectEqualStrings("", credential_path("/home/me/config", "work", &buffer));
 }
 
 test "default config path degrades to empty when the buffer is too small" {

@@ -21,6 +21,7 @@ pub const Outcome = union(enum) {
 pub const Saved = struct {
     config: [4096]u8 = undefined,
     config_len: u32 = 0,
+    label: core.text.Text(core.limits.label_max) = .{},
     password: core.secret.Secret = .{},
 
     pub fn config_text(self: *const Saved) []const u8 {
@@ -67,6 +68,8 @@ pub fn run(system: system_mod.System, theme: theme_mod.Theme, config_path: []con
             var saved = Saved{};
             const text = setup.config_text(&saved.config);
             saved.config_len = @intCast(text.len);
+            var label_buffer: [core.limits.label_max]u8 = undefined;
+            saved.label.set(setup.account_label(&label_buffer));
             saved.password = setup.password;
             setup.password = .{};
             return .{ .saved = saved };
@@ -303,7 +306,8 @@ test "the review screen shows the config, the path, and warns about the password
     var buffer: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, screen.row_text(3, &buffer), "Save this account?") != null);
     try testing.expect(std.mem.indexOf(u8, screen.row_text(4, &buffer), "# amail account") != null);
-    try testing.expect(std.mem.indexOf(u8, screen.row_text(5, &buffer), "address = alice@example.com") != null);
+    try testing.expect(std.mem.indexOf(u8, screen.row_text(5, &buffer), "[account alice]") != null);
+    try testing.expect(std.mem.indexOf(u8, screen.row_text(6, &buffer), "address = alice@example.com") != null);
     try testing.expect(std.mem.indexOf(u8, screen.row_text(26, &buffer), "/tmp/amail/config") != null);
     try testing.expect(std.mem.indexOf(u8, screen.row_text(27, &buffer), "0600 file") != null);
 }

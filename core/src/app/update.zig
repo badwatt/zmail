@@ -50,7 +50,8 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .toggle_help => toggle_help(state),
         .refresh => apply_refresh(state, &effects),
         .set_viewport => |viewport| apply_viewport(state, viewport),
-        .compose_new => start_compose(state),
+        .cycle_account => cycle_account(state, store),
+        .compose_new => start_compose(state, store),
         .compose_reply => start_reply(state, store),
         .compose_send => send_compose(state, &effects),
         .compose_cancel => cancel_compose(state),
@@ -76,6 +77,31 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .send_failed => compose_failed(state),
     }
     return effects;
+}
+
+fn cycle_account(state: *State, store: *Store) void {
+    if (state.accounts.len == 0) return;
+    const current = state.account_filter;
+    var next_index: u8 = 0;
+    if (current) |filter| {
+        const position = state.accounts.index_of(filter) orelse {
+            // The filter points at an account that is gone: back to unified.
+            state.account_filter = null;
+            state.cursor = 0;
+            state.offset = 0;
+            state.rebuild(store);
+            return;
+        };
+        next_index = position + 1;
+    }
+    if (next_index >= state.accounts.len) {
+        state.account_filter = null;
+    } else {
+        state.account_filter = state.accounts.items[next_index].id;
+    }
+    state.cursor = 0;
+    state.offset = 0;
+    state.rebuild(store);
 }
 
 fn apply_move(state: *State, move: Move) void {
@@ -136,14 +162,15 @@ fn apply_open(state: *State, store: *Store, effects: *Effects) void {
     };
 
     state.opened = message.id;
+    state.opened_account = message.account;
     state.view = .reader;
     state.reader_scroll = 0;
 
     if (message.is_unread()) {
         message.flags = message.flags.mark_read();
-        effects.add(.{ .sync_flags = .{ .id = message.id, .flags = message.flags } });
+        effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
     }
-    effects.add(.{ .fetch_body = message.id });
+    effects.add(.{ .fetch_body = .{ .account = message.account, .id = message.id } });
 }
 
 fn apply_dismiss(state: *State, store: *Store) void {
@@ -171,7 +198,7 @@ fn switch_mailbox(state: *State, store: *Store, mailbox: Mailbox, effects: *Effe
     if (state.mailbox == mailbox) return;
 
     state.mailbox = mailbox;
-    effects.add(.{ .refresh = mailbox });
+    effects.add(.{ .refresh = .{ .account = state.account_filter, .mailbox = mailbox, .force = false } });
     state.query.clear();
     state.draft.clear();
     state.mode = .normal;
@@ -190,7 +217,7 @@ fn toggle_unread(state: *State, store: *Store, effects: *Effects) void {
     };
 
     message.flags = message.flags.toggle_unread();
-    effects.add(.{ .sync_flags = .{ .id = message.id, .flags = message.flags } });
+    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
     if (message.is_unread()) {
         state.set_status("Marked unread", .{});
     } else {
@@ -205,7 +232,7 @@ fn toggle_flag(state: *State, store: *Store, effects: *Effects) void {
     };
 
     message.flags = message.flags.toggle_flagged();
-    effects.add(.{ .sync_flags = .{ .id = message.id, .flags = message.flags } });
+    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
     if (message.is_flagged()) {
         state.set_status("Starred", .{});
     } else {
@@ -225,7 +252,7 @@ fn move_selected(state: *State, store: *Store, target: Mailbox, status_text: []c
     }
 
     message.mailbox = target;
-    effects.add(.{ .move_message = .{ .id = message.id, .to = target } });
+    effects.add(.{ .move_message = .{ .account = message.account, .id = message.id, .to = target } });
     if (state.view == .reader) {
         state.view = .list;
         state.reader_scroll = 0;
@@ -281,8 +308,12 @@ fn search_cancel(state: *State, store: *Store) void {
     state.rebuild(store);
 }
 
-fn start_compose(state: *State) void {
+fn start_compose(state: *State, store: *Store) void {
+    _ = store;
     state.compose.reset();
+    const account = state.account_filter orelse state.accounts.items[0].id;
+    state.compose.account = account;
+    state.compose.from = state.accounts.address_for(account) orelse state.from_address;
     state.view = .compose;
 }
 
@@ -304,6 +335,8 @@ fn start_reply(state: *State, store: *Store) void {
     }
 
     state.compose.in_reply_to = message.id;
+    state.compose.account = message.account;
+    state.compose.from = state.accounts.address_for(message.account) orelse state.from_address;
     state.compose.field = .body;
     state.view = .compose;
 }
@@ -317,7 +350,8 @@ fn send_compose(state: *State, effects: *Effects) void {
     };
 
     effects.add(.{ .send = .{
-        .from = state.from_address,
+        .account = state.compose.account,
+        .from = state.compose.from,
         .to = recipient,
         .subject = state.compose.subject,
         .body = state.compose.body_slice(),
@@ -388,7 +422,7 @@ fn toggle_help(state: *State) void {
 }
 
 fn apply_refresh(state: *State, effects: *Effects) void {
-    effects.add(.{ .refresh = state.mailbox });
+    effects.add(.{ .refresh = .{ .account = state.account_filter, .mailbox = state.mailbox, .force = true } });
     state.set_status("Refreshing...", .{});
 }
 
@@ -416,10 +450,12 @@ const testing = std.testing;
 const Text = @import("../domain/text.zig").Text;
 const MessageId = @import("../domain/id.zig").MessageId;
 const Address = @import("../domain/address.zig").Address;
+const AccountId = @import("../domain/id.zig").AccountId;
 
 fn message_with(id: u64, subject: []const u8, mailbox: Mailbox, timestamp_unix: i64) Message {
     var message = Message{
         .id = MessageId.from_int(id),
+        .account = AccountId.from_int(1),
         .mailbox = mailbox,
         .timestamp_unix = timestamp_unix,
         .flags = .{ .unread = true },
@@ -587,8 +623,8 @@ test "open: marks an unread message read, fetches the body, and switches view" {
     try testing.expect(!fixture.store.at(0).is_unread());
 
     try expect_effects(&effects, &.{
-        .{ .sync_flags = .{ .id = MessageId.from_int(1), .flags = .{ .unread = false } } },
-        .{ .fetch_body = MessageId.from_int(1) },
+        .{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false } } },
+        .{ .fetch_body = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1) } },
     });
 }
 
@@ -598,7 +634,7 @@ test "open: an already-read message only fetches the body" {
     fixture.store.at(0).flags = .{ .unread = false };
 
     const effects = apply(&fixture.state, &fixture.store, .open_selected);
-    try expect_effects(&effects, &.{.{ .fetch_body = MessageId.from_int(1) }});
+    try expect_effects(&effects, &.{.{ .fetch_body = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1) } }});
 }
 
 test "open: an empty list explains itself and stays put" {
@@ -656,7 +692,7 @@ test "next and previous mailbox cycle and ask the adapter to load them" {
     const effects = apply(&fixture.state, &fixture.store, .next_mailbox);
     try testing.expectEqual(Mailbox.sent, fixture.state.mailbox);
     try testing.expectEqual(@as(u32, 1), fixture.state.visible_len);
-    try expect_effects(&effects, &.{.{ .refresh = .sent }});
+    try expect_effects(&effects, &.{.{ .refresh = .{ .account = null, .mailbox = .sent, .force = false } }});
 
     _ = apply(&fixture.state, &fixture.store, .previous_mailbox);
     try testing.expectEqual(Mailbox.inbox, fixture.state.mailbox);
@@ -679,7 +715,7 @@ test "switching mailbox clears the filter, closes the reader, and resets the cur
 
     const effects = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .drafts });
     try testing.expectEqual(Mailbox.drafts, fixture.state.mailbox);
-    try expect_effects(&effects, &.{.{ .refresh = .drafts }});
+    try expect_effects(&effects, &.{.{ .refresh = .{ .account = null, .mailbox = .drafts, .force = false } }});
     try testing.expectEqual(View.list, fixture.state.view);
     try testing.expectEqual(.normal, fixture.state.mode);
     try testing.expect(fixture.state.query.is_empty());
@@ -707,7 +743,7 @@ test "toggle_unread flips the flag, syncs it, and reports the new state" {
     var effects = apply(&fixture.state, &fixture.store, .toggle_unread);
     try testing.expect(!fixture.store.at(0).is_unread());
     try testing.expectEqualStrings("Marked read", fixture.state.status.slice());
-    try expect_effects(&effects, &.{.{ .sync_flags = .{ .id = MessageId.from_int(1), .flags = .{ .unread = false } } }});
+    try expect_effects(&effects, &.{.{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false } } }});
 
     effects = apply(&fixture.state, &fixture.store, .toggle_unread);
     try testing.expect(fixture.store.at(0).is_unread());
@@ -758,7 +794,7 @@ test "archive moves the message out of the list and syncs the server" {
     try testing.expectEqual(Mailbox.archive, fixture.store.at(0).mailbox);
     try testing.expectEqual(@as(u32, 2), fixture.state.visible_len);
     try testing.expectEqualStrings("Archived", fixture.state.status.slice());
-    try expect_effects(&effects, &.{.{ .move_message = .{ .id = MessageId.from_int(1), .to = .archive } }});
+    try expect_effects(&effects, &.{.{ .move_message = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .to = .archive } }});
 }
 
 test "archive from the reader returns to the list" {
@@ -1159,7 +1195,7 @@ test "refresh asks for the current mailbox and says so" {
     defer fixture.store.deinit(testing.allocator);
 
     const effects = apply(&fixture.state, &fixture.store, .refresh);
-    try expect_effects(&effects, &.{.{ .refresh = .inbox }});
+    try expect_effects(&effects, &.{.{ .refresh = .{ .account = null, .mailbox = .inbox, .force = true } }});
     try testing.expectEqualStrings("Refreshing...", fixture.state.status.slice());
 }
 
@@ -1197,6 +1233,37 @@ test "set_viewport tolerates zero rows and clamps the reader scroll" {
     try testing.expectEqual(@as(u16, 1), fixture.state.list_rows);
     try testing.expectEqual(@as(u16, 1), fixture.state.reader_rows);
     try testing.expectEqual(@as(u32, 1), fixture.state.reader_scroll);
+}
+
+test "cycle_account walks all accounts and returns to the unified view" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.accounts.add(AccountId.from_int(1), "personal", .{});
+    fixture.state.accounts.add(AccountId.from_int(2), "work", .{});
+    fixture.state.cursor = 1;
+
+    _ = apply(&fixture.state, &fixture.store, .cycle_account);
+    try testing.expectEqual(AccountId.from_int(1), fixture.state.account_filter.?);
+    try testing.expectEqual(@as(u32, 0), fixture.state.cursor);
+
+    _ = apply(&fixture.state, &fixture.store, .cycle_account);
+    try testing.expectEqual(AccountId.from_int(2), fixture.state.account_filter.?);
+
+    _ = apply(&fixture.state, &fixture.store, .cycle_account);
+    try testing.expect(fixture.state.account_filter == null);
+}
+
+test "cycle_account without accounts or with an unknown filter stays safe" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .cycle_account);
+    try testing.expect(fixture.state.account_filter == null);
+
+    fixture.state.accounts.add(AccountId.from_int(1), "personal", .{});
+    fixture.state.account_filter = AccountId.from_int(9);
+    _ = apply(&fixture.state, &fixture.store, .cycle_account);
+    try testing.expect(fixture.state.account_filter == null);
 }
 
 test "a user command clears the status, a viewport update does not" {

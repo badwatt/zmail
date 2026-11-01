@@ -100,7 +100,7 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
 
     const slave_file: std.Io.File = .{ .handle = terminal.slave, .flags = .{ .nonblocking = false } };
     var child = try std.process.spawn(io, .{
-        .argv = &.{exe_path},
+        .argv = &.{ exe_path, "--demo" },
         .stdin = .{ .file = slave_file },
         .stdout = .{ .file = slave_file },
         .stderr = .{ .file = slave_file },

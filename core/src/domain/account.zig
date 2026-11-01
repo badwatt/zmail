@@ -28,6 +28,7 @@ pub const Server = struct {
 pub const Account = struct {
     label: Text(limits.label_max) = .{},
     address: Address = .{},
+    username: Text(limits.username_max) = .{},
     imap: Server = .{},
     smtp: Server = .{},
 };
@@ -87,6 +88,7 @@ fn account_with(imap: Server, smtp: Server) Account {
     return .{
         .label = Text(limits.label_max).init("work"),
         .address = Address.init("alice@example.com") catch unreachable,
+        .username = Text(limits.username_max).init("alice"),
         .imap = imap,
         .smtp = smtp,
     };

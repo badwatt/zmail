@@ -39,6 +39,8 @@ pub const Layout = struct {
     reader_text_width: u16 = 0,
 
     show_tabs: bool = false,
+    account_x: u16 = 2,
+    account_tags: bool = false,
     sender_x: u16 = 3,
     sender_width: u16 = 0,
     subject_x: u16 = 0,
@@ -48,7 +50,7 @@ pub const Layout = struct {
     flag_x: u16 = 0,
     dot_x: u16 = 1,
 
-    pub fn compute(columns: u16, rows: u16) Layout {
+    pub fn compute(columns: u16, rows: u16, account_tags: bool) Layout {
         var layout: Layout = .{ .columns = columns, .rows = rows };
         layout.too_small = columns < min_columns or rows < min_rows;
         if (layout.too_small) return layout;
@@ -63,7 +65,9 @@ pub const Layout = struct {
         layout.reader_text_width = columns - 2;
         layout.show_tabs = columns >= tab_start + tabs_width() + 1;
 
-        layout.sender_width = @max(10, @min(24, columns / 4));
+        layout.account_tags = account_tags;
+        layout.sender_x = if (account_tags) 5 else 3;
+        layout.sender_width = @max(8, @min(24, columns / 4) - @as(u16, if (account_tags) 2 else 0));
         layout.subject_x = layout.sender_x + layout.sender_width + 1;
         layout.flag_x = columns - 1;
         layout.date_x = layout.flag_x - 1 - layout.date_width;
@@ -126,13 +130,13 @@ pub fn tabs_width() u16 {
 const testing = std.testing;
 
 test "compute marks tiny terminals as too small" {
-    try testing.expect(Layout.compute(39, 40).too_small);
-    try testing.expect(Layout.compute(80, 9).too_small);
-    try testing.expect(!Layout.compute(40, 10).too_small);
+    try testing.expect(Layout.compute(39, 40, false).too_small);
+    try testing.expect(Layout.compute(80, 9, false).too_small);
+    try testing.expect(!Layout.compute(40, 10, false).too_small);
 }
 
 test "compute divides the screen into header, body, and footer" {
-    const layout = Layout.compute(100, 30);
+    const layout = Layout.compute(100, 30, false);
     try testing.expectEqual(@as(u16, 0), layout.header_y);
     try testing.expectEqual(@as(u16, 1), layout.top_rule_y);
     try testing.expectEqual(@as(u16, 2), layout.body_y);
@@ -143,7 +147,7 @@ test "compute divides the screen into header, body, and footer" {
 }
 
 test "compute keeps the list columns inside the screen" {
-    const layout = Layout.compute(80, 24);
+    const layout = Layout.compute(80, 24, false);
     try testing.expectEqual(@as(u16, 3), layout.sender_x);
     try testing.expectEqual(@as(u16, 20), layout.sender_width);
     try testing.expectEqual(@as(u16, 24), layout.subject_x);
@@ -154,16 +158,16 @@ test "compute keeps the list columns inside the screen" {
 }
 
 test "compute hides tabs on narrow terminals and shows them when they fit" {
-    const narrow = Layout.compute(74, 24);
+    const narrow = Layout.compute(74, 24, false);
     try testing.expect(!narrow.show_tabs);
     try testing.expect(narrow.mailbox_at(10) == null);
 
-    const wide = Layout.compute(76, 24);
+    const wide = Layout.compute(76, 24, false);
     try testing.expect(wide.show_tabs);
 }
 
 test "tab geometry puts each count right after its own title" {
-    const layout = Layout.compute(120, 30);
+    const layout = Layout.compute(120, 30, false);
 
     try testing.expectEqual(@as(u16, 8), layout.tab_x(.inbox));
     try testing.expectEqual(@as(u16, 14), layout.tab_count_x(.inbox));
@@ -183,8 +187,20 @@ test "tab geometry puts each count right after its own title" {
     try testing.expect(layout.mailbox_at(tab_start + tabs_width()) == null);
 }
 
+test "account tags shift the sender column right" {
+    const plain = Layout.compute(100, 30, false);
+    try testing.expectEqual(@as(u16, 3), plain.sender_x);
+    try testing.expectEqual(@as(u16, 24), plain.sender_width);
+
+    const tagged = Layout.compute(100, 30, true);
+    try testing.expect(tagged.account_tags);
+    try testing.expectEqual(@as(u16, 5), tagged.sender_x);
+    try testing.expectEqual(@as(u16, 22), tagged.sender_width);
+    try testing.expectEqual(@as(u16, 2), tagged.account_x);
+}
+
 test "reader geometry uses the full screen and leaves room for the body" {
-    const layout = Layout.compute(60, 12);
+    const layout = Layout.compute(60, 12, false);
     try testing.expectEqual(@as(u16, 0), layout.reader_subject_y);
     try testing.expectEqual(@as(u16, 1), layout.reader_meta_y);
     try testing.expectEqual(@as(u16, 2), layout.reader_rule_y);

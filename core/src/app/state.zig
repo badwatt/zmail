@@ -14,9 +14,55 @@ const Message = @import("../domain/message.zig").Message;
 const MessageId = @import("../domain/id.zig").MessageId;
 const Store = @import("../domain/store.zig").Store;
 const Address = @import("../domain/address.zig").Address;
+const AccountId = @import("../domain/id.zig").AccountId;
 const Compose = @import("compose.zig").Compose;
 
 pub const View = enum { list, reader, help, compose };
+
+pub const accounts_max: u8 = 4;
+
+pub const AccountInfo = struct {
+    id: AccountId = .unknown,
+    label: Text(limits.label_max) = .{},
+    address: Address = .{},
+};
+
+/// The accounts the application knows about, in configuration order.
+pub const Accounts = struct {
+    items: [accounts_max]AccountInfo = undefined,
+    len: u8 = 0,
+
+    pub fn add(self: *Accounts, id: AccountId, label: []const u8, address: Address) void {
+        assert(id.is_known());
+        assert(self.len < accounts_max);
+        self.items[self.len] = .{ .id = id, .address = address };
+        self.items[self.len].label.set(label);
+        self.len += 1;
+    }
+
+    pub fn address_for(self: *const Accounts, id: AccountId) ?Address {
+        for (self.items[0..self.len]) |*entry| {
+            if (entry.id == id) return entry.address;
+        }
+        return null;
+    }
+
+    /// The label lives in the array; iterate by reference so the returned slice
+    /// points at it, not at a loop copy.
+    pub fn label_for(self: *const Accounts, id: AccountId) []const u8 {
+        for (self.items[0..self.len]) |*entry| {
+            if (entry.id == id) return entry.label.slice();
+        }
+        return "";
+    }
+
+    pub fn index_of(self: *const Accounts, id: AccountId) ?u8 {
+        for (self.items[0..self.len], 0..) |entry, index| {
+            if (entry.id == id) return @intCast(index);
+        }
+        return null;
+    }
+};
 pub const Mode = enum { normal, search, help_search };
 
 pub const State = struct {
@@ -39,6 +85,7 @@ pub const State = struct {
     list_rows: u16 = 1,
 
     opened: MessageId = .unknown,
+    opened_account: AccountId = .unknown,
     reader_scroll: u32 = 0,
     reader_rows: u16 = 1,
     body_rows: u32 = 0,
@@ -50,6 +97,9 @@ pub const State = struct {
 
     /// The account's own address, used as the sender of composed mail.
     from_address: Address = .{},
+    /// Configured accounts, and the current scope (null = all of them).
+    accounts: Accounts = .{},
+    account_filter: ?AccountId = null,
     compose: Compose = .{},
 
     status: Text(limits.status_max) = .{},
@@ -65,6 +115,9 @@ pub const State = struct {
         while (index < store.len) : (index += 1) {
             const message = store.at_const(index);
             if (message.mailbox != self.mailbox) continue;
+            if (self.account_filter) |filter| {
+                if (message.account != filter) continue;
+            }
             if (!message.matches(self.query.slice())) continue;
             assert(self.visible_len < limits.messages_max);
             self.visible[self.visible_len] = index;
@@ -152,10 +205,10 @@ const testing = std.testing;
 
 fn fill(store: *Store) !void {
     const messages = [_]Message{
-        .{ .id = MessageId.from_int(1), .mailbox = .inbox, .timestamp_unix = 500, .subject = Text(limits.subject_max).init("Design tokens") },
-        .{ .id = MessageId.from_int(2), .mailbox = .sent, .timestamp_unix = 400, .subject = Text(limits.subject_max).init("Re: Design tokens") },
-        .{ .id = MessageId.from_int(3), .mailbox = .inbox, .timestamp_unix = 300, .subject = Text(limits.subject_max).init("Invoice") },
-        .{ .id = MessageId.from_int(4), .mailbox = .inbox, .timestamp_unix = 200, .subject = Text(limits.subject_max).init("Invoice reminder") },
+        .{ .id = MessageId.from_int(1), .account = AccountId.from_int(1), .mailbox = .inbox, .timestamp_unix = 500, .subject = Text(limits.subject_max).init("Design tokens") },
+        .{ .id = MessageId.from_int(2), .account = AccountId.from_int(1), .mailbox = .sent, .timestamp_unix = 400, .subject = Text(limits.subject_max).init("Re: Design tokens") },
+        .{ .id = MessageId.from_int(3), .account = AccountId.from_int(1), .mailbox = .inbox, .timestamp_unix = 300, .subject = Text(limits.subject_max).init("Invoice") },
+        .{ .id = MessageId.from_int(4), .account = AccountId.from_int(1), .mailbox = .inbox, .timestamp_unix = 200, .subject = Text(limits.subject_max).init("Invoice reminder") },
     };
     for (messages) |message| try store.insert(&message);
 }
@@ -217,7 +270,7 @@ test "scroll_into_view keeps the cursor on screen" {
 
     var index: u32 = 1;
     while (index <= 10) : (index += 1) {
-        const message = Message{ .id = MessageId.from_int(index), .timestamp_unix = @intCast(100 + index) };
+        const message = Message{ .id = MessageId.from_int(index), .account = AccountId.from_int(1), .timestamp_unix = @intCast(100 + index) };
         try store.insert(&message);
     }
 
@@ -293,6 +346,43 @@ test "max_reader_scroll never goes negative" {
 
     state.body_rows = 3;
     try testing.expectEqual(@as(u32, 0), state.max_reader_scroll());
+}
+
+test "accounts keep labels and addresses, and filter by id" {
+    var accounts: Accounts = .{};
+    try testing.expectEqual(@as(?u8, null), accounts.index_of(AccountId.from_int(1)));
+    try testing.expectEqualStrings("", accounts.label_for(AccountId.from_int(1)));
+    try testing.expect(accounts.address_for(AccountId.from_int(1)) == null);
+
+    const address = Address.from_parts("Me", "me", "example.com");
+    accounts.add(AccountId.from_int(1), "personal", address);
+    accounts.add(AccountId.from_int(2), "work", .{});
+
+    try testing.expectEqual(@as(u8, 2), accounts.len);
+    try testing.expectEqual(@as(?u8, 1), accounts.index_of(AccountId.from_int(2)));
+    try testing.expectEqualStrings("work", accounts.label_for(AccountId.from_int(2)));
+    try testing.expectEqualStrings("", accounts.label_for(AccountId.from_int(9)));
+    try testing.expectEqualStrings("me", accounts.address_for(AccountId.from_int(1)).?.local.slice());
+    try testing.expect(accounts.address_for(AccountId.from_int(9)) == null);
+}
+
+test "rebuild honours the account filter" {
+    var store = try Store.init(testing.allocator, 8);
+    defer store.deinit(testing.allocator);
+
+    const mine = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(1), .timestamp_unix = 300 };
+    const theirs = Message{ .id = MessageId.from_int(2), .account = AccountId.from_int(2), .timestamp_unix = 200 };
+    try store.insert(&mine);
+    try store.insert(&theirs);
+
+    var state: State = .{};
+    state.rebuild(&store);
+    try testing.expectEqual(@as(u32, 2), state.visible_len);
+
+    state.account_filter = AccountId.from_int(2);
+    state.rebuild(&store);
+    try testing.expectEqual(@as(u32, 1), state.visible_len);
+    try testing.expectEqual(MessageId.from_int(2), state.selected_const(&store).?.id);
 }
 
 test "set_status formats and truncates like every other text" {

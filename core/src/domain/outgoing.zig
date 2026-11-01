@@ -5,8 +5,11 @@ const limits = @import("../limits.zig");
 const Text = @import("text.zig").Text;
 const Address = @import("address.zig").Address;
 const MessageId = @import("id.zig").MessageId;
+const AccountId = @import("id.zig").AccountId;
 
 pub const Outgoing = struct {
+    /// Which account sends this message.
+    account: AccountId = .unknown,
     from: Address = .{},
     to: Address = .{},
     subject: Text(limits.subject_max) = .{},

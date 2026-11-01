@@ -22,8 +22,8 @@ decision below serves one of those, in that order.
 ## Run it
 
 ```sh
-zig build run        # opens the demo inbox: no account, no network, no config
-amail --live         # connects to the account in the config file
+zig build run        # live by default: the config, or the setup assistant
+amail --demo         # the built-in demo inbox: no account, no network
 ```
 
 `q` quits from the list, `Ctrl+Q`/`Ctrl+C` quit from anywhere, and `?` shows
@@ -31,32 +31,43 @@ every key (`/` inside the help filters it).
 
 ### Live mode
 
-The first `amail --live` with no config starts a setup assistant: it asks for
-the address, derives the IMAP/SMTP servers, collects the password, and writes
-`~/.config/amail/config` plus a `0600` credential file next to it. Later runs
-read both; `AMAIL_PASSWORD` overrides the file.
+The first `amail` with no config starts a setup assistant: it asks for the
+address, derives the IMAP/SMTP servers, collects the password, and writes
+`~/.config/amail/config` plus `~/.config/amail/credentials/<label>`, both
+`0600`. Later runs read both; `AMAIL_PASSWORD` overrides the file for a
+single-account config.
 
-The config file (or `--config PATH`):
+`~/.config/amail/config` (or `--config PATH`) supports several accounts, shown
+in one unified inbox:
 
 ```ini
+[account work]
 address     = alice@example.com
-label       = work
 username    = alice
 imap_host   = imap.example.com
 imap_port   = 993
 imap_security = tls
 
-# Optional. Without SMTP, reading works and compose reports that it cannot send.
+# Optional. Without SMTP, reading works and compose reports it cannot send.
 smtp_host   = smtp.example.com
 smtp_port   = 465
 smtp_security = tls
+
+[account personal]
+address     = alice@home.example
+username    = alice
+imap_host   = imap.home.example
+imap_port   = 993
+imap_security = tls
 ```
 
-The password is **never** in the file; it is read from `AMAIL_PASSWORD`:
+A file with no sections is one account labelled `account`, so older configs
+keep working. Press `a` to cycle the scope (all accounts → one → next → all);
+the list is unified by default and each row carries its account initial.
 
-```sh
-AMAIL_PASSWORD='...' amail --live
-```
+The password is **never** in the config. It lives in
+`credentials/<label>` (mode `0600`), and `AMAIL_PASSWORD` overrides it when
+there is only one account.
 
 Only implicit TLS is supported today (IMAP 993, SMTP 465). Certificate
 verification is mandatory and uses the system CA bundle. Sending authenticates
@@ -92,7 +103,9 @@ development tool, not a dependency).
 
 Live IMAP works: TLS transport with mandatory certificate verification, the
 protocol layer (framing with literals, commands, responses with ENVELOPE),
-the client loop, the `Mail` adapter, config parsing, and `--live`. The protocol
+the client loop, the `Mail` adapter, multi-account config, and the setup
+assistant. Envelopes are cached under `~/.cache/amail`, so a restart and a
+mailbox switch do not wait for the network; `R` refreshes on demand. The protocol
 and adapter are tested against a scripted server; the TLS transport is verified
 against a real IMAP server (a refused login is the expected end-to-end result
 for a bogus password). STARTTLS and a real secret store are next.

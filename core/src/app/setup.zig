@@ -198,11 +198,40 @@ pub const Setup = struct {
         self.done = true;
     }
 
+    /// Label for the new account: the local part when it is a valid label.
+    pub fn account_label(self: *const Setup, buffer: []u8) []const u8 {
+        const local = self.address_local();
+        var length: usize = 0;
+        for (local) |byte| {
+            if (length == buffer.len) break;
+            const clean: u8 = if (std.ascii.isAlphanumeric(byte)) std.ascii.toLower(byte) else switch (byte) {
+                '-', '_' => byte,
+                else => '-',
+            };
+            buffer[length] = clean;
+            length += 1;
+        }
+        if (length == 0) {
+            @memcpy(buffer[0.."account".len], "account");
+            return buffer[0.."account".len];
+        }
+        return buffer[0..length];
+    }
+
+    fn address_local(self: *const Setup) []const u8 {
+        const raw = self.address.slice();
+        const at = std.mem.indexOfScalar(u8, raw, '@') orelse return raw;
+        return raw[0..at];
+    }
+
     /// Renders the file the caller should write. Contains no password.
     pub fn config_text(self: *const Setup, buffer: []u8) []const u8 {
+        var label_buffer: [limits.label_max]u8 = undefined;
+        const label = self.account_label(&label_buffer);
         var writer = std.Io.Writer.fixed(buffer);
         writer.print(
             \\# amail account. Created by the setup assistant.
+            \\[account {s}]
             \\address = {s}
             \\username = {s}
             \\imap_host = {s}
@@ -210,6 +239,7 @@ pub const Setup = struct {
             \\imap_security = tls
             \\
         , .{
+            label,
             self.address.slice(),
             self.username.slice(),
             self.imap_host.slice(),
@@ -303,6 +333,7 @@ test "a full run produces the config text and reaches review" {
 
     var buffer: [1024]u8 = undefined;
     const text = setup.config_text(&buffer);
+    try testing.expect(std.mem.indexOf(u8, text, "[account alice]") != null);
     try testing.expect(std.mem.indexOf(u8, text, "address = alice@example.com") != null);
     try testing.expect(std.mem.indexOf(u8, text, "imap_host = imap.example.com") != null);
     try testing.expect(std.mem.indexOf(u8, text, "smtp_host = smtp.example.com") != null);
@@ -456,6 +487,23 @@ test "the review step re-parses the generated config" {
     setup.next();
     try testing.expect(!setup.done);
     try testing.expect(!setup.problem.is_empty());
+}
+
+test "the account label comes from the address local part, sanitized" {
+    var setup = Setup.init();
+    defer setup.deinit();
+    var buffer: [limits.label_max]u8 = undefined;
+
+    try testing.expectEqualStrings("account", setup.account_label(&buffer));
+    setup.address.set("Alice.Smith+tag@example.com");
+    try testing.expectEqualStrings("alice-smith-tag", setup.account_label(&buffer));
+
+    setup.address.set("@example.com");
+    try testing.expectEqualStrings("account", setup.account_label(&buffer));
+
+    var tiny: [4]u8 = undefined;
+    setup.address.set("alice@example.com");
+    try testing.expectEqualStrings("alic", setup.account_label(&tiny));
 }
 
 test "a tiny buffer degrades to empty rather than corrupt output" {

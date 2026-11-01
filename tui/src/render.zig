@@ -35,7 +35,7 @@ pub const Inputs = struct {
 
 pub fn frame(inputs: Inputs, out: *Screen) void {
     out.resize(inputs.columns, inputs.rows);
-    const lay = layout_mod.Layout.compute(out.columns, out.rows);
+    const lay = layout_mod.Layout.compute(out.columns, out.rows, inputs.state.accounts.len > 1);
     if (lay.too_small) {
         render_too_small(inputs, out);
         return;
@@ -97,13 +97,21 @@ fn render_tabs(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         _ = out.put_text(x, lay.header_y, mailbox.title(), layout_mod.title_width(mailbox), title_style);
         render_unread_count(inputs, lay.header_y, lay.tab_count_x(mailbox), mailbox, out);
     }
+
+    if (lay.columns >= 88) {
+        const scope = if (inputs.state.account_filter) |filter|
+            inputs.state.accounts.label_for(filter)
+        else
+            "all accounts";
+        if (scope.len > 0) put_right(out, lay.columns -| 2, lay.header_y, scope, inputs.theme.dim);
+    }
 }
 
 /// The count sits one space after its mailbox title, left-aligned in the
 /// reserved count area. "Inbox 3" reads as one thing; a right-aligned count
 /// floating between tabs reads as part of the next one.
 fn render_unread_count(inputs: Inputs, y: u16, x: u16, mailbox: Mailbox, out: *Screen) void {
-    const unread = inputs.store.unread_in(mailbox);
+    const unread = inputs.store.unread_in(mailbox, inputs.state.account_filter);
     if (unread == 0) return;
 
     var buffer: [4]u8 = undefined;
@@ -163,6 +171,13 @@ fn render_row(inputs: Inputs, lay: layout_mod.Layout, message: *const core.messa
         out.put(lay.dot_x, y, '●', selected_style(theme.accent, theme, selected));
     }
 
+    if (lay.account_tags) {
+        const label = inputs.state.accounts.label_for(message.account);
+        if (label.len > 0) {
+            out.put(lay.account_x, y, std.ascii.toUpper(label[0]), selected_style(theme.dim, theme, selected));
+        }
+    }
+
     const sender_style = if (unread) theme.text else theme.dim;
     _ = out.put_text(
         lay.sender_x,
@@ -212,15 +227,34 @@ fn render_empty(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     }
 }
 
-const compose_rows = 3;
+const compose_rows = 4;
 
 fn render_compose(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const state = inputs.state;
-    render_compose_field(inputs, lay, 0, "To", state.compose.to.slice(), .to, out);
-    render_compose_field(inputs, lay, 1, "Subject", state.compose.subject.slice(), .subject, out);
-    out.hline(0, 2, lay.columns, '─', inputs.theme.border);
+    render_compose_from(inputs, lay, out);
+    render_compose_field(inputs, lay, 1, "To", state.compose.to.slice(), .to, out);
+    render_compose_field(inputs, lay, 2, "Subject", state.compose.subject.slice(), .subject, out);
+    out.hline(0, 3, lay.columns, '─', inputs.theme.border);
     render_compose_body(inputs, lay, out);
     out.hline(0, lay.bottom_rule_y, lay.columns, '─', inputs.theme.border);
+}
+
+fn render_compose_from(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    _ = out.put_text(1, 0, "From", 8, inputs.theme.dim);
+    var buffer: [200]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    const label = inputs.state.accounts.label_for(inputs.state.compose.account);
+    const address = inputs.state.compose.from;
+    if (address.local.is_empty()) {
+        writer.print("{s}", .{label}) catch {};
+    } else {
+        writer.print("{s} <{s}@{s}>", .{
+            label,
+            address.local.slice(),
+            address.domain.slice(),
+        }) catch {};
+    }
+    _ = out.put_text(10, 0, writer.buffered(), lay.columns -| 12, inputs.theme.dim);
 }
 
 fn render_compose_field(
@@ -292,7 +326,10 @@ fn render_compose_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) voi
 }
 
 fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
-    const message = inputs.store.get_const(inputs.state.opened) orelse {
+    const message = (if (inputs.state.opened_account.is_known())
+        inputs.store.get_const(inputs.state.opened_account, inputs.state.opened)
+    else
+        null) orelse {
         put_centered(out, lay.reader_body_y + lay.reader_rows / 2, "Message unavailable", inputs.theme.alert);
         out.hline(0, lay.bottom_rule_y, lay.columns, '─', inputs.theme.border);
         return;
@@ -606,6 +643,7 @@ const MessageId = core.id.MessageId;
 fn message_with(id: u64, from: []const u8, subject: []const u8, unread: bool, flagged: bool, timestamp_unix: i64) !core.message.Message {
     var message = core.message.Message{
         .id = MessageId.from_int(id),
+        .account = core.id.AccountId.from_int(1),
         .from = try core.address.Address.init(from),
         .timestamp_unix = timestamp_unix,
         .size_bytes = 4096,
@@ -688,6 +726,18 @@ test "frame marks unread rows with a dot and flagged rows with a star" {
     try testing.expectEqual(@as(u21, '●'), out.cells[2][1].ch);
     try testing.expectEqual(@as(u21, ' '), out.cells[4][1].ch);
     try testing.expectEqual(@as(u21, '★'), out.cells[3][99].ch);
+}
+
+test "with several accounts, each row carries its account tag" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "personal", .{});
+    f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{});
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+    try testing.expectEqual(@as(u21, 'P'), out.cells[2][2].ch);
+    try row_contains(&out, 0, "all accounts");
 }
 
 test "frame paints the selected row with the selection background" {
@@ -846,15 +896,15 @@ test "the composer shows placeholders for empty fields" {
 
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
-    try row_contains(&out, 0, "someone@example.com");
-    try row_contains(&out, 1, "(no subject)");
-    try row_contains(&out, 3, "Write your message.");
+    try row_contains(&out, 1, "someone@example.com");
+    try row_contains(&out, 2, "(no subject)");
+    try row_contains(&out, 4, "Write your message.");
 
     // In the body, the cursor takes the first cell and the hint moves right.
     f.state.compose.field = .body;
     frame(f.inputs(100, 24), &out);
-    try testing.expect(out.cells[3][1].style.attrs.reverse);
-    try row_contains(&out, 3, "Write your message.");
+    try testing.expect(out.cells[4][1].style.attrs.reverse);
+    try row_contains(&out, 4, "Write your message.");
 }
 
 test "frame renders the compose view: fields, rule, and body" {
@@ -871,11 +921,12 @@ test "frame renders the compose view: fields, rule, and body" {
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
 
-    try row_contains(&out, 0, "To");
-    try row_contains(&out, 0, "alice@example.com");
-    try row_contains(&out, 1, "Subject");
-    try row_contains(&out, 1, "Re: design tokens");
-    try row_contains(&out, 3, "hi");
+    try row_contains(&out, 0, "From");
+    try row_contains(&out, 1, "To");
+    try row_contains(&out, 1, "alice@example.com");
+    try row_contains(&out, 2, "Subject");
+    try row_contains(&out, 2, "Re: design tokens");
+    try row_contains(&out, 4, "hi");
     try row_contains(&out, 23, "Ctrl+S");
     try row_contains(&out, 23, "send");
 }
@@ -889,12 +940,12 @@ test "the active compose field shows a cursor at its end" {
 
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
-    try testing.expect(out.cells[0][12].style.attrs.reverse);
+    try testing.expect(out.cells[1][12].style.attrs.reverse);
 
     f.state.compose.next_field();
     frame(f.inputs(100, 24), &out);
-    try testing.expect(!out.cells[0][12].style.attrs.reverse);
-    try testing.expect(out.cells[1][10].style.attrs.reverse);
+    try testing.expect(!out.cells[1][12].style.attrs.reverse);
+    try testing.expect(out.cells[2][10].style.attrs.reverse);
 }
 
 test "the compose body scrolls to keep the end visible and puts the cursor there" {
@@ -913,7 +964,7 @@ test "the compose body scrolls to keep the end visible and puts the cursor there
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
 
-    // 41 lines, 18 visible: the last body row holds the "z" line.
+    // 41 lines: the last visible body row holds the "z" line.
     try row_contains(&out, 20, "z");
     try testing.expect(out.cells[20][2].style.attrs.reverse);
 }
@@ -929,7 +980,7 @@ test "the help overlay can open above compose" {
 
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
-    try row_contains(&out, 0, "alice@example.com");
+    try row_contains(&out, 1, "alice");
     try row_contains(&out, 1, "Keys");
 }
 

@@ -109,7 +109,7 @@ test "decide: no arguments launches the client" {
     var out: [1024]u8 = undefined;
     var err: [256]u8 = undefined;
     const outcome = decide(&[_][]const u8{"amail"}, &out, &err);
-    try testing.expectEqual(cli.Mode.demo, outcome.launch.mode);
+    try testing.expectEqual(cli.Mode.live, outcome.launch.mode);
 }
 
 fn stub_launch(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) anyerror!u8 {
@@ -129,15 +129,25 @@ test "main_with routes every outcome, including launch" {
     var out_buffer: [1024]u8 = undefined;
     var err_buffer: [256]u8 = undefined;
 
-    const launch_args = [_][*:0]const u8{"amail"};
+    // No arguments means live, which is the default.
+    const live_args = [_][*:0]const u8{"amail"};
     var out = std.Io.Writer.fixed(&out_buffer);
     var err = std.Io.Writer.fixed(&err_buffer);
     const launched = try main_with(.{
         .gpa = testing.allocator,
         .io = io,
-        .args = .{ .vector = &launch_args },
+        .args = .{ .vector = &live_args },
     }, .{ .launch = stub_launch }, &out, &err);
-    try testing.expectEqual(@as(u8, 7), launched);
+    try testing.expectEqual(@as(u8, 8), launched);
+
+    const demo_args = [_][*:0]const u8{ "amail", "--demo" };
+    out = std.Io.Writer.fixed(&out_buffer);
+    err = std.Io.Writer.fixed(&err_buffer);
+    try testing.expectEqual(@as(u8, 7), try main_with(.{
+        .gpa = testing.allocator,
+        .io = io,
+        .args = .{ .vector = &demo_args },
+    }, .{ .launch = stub_launch }, &out, &err));
 
     const version_args = [_][*:0]const u8{ "amail", "--version" };
     out = std.Io.Writer.fixed(&out_buffer);

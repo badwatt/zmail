@@ -11,13 +11,15 @@ const limits = @import("../limits.zig");
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
 const MessageId = @import("../domain/id.zig").MessageId;
 const Flags = @import("../domain/message.zig").Flags;
+const AccountId = @import("../domain/id.zig").AccountId;
 const Outgoing = @import("../domain/outgoing.zig").Outgoing;
 
 pub const Effect = union(enum) {
-    sync_flags: struct { id: MessageId, flags: Flags },
-    move_message: struct { id: MessageId, to: Mailbox },
-    fetch_body: MessageId,
-    refresh: Mailbox,
+    sync_flags: struct { account: AccountId, id: MessageId, flags: Flags },
+    move_message: struct { account: AccountId, id: MessageId, to: Mailbox },
+    fetch_body: struct { account: AccountId, id: MessageId },
+    /// Null account means every account (the unified view).
+    refresh: struct { account: ?AccountId, mailbox: Mailbox, force: bool = false },
     /// Hand the message to the outbox. The body is borrowed from compose state.
     send: Outgoing,
 };
@@ -54,13 +56,14 @@ test "Effects: starts empty and grows in order" {
     try testing.expectEqual(@as(usize, 0), effects.slice().len);
 
     const id = MessageId.from_int(7);
-    effects.add(.{ .fetch_body = id });
-    effects.add(.{ .refresh = .inbox });
+    const account = AccountId.from_int(1);
+    effects.add(.{ .fetch_body = .{ .account = account, .id = id } });
+    effects.add(.{ .refresh = .{ .account = account, .mailbox = .inbox } });
 
     try testing.expect(!effects.is_empty());
     try testing.expectEqual(@as(usize, 2), effects.slice().len);
-    try testing.expectEqual(id, effects.slice()[0].fetch_body);
-    try testing.expectEqual(Mailbox.inbox, effects.slice()[1].refresh);
+    try testing.expectEqual(id, effects.slice()[0].fetch_body.id);
+    try testing.expectEqual(Mailbox.inbox, effects.slice()[1].refresh.mailbox);
 }
 
 test "Effects: fills to the declared bound" {
@@ -68,7 +71,7 @@ test "Effects: fills to the declared bound" {
     const id = MessageId.from_int(1);
     var index: u32 = 0;
     while (index < limits.actions_max) : (index += 1) {
-        effects.add(.{ .fetch_body = id });
+        effects.add(.{ .fetch_body = .{ .account = AccountId.from_int(1), .id = id } });
     }
     try testing.expectEqual(limits.actions_max, effects.len);
 }

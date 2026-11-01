@@ -1,9 +1,13 @@
-//! Account configuration: a strict `key = value` file.
+//! Account configuration: a strict `key = value` file with optional
+//! `[account <label>]` sections.
 //!
-//! Strict on purpose. An unknown key is an error (a typo must not silently
-//! disable TLS), transport security has no default (it must be stated), and
-//! passwords are refused outright: they belong in the secret store, never in a
-//! file that gets committed, shared, or backed up in the clear.
+//! Strict on purpose. An unknown key or section is an error (a typo must not
+//! silently disable TLS), transport security has no default, and passwords are
+//! refused outright: they belong in the secret store, never in a file that gets
+//! committed, shared, or backed up in the clear.
+//!
+//! A file with no sections is one account labelled "account", so older configs
+//! keep working.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -13,41 +17,67 @@ const Text = @import("domain/text.zig").Text;
 const Address = @import("domain/address.zig").Address;
 const account = @import("domain/account.zig");
 
-pub const Config = struct {
+pub const max_accounts: u8 = 4;
+
+pub const Entry = struct {
     label: Text(limits.label_max) = .{},
-    address: Address = .{},
-    username: Text(limits.username_max) = .{},
-    imap: account.Server = .{},
-    /// Optional: without SMTP the client can read but not send.
+    account: account.Account = .{},
+    /// Optional: an account without SMTP can read but not send.
     smtp: ?account.Server = null,
     policy: account.Policy = .{},
 
-    pub fn validate(self: *const Config) account.RuleError!void {
-        try account.validate_server(&self.imap, self.policy);
+    pub fn validate(self: *const Entry) account.RuleError!void {
+        try account.validate_server(&self.account.imap, self.policy);
         if (self.smtp) |smtp| try account.validate_server(&smtp, self.policy);
+    }
+};
+
+pub const File = struct {
+    entries: [max_accounts]Entry = undefined,
+    len: u8 = 0,
+
+    pub fn items(self: *const File) []const Entry {
+        assert(self.len <= max_accounts);
+        return self.entries[0..self.len];
+    }
+
+    pub fn validate(self: *const File) account.RuleError!void {
+        for (self.items()) |*entry| try entry.validate();
     }
 };
 
 pub const Error = error{
     MissingKey,
     UnknownKey,
+    UnknownSection,
     MissingEquals,
     InvalidValue,
     PasswordInConfig,
+    InvalidLabel,
+    DuplicateLabel,
+    TooManyAccounts,
+    MixedFormat,
     TooLong,
 };
 
+const Pending = struct {
+    seen_address: bool = false,
+    seen_host: bool = false,
+    seen_port: bool = false,
+    seen_security: bool = false,
+    seen_username: bool = false,
+    seen_smtp_host: bool = false,
+    seen_smtp_port: bool = false,
+    seen_smtp_security: bool = false,
+};
+
 /// Parses a config file. Returns the first problem; nothing is sanitized away.
-pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError)!Config {
-    var config = Config{};
-    var seen_address = false;
-    var seen_host = false;
-    var seen_port = false;
-    var seen_security = false;
-    var seen_username = false;
-    var seen_smtp_host = false;
-    var seen_smtp_port = false;
-    var seen_smtp_security = false;
+pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError)!File {
+    var file = File{};
+    var pending: [max_accounts]Pending = @splat(.{});
+    var current: ?u8 = null;
+    var saw_section = false;
+    var implicit_created = false;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
@@ -55,39 +85,79 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
         if (line.len == 0) continue;
         if (line[0] == '#') continue;
 
+        if (line[0] == '[') {
+            if (implicit_created) return error.MixedFormat;
+            const close = std.mem.indexOfScalar(u8, line, ']') orelse return error.UnknownSection;
+            if (std.mem.trim(u8, line[close + 1 ..], " \t").len != 0) return error.UnknownSection;
+
+            const inside = std.mem.trim(u8, line[1..close], " \t");
+            if (std.mem.eql(u8, inside, "account")) return error.InvalidLabel;
+            if (!std.mem.startsWith(u8, inside, "account ")) return error.UnknownSection;
+            const label = std.mem.trim(u8, inside["account ".len..], " \t");
+            if (!valid_label(label)) return error.InvalidLabel;
+            if (file.len == max_accounts) return error.TooManyAccounts;
+            for (file.items()) |entry| {
+                if (std.mem.eql(u8, entry.label.slice(), label)) return error.DuplicateLabel;
+            }
+
+            file.entries[file.len] = .{};
+            file.entries[file.len].label.set(label);
+            current = file.len;
+            file.len += 1;
+            saw_section = true;
+            continue;
+        }
+
         const equals = std.mem.indexOfScalar(u8, line, '=') orelse return error.MissingEquals;
         const key = std.mem.trim(u8, line[0..equals], " \t");
         const value = std.mem.trim(u8, line[equals + 1 ..], " \t");
         if (key.len == 0 or value.len == 0) return error.InvalidValue;
 
+        if (current == null) {
+            // Legacy flat file: create the single implicit account.
+            if (saw_section) return error.MissingKey;
+            if (file.len == max_accounts) return error.TooManyAccounts;
+            file.entries[0] = .{};
+            file.entries[0].label.set("account");
+            current = 0;
+            file.len = 1;
+            implicit_created = true;
+        }
+
+        const index = current.?;
+        assert(index < file.len);
+        const entry = &file.entries[index];
+        const pending_entry = &pending[index];
+
         if (std.mem.eql(u8, key, "address")) {
-            config.address = try Address.init(value);
-            seen_address = true;
+            entry.account.address = try Address.init(value);
+            pending_entry.seen_address = true;
         } else if (std.mem.eql(u8, key, "label")) {
-            config.label.set(value);
+            if (!valid_label(value)) return error.InvalidLabel;
+            entry.label.set(value);
         } else if (std.mem.eql(u8, key, "username")) {
-            config.username.set(value);
-            seen_username = true;
+            entry.account.username.set(value);
+            pending_entry.seen_username = true;
         } else if (std.mem.eql(u8, key, "imap_host")) {
-            config.imap.host.set(value);
-            seen_host = true;
+            entry.account.imap.host.set(value);
+            pending_entry.seen_host = true;
         } else if (std.mem.eql(u8, key, "imap_port")) {
-            config.imap.port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue;
-            seen_port = true;
+            entry.account.imap.port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue;
+            pending_entry.seen_port = true;
         } else if (std.mem.eql(u8, key, "imap_security")) {
-            config.imap.security = parseSecurity(value) orelse return error.InvalidValue;
-            seen_security = true;
+            entry.account.imap.security = parse_security(value) orelse return error.InvalidValue;
+            pending_entry.seen_security = true;
         } else if (std.mem.eql(u8, key, "smtp_host")) {
-            smtp_server(&config).host.set(value);
-            seen_smtp_host = true;
+            smtp_server(entry).host.set(value);
+            pending_entry.seen_smtp_host = true;
         } else if (std.mem.eql(u8, key, "smtp_port")) {
-            smtp_server(&config).port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue;
-            seen_smtp_port = true;
+            smtp_server(entry).port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue;
+            pending_entry.seen_smtp_port = true;
         } else if (std.mem.eql(u8, key, "smtp_security")) {
-            smtp_server(&config).security = parseSecurity(value) orelse return error.InvalidValue;
-            seen_smtp_security = true;
+            smtp_server(entry).security = parse_security(value) orelse return error.InvalidValue;
+            pending_entry.seen_smtp_security = true;
         } else if (std.mem.eql(u8, key, "allow_plaintext")) {
-            config.policy.allow_plaintext = parseBool(value) orelse return error.InvalidValue;
+            entry.policy.allow_plaintext = parse_bool(value) orelse return error.InvalidValue;
         } else if (std.mem.eql(u8, key, "password")) {
             // Refused by name so the error is actionable.
             return error.PasswordInConfig;
@@ -96,36 +166,50 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
         }
     }
 
-    if (!seen_address) return error.MissingKey;
-    if (!seen_host) return error.MissingKey;
-    if (!seen_port) return error.MissingKey;
-    if (!seen_security) return error.MissingKey;
-    if (!seen_username) return error.MissingKey;
+    if (file.len == 0) return error.MissingKey;
 
-    const smtp_seen = @as(u8, @intFromBool(seen_smtp_host)) +
-        @as(u8, @intFromBool(seen_smtp_port)) +
-        @as(u8, @intFromBool(seen_smtp_security));
-    if (smtp_seen != 0 and smtp_seen != 3) return error.MissingKey;
+    for (pending[0..file.len]) |entry| {
+        if (!entry.seen_address) return error.MissingKey;
+        if (!entry.seen_host) return error.MissingKey;
+        if (!entry.seen_port) return error.MissingKey;
+        if (!entry.seen_security) return error.MissingKey;
+        if (!entry.seen_username) return error.MissingKey;
 
-    if (config.label.is_empty()) config.label.set("account");
+        const smtp_seen = @as(u8, @intFromBool(entry.seen_smtp_host)) +
+            @as(u8, @intFromBool(entry.seen_smtp_port)) +
+            @as(u8, @intFromBool(entry.seen_smtp_security));
+        if (smtp_seen != 0 and smtp_seen != 3) return error.MissingKey;
+    }
 
-    try config.validate();
-    return config;
+    try file.validate();
+    return file;
 }
 
-fn smtp_server(config: *Config) *account.Server {
-    if (config.smtp == null) config.smtp = .{};
-    return &config.smtp.?;
+fn smtp_server(entry: *Entry) *account.Server {
+    if (entry.smtp == null) entry.smtp = .{};
+    return &entry.smtp.?;
 }
 
-fn parseSecurity(value: []const u8) ?account.Security {
+fn valid_label(label: []const u8) bool {
+    if (label.len == 0 or label.len > limits.label_max) return false;
+    for (label) |byte| {
+        if (std.ascii.isAlphanumeric(byte)) continue;
+        switch (byte) {
+            '-', '_' => continue,
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn parse_security(value: []const u8) ?account.Security {
     if (std.mem.eql(u8, value, "tls")) return .tls;
     if (std.mem.eql(u8, value, "starttls")) return .starttls;
     if (std.mem.eql(u8, value, "plain")) return .plain;
     return null;
 }
 
-fn parseBool(value: []const u8) ?bool {
+fn parse_bool(value: []const u8) ?bool {
     if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "1")) return true;
     if (std.mem.eql(u8, value, "false") or std.mem.eql(u8, value, "0")) return false;
     return null;
@@ -137,10 +221,8 @@ fn parseBool(value: []const u8) ?bool {
 
 const testing = std.testing;
 
-const full_config =
-    \\# amail account
+const minimal =
     \\address = alice@example.com
-    \\label = work
     \\username = alice
     \\imap_host = imap.example.com
     \\imap_port = 993
@@ -148,170 +230,135 @@ const full_config =
     \\
 ;
 
-test "a complete config parses into an account" {
-    const config = try parse(full_config);
-    var addr_buffer: [limits.address_max]u8 = undefined;
-    try testing.expectEqualStrings("alice@example.com", config.address.addr_spec(&addr_buffer));
-    try testing.expectEqualStrings("work", config.label.slice());
-    try testing.expectEqualStrings("alice", config.username.slice());
-    try testing.expectEqualStrings("imap.example.com", config.imap.host.slice());
-    try testing.expectEqual(@as(u16, 993), config.imap.port);
-    try testing.expectEqual(account.Security.tls, config.imap.security);
-    try testing.expect(!config.policy.allow_plaintext);
-    try config.validate();
+test "a flat file is one account labelled account" {
+    const file = try parse(minimal);
+    try testing.expectEqual(@as(u8, 1), file.len);
+    const entry = file.items()[0];
+    try testing.expectEqualStrings("account", entry.label.slice());
+    var buffer: [limits.address_max]u8 = undefined;
+    try testing.expectEqualStrings("alice@example.com", entry.account.address.addr_spec(&buffer));
+    try testing.expectEqual(@as(u16, 993), entry.account.imap.port);
+    try testing.expect(entry.smtp == null);
 }
 
-test "comments, blank lines, and surrounding whitespace are ignored" {
+test "sections describe several accounts" {
     const text =
+        \\[account work]
+        \\address = alice@example.com
+        \\username = alice
+        \\imap_host = imap.example.com
+        \\imap_port = 993
+        \\imap_security = tls
+        \\smtp_host = smtp.example.com
+        \\smtp_port = 465
+        \\smtp_security = tls
         \\
-        \\   # a comment
+        \\[account personal]
+        \\address = alice@home.example
+        \\username = alice
+        \\imap_host = imap.home.example
+        \\imap_port = 993
+        \\imap_security = tls
+    ;
+    const file = try parse(text);
+    try testing.expectEqual(@as(u8, 2), file.len);
+    try testing.expectEqualStrings("work", file.items()[0].label.slice());
+    try testing.expect(file.items()[0].smtp != null);
+    try testing.expectEqualStrings("personal", file.items()[1].label.slice());
+    try testing.expect(file.items()[1].smtp == null);
+    try file.validate();
+}
+
+test "comments, blank lines, and whitespace are ignored" {
+    const text =
+        \\# amail
+        \\
+        \\[account  work ]
         \\  address   =   alice@example.com
-        \\
-        \\# another
         \\username=alice
         \\imap_host = imap.example.com
         \\imap_port = 143
         \\imap_security = starttls
         \\
     ;
-    const config = try parse(text);
-    try testing.expectEqual(@as(u16, 143), config.imap.port);
-    try testing.expectEqual(account.Security.starttls, config.imap.security);
+    const file = try parse(text);
+    try testing.expectEqualStrings("work", file.items()[0].label.slice());
+    try testing.expectEqual(account.Security.starttls, file.items()[0].account.imap.security);
 }
 
-test "label defaults to account and allow_plaintext is parsed" {
-    const text =
-        \\address = alice@example.com
-        \\username = alice
-        \\imap_host = 127.0.0.1
-        \\imap_port = 1143
-        \\imap_security = plain
-        \\allow_plaintext = true
-    ;
-    const config = try parse(text);
-    try testing.expectEqualStrings("account", config.label.slice());
-    try testing.expect(config.policy.allow_plaintext);
-    try config.validate();
+test "labels must be valid and unique" {
+    try testing.expectError(error.InvalidLabel, parse("[account bad label]\n" ++ minimal));
+    try testing.expectError(error.InvalidLabel, parse("[account ]\n" ++ minimal));
+    try testing.expectError(error.InvalidLabel, parse("[account]\n" ++ minimal));
+    try testing.expectError(error.DuplicateLabel, parse("[account work]\n" ++ minimal ++ "[account work]\n" ++ minimal));
+    try testing.expectError(error.UnknownSection, parse("[section work]\n" ++ minimal));
 }
 
-test "plaintext is refused without an explicit opt-in" {
-    const text =
+test "unknown sections and mixed formats are errors" {
+    try testing.expectError(error.UnknownSection, parse("[global]\n"));
+    try testing.expectError(error.UnknownSection, parse("[account work] trailing\n" ++ minimal));
+    try testing.expectError(error.MixedFormat, parse(minimal ++ "\n[account work]\n" ++ minimal));
+}
+
+test "too many accounts are refused" {
+    var text: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&text);
+    var index: u8 = 0;
+    while (index < max_accounts + 1) : (index += 1) {
+        writer.print("[account a{d}]\n", .{index}) catch unreachable;
+        writer.writeAll(minimal) catch unreachable;
+        writer.writeAll("\n") catch unreachable;
+    }
+    try testing.expectError(error.TooManyAccounts, parse(writer.buffered()));
+}
+
+test "a section without the required keys is refused" {
+    try testing.expectError(error.MissingKey, parse("[account work]\naddress = alice@example.com\n"));
+}
+
+test "an empty file is refused" {
+    try testing.expectError(error.MissingKey, parse(""));
+    try testing.expectError(error.MissingKey, parse("# only a comment\n"));
+}
+
+test "a partial SMTP group is refused, a complete one is accepted" {
+    try testing.expectError(error.MissingKey, parse(minimal ++ "smtp_host = smtp.example.com\n"));
+    const file = try parse(minimal ++
+        \\smtp_host = smtp.example.com
+        \\smtp_port = 465
+        \\smtp_security = tls
+    );
+    try testing.expectEqual(@as(u16, 465), file.items()[0].smtp.?.port);
+}
+
+test "a password in the config is refused by name" {
+    try testing.expectError(error.PasswordInConfig, parse(minimal ++ "password = hunter2\n"));
+}
+
+test "unknown keys, malformed lines, and bad values are refused" {
+    try testing.expectError(error.UnknownKey, parse(minimal ++ "imap_tls = yes\n"));
+    try testing.expectError(error.MissingEquals, parse("address alice@example.com\n"));
+    try testing.expectError(error.InvalidValue, parse(minimal ++ "imap_port = 99999\n"));
+    try testing.expectError(error.InvalidValue, parse(minimal ++ "imap_security = maybe\n"));
+    try testing.expectError(error.InvalidValue, parse(minimal ++ "allow_plaintext = yes\n"));
+    try testing.expectError(error.InvalidValue, parse("= x\n"));
+}
+
+test "an invalid address is reported by the address parser" {
+    try testing.expectError(error.MissingAt, parse("address = not-an-address\nusername = a\nimap_host = h.example\nimap_port = 993\nimap_security = tls\n"));
+}
+
+test "plaintext is refused without an explicit opt-in, per account" {
+    try testing.expectError(error.PlaintextForbidden, parse(
         \\address = alice@example.com
         \\username = alice
         \\imap_host = imap.example.com
         \\imap_port = 143
         \\imap_security = plain
-    ;
-    try testing.expectError(error.PlaintextForbidden, parse(text));
-}
-
-test "SMTP is optional, but a partial SMTP group is an error" {
-    const with_smtp =
-        \\address = alice@example.com
-        \\username = alice
-        \\imap_host = imap.example.com
-        \\imap_port = 993
-        \\imap_security = tls
-        \\smtp_host = smtp.example.com
-        \\smtp_port = 465
-        \\smtp_security = tls
-    ;
-    const config = try parse(with_smtp);
-    try testing.expectEqualStrings("smtp.example.com", config.smtp.?.host.slice());
-    try testing.expectEqual(@as(u16, 465), config.smtp.?.port);
-    try testing.expectEqual(account.Security.tls, config.smtp.?.security);
-
-    try testing.expectError(error.MissingKey, parse(
-        \\address = alice@example.com
-        \\username = alice
-        \\imap_host = imap.example.com
-        \\imap_port = 993
-        \\imap_security = tls
-        \\smtp_host = smtp.example.com
     ));
 
-    try testing.expectError(error.InvalidValue, parse(
-        \\address = alice@example.com
-        \\username = alice
-        \\imap_host = imap.example.com
-        \\imap_port = 993
-        \\imap_security = tls
-        \\smtp_host = smtp.example.com
-        \\smtp_port = bad
-        \\smtp_security = tls
-    ));
-
-    try testing.expectError(error.InvalidValue, parse(
-        \\address = alice@example.com
-        \\username = alice
-        \\imap_host = imap.example.com
-        \\imap_port = 993
-        \\imap_security = tls
-        \\smtp_host = smtp.example.com
-        \\smtp_port = 465
-        \\smtp_security = maybe
-    ));
-}
-
-test "plaintext SMTP follows the same opt-in rule" {
-    try testing.expectError(error.PlaintextForbidden, parse(
-        \\address = alice@example.com
-        \\username = alice
-        \\imap_host = imap.example.com
-        \\imap_port = 993
-        \\imap_security = tls
-        \\smtp_host = smtp.example.com
-        \\smtp_port = 25
-        \\smtp_security = plain
-    ));
-}
-
-test "a password in the config is refused by name" {
-    try testing.expectError(error.PasswordInConfig, parse(
-        \\address = alice@example.com
-        \\password = hunter2
-    ));
-}
-
-test "unknown keys and missing keys are errors" {
-    try testing.expectError(error.UnknownKey, parse(
-        \\address = alice@example.com
-        \\imap_tls = yes
-    ));
-    try testing.expectError(error.MissingKey, parse(""));
-    try testing.expectError(error.MissingKey, parse(
-        \\address = alice@example.com
-        \\username = alice
-        \\imap_host = imap.example.com
-    ));
-}
-
-test "malformed lines and values are errors" {
-    try testing.expectError(error.MissingEquals, parse("address alice@example.com"));
-    try testing.expectError(error.InvalidValue, parse("= alice@example.com"));
-    try testing.expectError(error.InvalidValue, parse("address = "));
-    try testing.expectError(error.InvalidValue, parse(
-        \\address = alice@example.com
-        \\imap_port = 99999
-    ));
-    try testing.expectError(error.InvalidValue, parse(
-        \\address = alice@example.com
-        \\imap_security = maybe
-    ));
-    try testing.expectError(error.InvalidValue, parse(
-        \\address = alice@example.com
-        \\allow_plaintext = yes
-    ));
-}
-
-test "an invalid address is reported by the address parser" {
-    try testing.expectError(error.MissingAt, parse(
-        \\address = not-an-address
-        \\username = alice
-        \\imap_host = imap.example.com
-        \\imap_port = 993
-        \\imap_security = tls
-    ));
+    const file = try parse(minimal ++ "allow_plaintext = true\n");
+    try testing.expect(file.items()[0].policy.allow_plaintext);
 }
 
 test "zero ports and invalid hosts are refused by the account rules" {
@@ -329,4 +376,9 @@ test "zero ports and invalid hosts are refused by the account rules" {
         \\imap_port = 993
         \\imap_security = tls
     ));
+}
+
+test "a per-section label overrides the section name" {
+    const file = try parse("[account work]\n" ++ minimal ++ "label = office\n");
+    try testing.expectEqualStrings("office", file.items()[0].label.slice());
 }

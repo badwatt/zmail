@@ -1,15 +1,14 @@
 //! The local message cache: a fixed-capacity array, allocated once at startup.
 //!
-//! No growth, no reallocation, no allocator on the hot path. Insert keeps the
-//! list ordered newest-first so the list view is a slice, not a sort.
-//!
-//! Eviction zeroes the vacated slot: mail the user deleted must not stay
-//! readable in the process's memory.
+//! Messages from several accounts share one array ordered newest-first, which
+//! is what the unified view needs. UIDs are per account, so every lookup pairs
+//! an `AccountId` with a `MessageId`.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Message = @import("message.zig").Message;
 const MessageId = @import("id.zig").MessageId;
+const AccountId = @import("id.zig").AccountId;
 const Mailbox = @import("mailbox.zig").Mailbox;
 const Flags = @import("message.zig").Flags;
 
@@ -38,6 +37,7 @@ pub const Store = struct {
     /// earlier arrival first.
     pub fn insert(self: *Store, message: *const Message) InsertError!void {
         assert(message.id.is_known());
+        assert(message.account.is_known());
         if (self.len == self.capacity()) return error.Full;
 
         var position: u32 = self.len;
@@ -64,28 +64,30 @@ pub const Store = struct {
         return &self.messages[index];
     }
 
-    pub fn index_of(self: *const Store, id: MessageId) ?u32 {
+    pub fn index_of(self: *const Store, account: AccountId, id: MessageId) ?u32 {
+        assert(account.is_known());
         var index: u32 = 0;
         while (index < self.len) : (index += 1) {
-            if (self.messages[index].id == id) return index;
+            const message = &self.messages[index];
+            if (message.id == id and message.account == account) return index;
         }
         return null;
     }
 
-    pub fn get(self: *Store, id: MessageId) ?*Message {
-        const index = self.index_of(id) orelse return null;
+    pub fn get(self: *Store, account: AccountId, id: MessageId) ?*Message {
+        const index = self.index_of(account, id) orelse return null;
         return self.at(index);
     }
 
-    pub fn get_const(self: *const Store, id: MessageId) ?*const Message {
-        const index = self.index_of(id) orelse return null;
+    pub fn get_const(self: *const Store, account: AccountId, id: MessageId) ?*const Message {
+        const index = self.index_of(account, id) orelse return null;
         return self.at_const(index);
     }
 
     /// Removes and returns the message, shifting the tail down and zeroing the
     /// vacated slot.
-    pub fn remove_by_id(self: *Store, id: MessageId) ?Message {
-        const index = self.index_of(id) orelse return null;
+    pub fn remove_by_id(self: *Store, account: AccountId, id: MessageId) ?Message {
+        const index = self.index_of(account, id) orelse return null;
         const removed = self.messages[index];
 
         var cursor = index;
@@ -97,13 +99,14 @@ pub const Store = struct {
         return removed;
     }
 
-    /// Removes every message in `mailbox`, compacting in one pass. Returns how
-    /// many were removed. Used when a mailbox is refreshed from the server.
-    pub fn remove_in(self: *Store, mailbox: Mailbox) u32 {
+    /// Removes every message of `account` in `mailbox`, compacting in one pass.
+    pub fn remove_in(self: *Store, account: AccountId, mailbox: Mailbox) u32 {
+        assert(account.is_known());
         var read: u32 = 0;
         var write: u32 = 0;
         while (read < self.len) : (read += 1) {
-            if (self.messages[read].mailbox == mailbox) continue;
+            const message = &self.messages[read];
+            if (message.account == account and message.mailbox == mailbox) continue;
             if (write != read) self.messages[write] = self.messages[read];
             write += 1;
         }
@@ -114,27 +117,37 @@ pub const Store = struct {
         return removed;
     }
 
-    pub fn set_flags(self: *Store, id: MessageId, flags: Flags) bool {
-        const message = self.get(id) orelse return false;
+    pub fn set_flags(self: *Store, account: AccountId, id: MessageId, flags: Flags) bool {
+        const message = self.get(account, id) orelse return false;
         message.flags = flags;
         return true;
     }
 
-    pub fn count_in(self: *const Store, mailbox: Mailbox) u32 {
-        var count: u32 = 0;
-        var index: u32 = 0;
-        while (index < self.len) : (index += 1) {
-            if (self.messages[index].mailbox == mailbox) count += 1;
-        }
-        return count;
-    }
-
-    pub fn unread_in(self: *const Store, mailbox: Mailbox) u32 {
+    /// Counts messages in `mailbox`, optionally only one account (null = the
+    /// unified view).
+    pub fn count_in(self: *const Store, mailbox: Mailbox, account: ?AccountId) u32 {
         var count: u32 = 0;
         var index: u32 = 0;
         while (index < self.len) : (index += 1) {
             const message = &self.messages[index];
             if (message.mailbox != mailbox) continue;
+            if (account) |filter| {
+                if (message.account != filter) continue;
+            }
+            count += 1;
+        }
+        return count;
+    }
+
+    pub fn unread_in(self: *const Store, mailbox: Mailbox, account: ?AccountId) u32 {
+        var count: u32 = 0;
+        var index: u32 = 0;
+        while (index < self.len) : (index += 1) {
+            const message = &self.messages[index];
+            if (message.mailbox != mailbox) continue;
+            if (account) |filter| {
+                if (message.account != filter) continue;
+            }
             if (message.is_unread()) count += 1;
         }
         return count;
@@ -147,9 +160,13 @@ pub const Store = struct {
 
 const testing = std.testing;
 
+const account_one = AccountId.from_int(1);
+const account_two = AccountId.from_int(2);
+
 fn message_with(id: u64, mailbox: Mailbox, timestamp_unix: i64) Message {
     return .{
         .id = MessageId.from_int(id),
+        .account = account_one,
         .mailbox = mailbox,
         .timestamp_unix = timestamp_unix,
         .flags = .{ .unread = true },
@@ -168,12 +185,13 @@ test "Store: starts empty with the requested capacity" {
     try testing.expectEqual(@as(u32, 4), store.capacity());
 }
 
-test "Store: insert keeps the list ordered newest-first" {
+test "Store: insert keeps the list ordered newest-first across accounts" {
     var store = try new_store(4);
     defer store.deinit(testing.allocator);
 
     const oldest = message_with(1, .inbox, 100);
-    const newest = message_with(2, .inbox, 300);
+    var newest = message_with(2, .inbox, 300);
+    newest.account = account_two;
     const middle = message_with(3, .inbox, 200);
     try store.insert(&oldest);
     try store.insert(&newest);
@@ -181,6 +199,7 @@ test "Store: insert keeps the list ordered newest-first" {
 
     try testing.expectEqual(@as(u32, 3), store.len);
     try testing.expectEqual(MessageId.from_int(2), store.at(0).id);
+    try testing.expectEqual(account_two, store.at(0).account);
     try testing.expectEqual(MessageId.from_int(3), store.at(1).id);
     try testing.expectEqual(MessageId.from_int(1), store.at(2).id);
 }
@@ -208,48 +227,44 @@ test "Store: refuses to insert past capacity" {
     try testing.expectError(error.Full, store.insert(&extra));
 }
 
-test "Store: index_of and get find by id, and miss cleanly" {
-    var store = try new_store(2);
+test "Store: the same uid in two accounts is two messages" {
+    var store = try new_store(4);
     defer store.deinit(testing.allocator);
 
-    const message = message_with(5, .inbox, 100);
-    try store.insert(&message);
+    var one = message_with(7, .inbox, 100);
+    var two = message_with(7, .inbox, 200);
+    two.account = account_two;
+    try store.insert(&one);
+    try store.insert(&two);
 
-    try testing.expectEqual(@as(u32, 0), store.index_of(MessageId.from_int(5)).?);
-    try testing.expectEqual(@as(u32, 0), store.get(MessageId.from_int(5)).?.id.to_int() - 5);
-    try testing.expect(store.index_of(MessageId.from_int(6)) == null);
-    try testing.expect(store.get(MessageId.from_int(6)) == null);
-    try testing.expect(store.get_const(MessageId.from_int(5)) != null);
-    try testing.expect(store.get_const(MessageId.from_int(6)) == null);
+    try testing.expectEqual(@as(u32, 2), store.len);
+    try testing.expectEqual(@as(u32, 1), store.index_of(account_one, MessageId.from_int(7)).?);
+    try testing.expectEqual(@as(u32, 0), store.index_of(account_two, MessageId.from_int(7)).?);
+    try testing.expect(store.index_of(account_two, MessageId.from_int(8)) == null);
+    try testing.expect(store.get(account_one, MessageId.from_int(7)) != null);
+    try testing.expect(store.get_const(account_two, MessageId.from_int(7)) != null);
 }
 
-test "Store: remove_by_id shifts the tail down and zeroes the slot" {
-    var store = try new_store(3);
+test "Store: remove_by_id removes the right account's copy" {
+    var store = try new_store(4);
     defer store.deinit(testing.allocator);
 
-    const newest = message_with(3, .inbox, 300);
-    const middle = message_with(2, .inbox, 200);
-    const oldest = message_with(1, .inbox, 100);
-    try store.insert(&oldest);
-    try store.insert(&middle);
-    try store.insert(&newest);
+    var one = message_with(7, .inbox, 100);
+    var two = message_with(7, .inbox, 200);
+    two.account = account_two;
+    try store.insert(&one);
+    try store.insert(&two);
 
-    const removed = store.remove_by_id(MessageId.from_int(2)).?;
-    try testing.expectEqual(MessageId.from_int(2), removed.id);
-    try testing.expectEqual(@as(u32, 2), store.len);
-    try testing.expectEqual(MessageId.from_int(3), store.at(0).id);
-    try testing.expectEqual(MessageId.from_int(1), store.at(1).id);
+    const removed = store.remove_by_id(account_two, MessageId.from_int(7)).?;
+    try testing.expectEqual(account_two, removed.account);
+    try testing.expectEqual(@as(u32, 1), store.len);
+    try testing.expect(store.get(account_one, MessageId.from_int(7)) != null);
+    try testing.expect(store.get(account_two, MessageId.from_int(7)) == null);
+    try testing.expect(store.remove_by_id(account_two, MessageId.from_int(7)) == null);
 
-    const zeroed = store.messages[2];
+    const zeroed = store.messages[1];
     try testing.expectEqual(MessageId.unknown, zeroed.id);
     try testing.expectEqual(@as(i64, 0), zeroed.timestamp_unix);
-    try testing.expect(zeroed.subject.is_empty());
-}
-
-test "Store: remove_by_id reports a miss" {
-    var store = try new_store(1);
-    defer store.deinit(testing.allocator);
-    try testing.expect(store.remove_by_id(MessageId.from_int(9)) == null);
 }
 
 test "Store: remove_by_id works at the head and the tail" {
@@ -261,40 +276,68 @@ test "Store: remove_by_id works at the head and the tail" {
     try store.insert(&oldest);
     try store.insert(&newest);
 
-    _ = store.remove_by_id(MessageId.from_int(2));
+    _ = store.remove_by_id(account_one, MessageId.from_int(2));
     try testing.expectEqual(@as(u32, 1), store.len);
     try testing.expectEqual(MessageId.from_int(1), store.at(0).id);
 
-    _ = store.remove_by_id(MessageId.from_int(1));
+    _ = store.remove_by_id(account_one, MessageId.from_int(1));
     try testing.expectEqual(@as(u32, 0), store.len);
 }
 
-test "Store: set_flags updates a known message and reports a miss" {
-    var store = try new_store(1);
+test "Store: set_flags updates the right account's message" {
+    var store = try new_store(2);
     defer store.deinit(testing.allocator);
 
     const message = message_with(1, .inbox, 100);
     try store.insert(&message);
 
-    try testing.expect(store.set_flags(MessageId.from_int(1), .{ .unread = false }));
+    try testing.expect(store.set_flags(account_one, MessageId.from_int(1), .{ .unread = false }));
     try testing.expect(!store.at(0).is_unread());
-    try testing.expect(!store.set_flags(MessageId.from_int(2), .{ .unread = false }));
+    try testing.expect(!store.set_flags(account_two, MessageId.from_int(1), .{ .unread = false }));
+    try testing.expect(!store.set_flags(account_one, MessageId.from_int(2), .{ .unread = false }));
 }
 
-test "Store: count_in and unread_in are per mailbox" {
+test "Store: remove_in removes one account's mailbox only" {
+    var store = try new_store(6);
+    defer store.deinit(testing.allocator);
+
+    const inbox_a = message_with(1, .inbox, 400);
+    var inbox_other = message_with(2, .inbox, 300);
+    inbox_other.account = account_two;
+    const sent = message_with(3, .sent, 200);
+    try store.insert(&inbox_a);
+    try store.insert(&inbox_other);
+    try store.insert(&sent);
+
+    try testing.expectEqual(@as(u32, 1), store.remove_in(account_one, .inbox));
+    try testing.expectEqual(@as(u32, 2), store.len);
+    try testing.expect(store.get(account_one, MessageId.from_int(1)) == null);
+    try testing.expect(store.get(account_two, MessageId.from_int(2)) != null);
+    try testing.expectEqual(@as(u32, 0), store.remove_in(account_one, .inbox));
+}
+
+test "Store: counts honour the account filter" {
     var store = try new_store(4);
     defer store.deinit(testing.allocator);
 
-    const inbox_read = Message{ .id = MessageId.from_int(1), .mailbox = .inbox, .flags = .{ .unread = false } };
-    const inbox_unread = Message{ .id = MessageId.from_int(2), .mailbox = .inbox, .flags = .{ .unread = true } };
-    const sent = Message{ .id = MessageId.from_int(3), .mailbox = .sent, .flags = .{ .unread = false } };
-    try store.insert(&inbox_read);
-    try store.insert(&inbox_unread);
-    try store.insert(&sent);
+    const one = message_with(1, .inbox, 400);
+    const two = message_with(2, .inbox, 300);
+    var other = message_with(3, .inbox, 200);
+    other.account = account_two;
+    var other_read = message_with(4, .inbox, 100);
+    other_read.account = account_two;
+    other_read.flags = .{ .unread = false };
+    try store.insert(&one);
+    try store.insert(&two);
+    try store.insert(&other);
+    try store.insert(&other_read);
 
-    try testing.expectEqual(@as(u32, 2), store.count_in(.inbox));
-    try testing.expectEqual(@as(u32, 1), store.unread_in(.inbox));
-    try testing.expectEqual(@as(u32, 1), store.count_in(.sent));
-    try testing.expectEqual(@as(u32, 0), store.unread_in(.sent));
-    try testing.expectEqual(@as(u32, 0), store.count_in(.trash));
+    try testing.expectEqual(@as(u32, 4), store.count_in(.inbox, null));
+    try testing.expectEqual(@as(u32, 2), store.count_in(.inbox, account_one));
+    try testing.expectEqual(@as(u32, 2), store.count_in(.inbox, account_two));
+    try testing.expectEqual(@as(u32, 0), store.count_in(.sent, null));
+
+    try testing.expectEqual(@as(u32, 3), store.unread_in(.inbox, null));
+    try testing.expectEqual(@as(u32, 2), store.unread_in(.inbox, account_one));
+    try testing.expectEqual(@as(u32, 1), store.unread_in(.inbox, account_two));
 }

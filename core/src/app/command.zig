@@ -57,6 +57,8 @@ pub const Command = union(enum) {
     toggle_help,
     refresh,
     set_viewport: Viewport,
+    /// All accounts -> account 1 -> ... -> all accounts.
+    cycle_account,
     compose_new,
     compose_reply,
     compose_send,
@@ -116,6 +118,7 @@ test "every command is classified for status clearing" {
         .{ .command = .help_search_cancel, .clears = true },
         .{ .command = .toggle_help, .clears = true },
         .{ .command = .refresh, .clears = true },
+        .{ .command = .cycle_account, .clears = true },
         .{ .command = .compose_new, .clears = true },
         .{ .command = .compose_reply, .clears = true },
         .{ .command = .compose_send, .clears = true },
@@ -132,5 +135,5 @@ test "every command is classified for status clearing" {
     for (commands) |case| {
         try testing.expectEqual(case.clears, case.command.clears_status());
     }
-    try testing.expectEqual(@as(usize, 37), commands.len);
+    try testing.expectEqual(@as(usize, 38), commands.len);
 }

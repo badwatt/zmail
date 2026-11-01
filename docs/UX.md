@@ -91,6 +91,7 @@ and disappears on the next action.
 | `?` | help (`/` filters the key list) |
 | `c` | compose a new message |
 | `r` | reply to the selected message |
+| `a` | cycle account scope: all → account 1 → … → all |
 | `Ctrl+Q` `Ctrl+C` | quit. The top level never closes on `Esc`, `q`, or `h` |
 
 Search is live: typing filters as you go, `Enter` keeps the filter, `Esc`
@@ -103,7 +104,7 @@ text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
 
 ## First run
 
-`amail --live` with no config opens the setup assistant, one field per screen:
+`amail` with no config opens the setup assistant, one field per screen:
 
 ```
  amail setup                                                     step 2/8
@@ -145,6 +146,12 @@ written, the path, and where the password goes. `Enter` saves, `Esc` goes back,
 | `Ctrl+U` | clear the active field |
 | `Ctrl+S` | send (validates the recipient first) |
 | `Esc` | cancel the draft |
+
+With more than one account the list is unified by default: each row starts with
+its account initial (`P`, `W`), and the header shows the current scope on wide
+terminals. `a` narrows it to one account; the same key returns to all. The
+composer shows the sending account on a `From` line, chosen from the account
+scope (or from the message being replied to).
 
 A reply prefills the recipient and `Re: <subject>` and starts in the body. The
 draft survives a failed send. Non-ASCII text is sent as UTF-8; a subject with

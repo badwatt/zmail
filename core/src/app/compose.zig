@@ -12,6 +12,7 @@ const limits = @import("../limits.zig");
 const Text = @import("../domain/text.zig").Text;
 const Address = @import("../domain/address.zig").Address;
 const MessageId = @import("../domain/id.zig").MessageId;
+const AccountId = @import("../domain/id.zig").AccountId;
 
 pub const Field = enum { to, subject, body };
 
@@ -23,6 +24,9 @@ pub const Compose = struct {
     body: [limits.body_max]u8 = undefined,
     body_len: u32 = 0,
     in_reply_to: MessageId = .unknown,
+    /// Which account sends this draft, and from which address.
+    account: AccountId = .unknown,
+    from: Address = .{},
 
     pub fn reset(self: *Compose) void {
         self.active = true;
@@ -31,6 +35,8 @@ pub const Compose = struct {
         self.subject.clear();
         self.body_len = 0;
         self.in_reply_to = .unknown;
+        self.account = .unknown;
+        self.from = .{};
     }
 
     pub fn body_slice(self: *const Compose) []const u8 {

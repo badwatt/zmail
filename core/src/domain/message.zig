@@ -7,6 +7,7 @@ const Text = @import("text.zig").Text;
 const contains_ignore_case = @import("text.zig").contains_ignore_case;
 const Address = @import("address.zig").Address;
 const MessageId = @import("id.zig").MessageId;
+const AccountId = @import("id.zig").AccountId;
 const Mailbox = @import("mailbox.zig").Mailbox;
 
 pub const Flags = packed struct(u8) {
@@ -42,6 +43,7 @@ pub const Flags = packed struct(u8) {
 
 pub const Message = struct {
     id: MessageId = .unknown,
+    account: AccountId = .unknown,
     mailbox: Mailbox = .inbox,
     from: Address = .{},
     subject: Text(limits.subject_max) = .{},
@@ -85,6 +87,7 @@ const testing = std.testing;
 fn sample() Message {
     return .{
         .id = MessageId.from_int(7),
+        .account = AccountId.from_int(1),
         .mailbox = .inbox,
         .from = Address.init("Alice <alice@example.com>") catch unreachable,
         .subject = Text(limits.subject_max).init("Design tokens review"),

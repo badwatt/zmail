@@ -31,13 +31,29 @@ pub fn fixed_now() i64 {
     return 1_700_000_000;
 }
 
-pub const Deps = struct {
+/// One configured account: its identity, its mail connection, and its outbox.
+pub const MailSource = struct {
+    id: core.id.AccountId,
+    label: []const u8,
+    from: core.address.Address = .{},
     mail: core.mail_port.Mail,
-    outbox: ?core.outbox_port.Outbox = null,
+};
+
+pub const OutboxSource = struct {
+    id: core.id.AccountId,
+    outbox: core.outbox_port.Outbox,
+};
+
+pub const Deps = struct {
+    accounts: []const MailSource,
+    outboxes: []const OutboxSource = &.{},
+    /// Optional on-disk cache: startup and mailbox switches come from here
+    /// first, and `R` refreshes from the network.
+    cache: ?core.cache_port.Cache = null,
     system: System,
     theme: theme_mod.Theme = theme_mod.Theme.dark(),
     now: Now = fixed_now,
-    /// The account's own address, used as the sender of composed mail.
+    /// Fallback sender when an account has no address configured.
     from_address: core.address.Address = .{},
 };
 
@@ -65,6 +81,9 @@ pub const Session = struct {
     /// One row of encoded ANSI. Bounded by the widest row times the longest
     /// possible style run, so a frame never allocates.
     row_buffer: [screen_mod.max_columns * 40]u8 = undefined,
+    /// Which (account, mailbox) pairs are in the store. Switching to a loaded
+    /// mailbox must not hit the network again.
+    loaded_mask: u32 = 0,
 
     /// Initializes in place: the session owns megabytes, so it must not be
     /// copied around the stack.
@@ -81,6 +100,9 @@ pub const Session = struct {
 
         self.state = .{};
         self.state.from_address = deps.from_address;
+        for (deps.accounts) |source| {
+            self.state.accounts.add(source.id, source.label, source.from);
+        }
         self.parser = .{};
         self.body_loaded = false;
         self.body_len = 0;
@@ -89,7 +111,7 @@ pub const Session = struct {
         self.now_unix = deps.now();
         self.size = deps.system.size() catch system_mod.Size{};
         self.screen.resize(self.size.columns, self.size.rows);
-        self.reload(self.state.mailbox);
+        self.reload(null, self.state.mailbox, false);
     }
 
     pub fn deinit(self: *Session) void {
@@ -167,7 +189,7 @@ pub const Session = struct {
             else => return false,
         }
 
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows);
+        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.len > 1);
         if (lay.too_small) return false;
 
         if (self.state.view == .list) {
@@ -207,20 +229,43 @@ pub const Session = struct {
         return true;
     }
 
+    /// Test hook: run effects the way the loop does.
+    pub fn run_effects_for_test(self: *Session, effects: []const core.effect.Effect) void {
+        self.run_effects(effects);
+    }
+
     fn run_effects(self: *Session, effects: []const core.effect.Effect) void {
         for (effects) |effect| {
             switch (effect) {
-                .fetch_body => |id| self.fetch_body(id),
-                .sync_flags => |args| self.sync_flags(args.id, args.flags),
-                .move_message => |args| self.move_message(args.id, args.to),
-                .refresh => |mailbox| self.reload(mailbox),
+                .fetch_body => |args| self.fetch_body(args.account, args.id),
+                .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags),
+                .move_message => |args| self.move_message(args.account, args.id, args.to),
+                .refresh => |args| self.reload(args.account, args.mailbox, args.force),
                 .send => |outgoing| self.send(&outgoing),
             }
         }
     }
 
-    fn fetch_body(self: *Session, id: MessageId) void {
-        const body = self.deps.mail.fetch_body(id, &self.body) catch {
+    fn source_for(self: *Session, account: core.id.AccountId) ?core.mail_port.Mail {
+        for (self.deps.accounts) |source| {
+            if (source.id == account) return source.mail;
+        }
+        return null;
+    }
+
+    fn outbox_for(self: *Session, account: core.id.AccountId) ?core.outbox_port.Outbox {
+        for (self.deps.outboxes) |source| {
+            if (source.id == account) return source.outbox;
+        }
+        return null;
+    }
+
+    fn fetch_body(self: *Session, account: core.id.AccountId, id: MessageId) void {
+        const mail = self.source_for(account) orelse {
+            self.state.set_alert("That account is not connected", .{});
+            return;
+        };
+        const body = mail.fetch_body(id, &self.body) catch {
             self.body_len = 0;
             self.body_loaded = true;
             self.wrapped = .{};
@@ -231,20 +276,26 @@ pub const Session = struct {
         self.body_loaded = true;
     }
 
-    fn sync_flags(self: *Session, id: MessageId, flags: core.message.Flags) void {
-        self.deps.mail.set_flags(id, flags) catch {
+    fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags) void {
+        const mail = self.source_for(account) orelse return;
+        mail.set_flags(id, flags) catch {
             self.state.set_alert("Could not update the server", .{});
         };
     }
 
-    fn move_message(self: *Session, id: MessageId, to: Mailbox) void {
-        self.deps.mail.move_message(id, to) catch {
+    fn move_message(self: *Session, account: core.id.AccountId, id: MessageId, to: Mailbox) void {
+        const mail = self.source_for(account) orelse return;
+        mail.move_message(id, to) catch {
             self.state.set_alert("Could not move the message", .{});
         };
     }
 
+    fn mask_bit(account_index: u8, mailbox_index: u8) u32 {
+        return @as(u32, 1) << @intCast(@as(u16, account_index) * 6 + mailbox_index);
+    }
+
     fn send(self: *Session, outgoing: *const core.outgoing.Outgoing) void {
-        const outbox = self.deps.outbox orelse {
+        const outbox = self.outbox_for(outgoing.account) orelse {
             _ = core.update.apply(&self.state, &self.store, .send_failed);
             return;
         };
@@ -256,19 +307,55 @@ pub const Session = struct {
         self.needs_render = true;
     }
 
-    fn reload(self: *Session, mailbox: Mailbox) void {
-        const count = self.deps.mail.fetch(mailbox, self.scratch) catch {
-            self.state.set_alert("Could not load {s}", .{mailbox.title()});
-            self.needs_render = true;
-            return;
-        };
-        core.sync.replace_mailbox(&self.store, mailbox, self.scratch[0..count]);
+    fn reload(self: *Session, account_filter: ?core.id.AccountId, mailbox: Mailbox, force: bool) void {
+        var loaded_any = false;
+        var failed = false;
+
+        for (self.deps.accounts, 0..) |source, index| {
+            if (account_filter) |filter| {
+                if (source.id != filter) continue;
+            }
+            const mask = mask_bit(@intCast(index), @backingInt(mailbox));
+            if (!force and (self.loaded_mask & mask) != 0) {
+                loaded_any = true;
+                continue;
+            }
+
+            // Cached envelopes first: a switch or a restart should not wait for
+            // the network. Only an explicit refresh (or a miss) fetches.
+            if (!force) {
+                if (self.deps.cache) |cache| {
+                    const cached = cache.load(source.id, mailbox, self.scratch) catch 0;
+                    if (cached > 0) {
+                        core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..cached]);
+                        self.loaded_mask |= mask;
+                        loaded_any = true;
+                        continue;
+                    }
+                }
+            }
+
+            const count = source.mail.fetch(mailbox, self.scratch) catch {
+                failed = true;
+                continue;
+            };
+            core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..count]);
+            self.loaded_mask |= mask;
+            loaded_any = true;
+            if (self.deps.cache) |cache| {
+                cache.save(source.id, mailbox, self.scratch[0..count]) catch {};
+            }
+        }
+
         self.state.rebuild(&self.store);
+        if (failed and !loaded_any) {
+            self.state.set_alert("Could not load {s}", .{mailbox.title()});
+        }
         self.needs_render = true;
     }
 
     fn render(self: *Session) void {
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows);
+        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.len > 1);
         if (self.body_loaded) {
             wrap.wrap(self.body[0..self.body_len], lay.reader_text_width, &self.wrapped);
         }
@@ -362,6 +449,7 @@ const FakeMail = struct {
 const Rig = struct {
     fake_system: Fake = .{ .size_value = .{ .columns = 100, .rows = 24 } },
     fake_mail: FakeMail = .{},
+    sources: [1]MailSource = undefined,
     session: Session = undefined,
 
     fn seed(self: *Rig) !void {
@@ -371,6 +459,7 @@ const Rig = struct {
         while (index < 2) : (index += 1) {
             var message = Message{
                 .id = MessageId.from_int(index + 1),
+                .account = core.id.AccountId.from_int(1),
                 .mailbox = .inbox,
                 .timestamp_unix = 1_699_999_900 - @as(i64, index) * 100,
                 .from = try core.address.Address.init(senders[index]),
@@ -383,8 +472,14 @@ const Rig = struct {
 
     fn start(self: *Rig) !void {
         try self.seed();
-        try self.session.init(testing.allocator, .{
+        self.sources[0] = .{
+            .id = core.id.AccountId.from_int(1),
+            .label = "account",
+            .from = core.address.Address.init("me@amail.local") catch .{},
             .mail = self.fake_mail.mail(),
+        };
+        try self.session.init(testing.allocator, .{
+            .accounts = &self.sources,
             .system = self.fake_system.system(),
             .theme = theme_mod.Theme.dark(),
             .now = fixed_now,
@@ -541,7 +636,8 @@ test "composing and sending with a working outbox closes the draft" {
     try rig.start();
     defer rig.deinit();
     var outbox: RecordingOutbox = .{};
-    rig.session.deps.outbox = outbox.outbox();
+    const outboxes = [_]OutboxSource{.{ .id = core.id.AccountId.from_int(1), .outbox = outbox.outbox() }};
+    rig.session.deps.outboxes = &outboxes;
     _ = rig.session.step();
 
     rig.send("c");
@@ -575,7 +671,8 @@ test "a failing outbox keeps the draft and alerts" {
     try rig.start();
     defer rig.deinit();
     var outbox: RecordingOutbox = .{ .failure = error.Rejected };
-    rig.session.deps.outbox = outbox.outbox();
+    const outboxes = [_]OutboxSource{.{ .id = core.id.AccountId.from_int(1), .outbox = outbox.outbox() }};
+    rig.session.deps.outboxes = &outboxes;
     _ = rig.session.step();
 
     rig.send("c");
@@ -584,6 +681,174 @@ test "a failing outbox keeps the draft and alerts" {
     try testing.expectEqual(core.state.View.compose, rig.session.state.view);
     try testing.expect(rig.session.state.compose.active);
     try testing.expectEqualStrings("Could not send; the draft is still here", rig.session.state.status.slice());
+}
+
+test "two accounts share one unified list, and a cycles the scope" {
+    var fake_system: Fake = .{ .size_value = .{ .columns = 100, .rows = 24 } };
+    var first_mail: FakeMail = .{};
+    var second_mail: FakeMail = .{};
+
+    var first = Message{
+        .id = MessageId.from_int(1),
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .timestamp_unix = 1_699_999_900,
+        .from = try core.address.Address.init("Alice <alice@example.com>"),
+    };
+    first.subject.set("from personal");
+    try first_mail.inner.seed(&first);
+
+    var second = Message{
+        .id = MessageId.from_int(1),
+        .account = core.id.AccountId.from_int(2),
+        .mailbox = .inbox,
+        .timestamp_unix = 1_699_999_950,
+        .from = try core.address.Address.init("Bob <bob@example.com>"),
+    };
+    second.subject.set("from work");
+    try second_mail.inner.seed(&second);
+
+    const sources = [_]MailSource{
+        .{ .id = core.id.AccountId.from_int(1), .label = "personal", .mail = first_mail.mail() },
+        .{ .id = core.id.AccountId.from_int(2), .label = "work", .mail = second_mail.mail() },
+    };
+
+    var session: Session = undefined;
+    try session.init(testing.allocator, .{
+        .accounts = &sources,
+        .system = fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+    });
+    defer session.deinit();
+
+    try testing.expectEqual(@as(u32, 2), session.store.len);
+    try testing.expectEqual(@as(u32, 2), session.state.visible_len);
+    try testing.expectEqualStrings("work", session.state.accounts.label_for(core.id.AccountId.from_int(2)));
+
+    fake_system.push_input("a");
+    _ = session.step();
+    try testing.expectEqual(core.id.AccountId.from_int(1), session.state.account_filter.?);
+    try testing.expectEqual(@as(u32, 1), session.state.visible_len);
+    try testing.expectEqualStrings("from personal", session.store.at(session.state.visible[0]).subject.slice());
+
+    // A forced refresh with a filter skips the other account.
+    fake_system.push_input("R");
+    _ = session.step();
+    try testing.expectEqual(core.id.AccountId.from_int(1), session.state.account_filter.?);
+    try testing.expectEqual(@as(u32, 2), session.store.len);
+
+    fake_system.push_input("a");
+    _ = session.step();
+    try testing.expectEqual(core.id.AccountId.from_int(2), session.state.account_filter.?);
+    try testing.expectEqualStrings("from work", session.store.at(session.state.visible[0]).subject.slice());
+
+    fake_system.push_input("a");
+    _ = session.step();
+    try testing.expect(session.state.account_filter == null);
+    try testing.expectEqual(@as(u32, 2), session.state.visible_len);
+}
+
+test "switching to a loaded mailbox does not refetch it" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // Inbox is loaded at startup; switching to Sent and back must not fetch
+    // Inbox again.
+    rig.send("\t");
+    rig.send("\x1b[Z");
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+    try testing.expectEqual(@as(u32, 2), rig.session.store.len);
+}
+
+test "starting from a cache does not touch the network, and R refreshes and saves" {
+    var rig: Rig = .{};
+    try rig.seed();
+    var cache: core.cache_port.Memory = .{ .load_count = 2 };
+    rig.fake_system.size_value = .{ .columns = 100, .rows = 24 };
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .cache = cache.cache(),
+    });
+    defer rig.deinit();
+
+    try testing.expectEqual(@as(u32, 1), cache.loads);
+    try testing.expectEqual(@as(u32, 2), rig.session.state.visible_len);
+    try testing.expectEqual(@as(u32, 0), cache.saves);
+
+    rig.send("R");
+    try testing.expectEqual(@as(u32, 1), cache.saves);
+    try testing.expectEqual(@as(u32, 2), cache.last_saved);
+}
+
+test "a cache miss falls back to the network and fills the cache" {
+    var rig: Rig = .{};
+    try rig.seed();
+    var cache: core.cache_port.Memory = .{ .load_count = 0 };
+    rig.fake_system.size_value = .{ .columns = 100, .rows = 24 };
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .cache = cache.cache(),
+    });
+    defer rig.deinit();
+
+    try testing.expectEqual(@as(u32, 1), cache.loads);
+    try testing.expectEqual(@as(u32, 1), cache.saves);
+    try testing.expectEqual(@as(u32, 2), rig.session.state.visible_len);
+}
+
+test "a failing cache degrades to the network" {
+    var rig: Rig = .{};
+    try rig.seed();
+    var cache: core.cache_port.Memory = .{ .load_failure = true, .save_failure = true };
+    rig.fake_system.size_value = .{ .columns = 100, .rows = 24 };
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .cache = cache.cache(),
+    });
+    defer rig.deinit();
+
+    try testing.expectEqual(@as(u32, 2), rig.session.state.visible_len);
+}
+
+test "an effect for an unknown account alerts instead of crashing" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    _ = core.update.apply(&rig.session.state, &rig.session.store, .{ .move = .down });
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = core.id.AccountId.from_int(9),
+        .id = MessageId.from_int(1),
+    } }});
+    try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
 }
 
 test "a failed flag sync becomes an alert" {
@@ -639,7 +904,7 @@ test "a successful refresh refreshes the mailbox" {
     _ = rig.session.step();
 
     // The server gains a message; refresh picks it up.
-    const extra = Message{ .id = MessageId.from_int(9), .mailbox = .inbox, .timestamp_unix = 1_699_999_950 };
+    const extra = Message{ .id = MessageId.from_int(9), .account = core.id.AccountId.from_int(1), .mailbox = .inbox, .timestamp_unix = 1_699_999_950 };
     try rig.fake_mail.inner.seed(&extra);
 
     rig.send("R");
@@ -651,7 +916,7 @@ test "switching mailbox loads it from the server" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
-    const sent = Message{ .id = MessageId.from_int(3), .mailbox = .sent, .timestamp_unix = 1_699_999_700 };
+    const sent = Message{ .id = MessageId.from_int(3), .account = core.id.AccountId.from_int(1), .mailbox = .sent, .timestamp_unix = 1_699_999_700 };
     try rig.fake_mail.inner.seed(&sent);
 
     rig.send("\t");
@@ -834,7 +1099,12 @@ test "fixed_now is deterministic" {
 test "init reports allocation failure without leaking" {
     var fake_system: Fake = .{};
     var fake_mail: FakeMail = .{};
-    const deps: Deps = .{ .mail = fake_mail.mail(), .system = fake_system.system() };
+    const sources = [_]MailSource{.{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = fake_mail.mail(),
+    }};
+    const deps: Deps = .{ .accounts = &sources, .system = fake_system.system() };
 
     var session: Session = undefined;
     try testing.expectError(error.OutOfMemory, session.init(testing.failing_allocator, deps));
@@ -843,7 +1113,12 @@ test "init reports allocation failure without leaking" {
 test "init frees the store when the scratch buffer cannot be allocated" {
     var fake_system: Fake = .{};
     var fake_mail: FakeMail = .{};
-    const deps: Deps = .{ .mail = fake_mail.mail(), .system = fake_system.system() };
+    const sources = [_]MailSource{.{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = fake_mail.mail(),
+    }};
+    const deps: Deps = .{ .accounts = &sources, .system = fake_system.system() };
 
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
     var session: Session = undefined;
