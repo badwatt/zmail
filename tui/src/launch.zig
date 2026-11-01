@@ -80,7 +80,7 @@ fn run_demo(gpa: std.mem.Allocator, system: SessionSystem) ?Failure {
     demo.outboxes[0] = .{ .id = core.id.AccountId.from_int(1), .outbox = demo.outbox[0].outbox() };
     demo.outboxes[1] = .{ .id = core.id.AccountId.from_int(2), .outbox = demo.outbox[1].outbox() };
 
-    return run_session(gpa, system, &demo.sources, &demo.outboxes, null, null, null, false);
+    return run_session(gpa, system, &demo.sources, &demo.outboxes, null, null, null, false, null);
 }
 
 fn run_session(
@@ -92,6 +92,7 @@ fn run_session(
     bodies: ?core.bodies_port.BodyCache,
     accounts_file: ?core.accounts_port.Accounts,
     splash: bool,
+    notice: ?[]const u8,
 ) ?Failure {
     // The session owns megabytes of bounded buffers; keeping it on the stack
     // next to the adapters overflows it.
@@ -104,6 +105,7 @@ fn run_session(
         .cache = cache,
         .bodies = bodies,
         .accounts_file = accounts_file,
+        .notice = notice,
         .splash = splash,
         .system = system,
         .theme = theme_for_environment(),
@@ -304,7 +306,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         config_text = text;
     } else |err| switch (err) {
         error.FileNotFound => {
-            const outcome = setup_session.run(system, theme_for_environment(), path) catch
+            const outcome = setup_session.run(system, theme_for_environment(), path, "") catch
                 return .{ .message = "Setup failed: terminal error" };
             switch (outcome) {
                 .cancelled => return .{ .message = "Setup cancelled; no config was written" },
@@ -320,8 +322,12 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         else => return .{ .message = "Could not read the config file" },
     }
 
-    const file = core.config.parse(config_text) catch |err|
-        return .{ .message = config_message(err) };
+    // A broken config must not lock the user out: open the client with no
+    // accounts and say what is wrong, so the file can be fixed in another
+    // window and the client restarted.
+    const file = core.config.parse(config_text) catch |err| {
+        return run_session(gpa, system, &.{}, &.{}, null, null, null, true, config_message(err));
+    };
     if (file.len == 0) return .{ .message = "The config has no accounts" };
 
     var live: Live = .{};
@@ -395,6 +401,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         bodies,
         account_port,
         true,
+        null,
     );
     if (outcome != null) return outcome;
     // A connection that never worked left nothing on screen: say why.
@@ -530,14 +537,14 @@ const FileAccounts = struct {
         std.Io.Dir.cwd().deleteFile(self.io, credential) catch {};
     }
 
-    fn addThunk(context: *anyopaque, label: []u8) core.accounts_port.Error![]const u8 {
+    fn addThunk(context: *anyopaque, label: []u8, seed: []const u8) core.accounts_port.Error![]const u8 {
         const self: *FileAccounts = @ptrCast(@alignCast(context));
         var buffer: [8193]u8 = undefined;
         const existing = read_file(self.io, self.path, &buffer) catch return error.Unavailable;
         _ = core.config.parse(existing) catch return error.Unavailable;
 
         var saved: setup_session.Saved = undefined;
-        const outcome = setup_session.run(self.system, theme_mod.Theme.dark(), self.path) catch
+        const outcome = setup_session.run(self.system, theme_mod.Theme.dark(), self.path, seed) catch
             return error.Unavailable;
         switch (outcome) {
             .cancelled => return error.Cancelled,
@@ -576,7 +583,7 @@ fn run_add_account(io: std.Io, options: cli.Launch, system: SessionSystem) ?Fail
     _ = core.config.parse(existing) catch |err| return .{ .message = config_message(err) };
 
     var saved: setup_session.Saved = undefined;
-    const outcome = setup_session.run(system, theme_for_environment(), path) catch
+    const outcome = setup_session.run(system, theme_for_environment(), path, "") catch
         return .{ .message = "Setup failed: terminal error" };
     switch (outcome) {
         .cancelled => return .{ .message = "No account added", .code = 0 },

@@ -31,12 +31,23 @@ pub const Saved = struct {
 
 pub const Error = error{Terminal};
 
-pub fn run(system: system_mod.System, theme: theme_mod.Theme, config_path: []const u8) Error!Outcome {
+/// `seed` is input the caller had already read but did not consume (the key
+/// that opened the assistant can share a read with the first characters of the
+/// address). It is applied as if typed.
+pub fn run(system: system_mod.System, theme: theme_mod.Theme, config_path: []const u8, seed: []const u8) Error!Outcome {
     var setup = core.setup.Setup.init();
     defer setup.deinit();
 
     var parser: input.Parser = .{};
     var screen = screen_mod.Screen.init(80, 24);
+
+    // Bytes the caller had buffered when it opened the assistant.
+    if (seed.len > 0) {
+        var keys: input.Keys = .{};
+        parser.decode(seed, &keys);
+        for (keys.slice()) |key| handle_key(&setup, key);
+        if (setup.cancelled) return .cancelled;
+    }
 
     while (true) {
         const size = system.size() catch system_mod.Size{};
@@ -95,6 +106,9 @@ fn handle_key(setup: *core.setup.Setup, key: input.Key) void {
 }
 
 pub fn render(setup: *const core.setup.Setup, theme: theme_mod.Theme, config_path: []const u8, out: *screen_mod.Screen) void {
+    // Each step draws on a blank canvas: a stale cell from the previous step is
+    // how a form ends up with two carets and text where it does not belong.
+    out.clear();
     _ = out.put_text(1, 0, "amail setup", 16, theme.accent.with_bold());
     var progress_buffer: [16]u8 = undefined;
     const progress = std.fmt.bufPrint(&progress_buffer, "step {d}/{d}", .{ setup.step.number(), core.setup.Step.count() }) catch "";
@@ -225,8 +239,8 @@ fn put_right(out: *screen_mod.Screen, x_right: u16, y: u16, text: []const u8, st
 const testing = std.testing;
 const Fake = system_mod.Fake;
 
-fn run_with(fake: *Fake, path: []const u8) !Outcome {
-    return run(fake.system(), theme_mod.Theme.dark(), path);
+fn run_with(fake: *Fake, path: []const u8, seed: []const u8) !Outcome {
+    return run(fake.system(), theme_mod.Theme.dark(), path, seed);
 }
 
 test "a complete wizard saves the config and the password" {
@@ -234,7 +248,7 @@ test "a complete wizard saves the config and the password" {
     const keys = "alice@example.com\r" ++ "\r\r\r\r\r" ++ "hunter2\r" ++ "\r";
     fake.push_input(keys);
 
-    var outcome = try run_with(&fake, "/tmp/amail/config");
+    var outcome = try run_with(&fake, "/tmp/amail/config", "");
     defer switch (outcome) {
         .saved => |*saved| saved.password.deinit(),
         .cancelled => {},
@@ -247,16 +261,34 @@ test "a complete wizard saves the config and the password" {
     try testing.expectEqualStrings("hunter2", saved.password.expose());
 }
 
+test "a seed supplies the keystrokes the caller already read" {
+    var fake: Fake = .{};
+    // The address arrives as the seed; quitting right after proves it was
+    // applied, and that the seed cannot be lost by the caller.
+    fake.push_input("\x11");
+    try testing.expectEqual(
+        Outcome.cancelled,
+        try run_with(&fake, "/tmp/amail/config", "alice@example.com"),
+    );
+
+    // A seed can also carry the quit itself.
+    var quit: Fake = .{};
+    try testing.expectEqual(
+        Outcome.cancelled,
+        try run_with(&quit, "/tmp/amail/config", "\x11"),
+    );
+}
+
 test "escape on the first step cancels and writes nothing" {
     var fake: Fake = .{};
     fake.push_input("\x1b");
-    try testing.expectEqual(Outcome.cancelled, try run_with(&fake, "/tmp/c"));
+    try testing.expectEqual(Outcome.cancelled, try run_with(&fake, "/tmp/c", ""));
 }
 
 test "ctrl+q cancels at any step" {
     var fake: Fake = .{};
     fake.push_input("alice@example.com\r\x11");
-    try testing.expectEqual(Outcome.cancelled, try run_with(&fake, "/tmp/c"));
+    try testing.expectEqual(Outcome.cancelled, try run_with(&fake, "/tmp/c", ""));
 }
 
 test "an invalid address keeps the step and shows the problem" {
@@ -281,7 +313,7 @@ test "the password is masked and never printed" {
     fake.push_input("alice@example.com\r\r\r\r\r" ++ "secret\r");
     // Cancel from the review screen; every frame so far was rendered.
     fake.push_input("\x11");
-    const outcome = try run_with(&fake, "/tmp/c");
+    const outcome = try run_with(&fake, "/tmp/c", "");
     try testing.expectEqual(Outcome.cancelled, outcome);
     try testing.expect(std.mem.indexOf(u8, fake.output_text(), "secret") == null);
 }
@@ -345,7 +377,7 @@ test "backspace, clear, and a resize are handled by the loop" {
     var fake: Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
     // Type, go to the next step, delete, clear, then cancel.
     fake.push_input("alice@example.com\r" ++ "\x7f\x15" ++ "\x11");
-    try testing.expectEqual(Outcome.cancelled, try run_with(&fake, "/tmp/c"));
+    try testing.expectEqual(Outcome.cancelled, try run_with(&fake, "/tmp/c", ""));
     try testing.expect(fake.output_len > 0);
 }
 

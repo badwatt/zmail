@@ -61,6 +61,8 @@ pub const Deps = struct {
     /// Adding and removing accounts writes the config: a port, so the core
     /// still never touches the filesystem.
     accounts_file: ?core.accounts_port.Accounts = null,
+    /// Something the user must know at start (a broken config, for instance).
+    notice: ?[]const u8 = null,
     /// Paint the spinner while an effect runs, and keep it up this long (ms) so
     /// even an instant fetch reads as "working", not as a jump.
     loading_ms: u32 = 90,
@@ -105,6 +107,15 @@ pub const Session = struct {
     /// as the refresh finishes, so the reader shows text instead of a frozen UI.
     pending_body: ?struct { account: core.id.AccountId, mailbox: Mailbox, id: MessageId } = null,
 
+    /// A key asked for the assistant; it runs after the current read is fully
+    /// dispatched, so typing that arrived in the same read is not lost.
+    accounts_add_requested: bool = false,
+    /// Set when a key started a modal flow that reads the terminal itself, and
+    /// the bytes buffered after it (see handle_bytes).
+    modal_started: bool = false,
+    seed: [128]u8 = undefined,
+    seed_len: u8 = 0,
+
     /// One row of encoded ANSI. Bounded by the widest row times the longest
     /// possible style run, so a frame never allocates.
     row_buffer: [screen_mod.max_columns * 40]u8 = undefined,
@@ -133,6 +144,7 @@ pub const Session = struct {
         for (deps.accounts) |source| {
             self.state.accounts.add(source.id, source.label, source.from);
         }
+        if (deps.notice) |notice| self.state.set_alert("{s}", .{notice});
         self.parser = .{};
         self.body_loaded = false;
         self.body_len = 0;
@@ -217,6 +229,11 @@ pub const Session = struct {
             }
             self.state.set_alert("Terminal error", .{});
             self.needs_render = true;
+        }
+
+        if (self.accounts_add_requested) {
+            self.accounts_add_requested = false;
+            self.add_account();
         }
 
         self.sync_size();
@@ -322,6 +339,13 @@ pub const Session = struct {
         self.wait_refresh();
     }
 
+    /// After another full-screen flow (the assistant) painted the terminal, the
+    /// diff against our last frame is meaningless: repaint everything.
+    fn invalidate_screen(self: *Session) void {
+        self.screen.pristine = true;
+        self.needs_render = true;
+    }
+
     fn sync_size(self: *Session) void {
         const size = self.deps.system.size() catch return;
         if (size.columns == self.size.columns) {
@@ -340,8 +364,43 @@ pub const Session = struct {
             const end = @min(bytes.len, index + input.keys_max);
             var keys: input.Keys = .{};
             self.parser.decode(bytes[index..end], &keys);
-            for (keys.slice()) |key| _ = self.handle_key(key);
+            const decoded = keys.slice();
+            var key_index: usize = 0;
+            while (key_index < decoded.len) : (key_index += 1) {
+                _ = self.handle_key(decoded[key_index]);
+                if (!self.modal_started) continue;
+                // The rest of the input belongs to the assistant, not to the
+                // session: hand over the keys we did not deliver plus the bytes
+                // we did not even decode.
+                self.seed_len = 0;
+                for (decoded[key_index + 1 ..]) |pending| self.seed_key(pending);
+                self.seed_raw(bytes[end..]);
+                self.modal_started = false;
+                return;
+            }
             index = end;
+        }
+    }
+
+    fn seed_key(self: *Session, key: input.Key) void {
+        const codepoint: u21 = switch (key) {
+            .char => |value| value,
+            .enter => '\r',
+            .backspace => 0x7f,
+            .escape => 0x1b,
+            .tab => '\t',
+            else => return,
+        };
+        if (codepoint > 0x7f or self.seed_len == self.seed.len) return;
+        self.seed[self.seed_len] = @intCast(codepoint);
+        self.seed_len += 1;
+    }
+
+    fn seed_raw(self: *Session, bytes: []const u8) void {
+        var index: usize = 0;
+        while (index < bytes.len and self.seed_len < self.seed.len) : (index += 1) {
+            self.seed[self.seed_len] = bytes[index];
+            self.seed_len += 1;
         }
     }
 
@@ -455,7 +514,12 @@ pub const Session = struct {
                 .delete_message => |args| self.delete_message(args.account, args.mailbox, args.id),
                 .empty_mailbox => |args| self.empty_mailbox(args.account, args.mailbox),
                 .remove_account => |args| self.remove_account(args.account),
-                .add_account => self.add_account(),
+                .add_account => {
+                    // Deferred: the assistant must run once the rest of this
+                    // read has been handed to it (see handle_bytes).
+                    self.modal_started = true;
+                    self.accounts_add_requested = true;
+                },
                 .refresh => self.start_refresh(),
                 .send => |outgoing| self.send(&outgoing),
             }
@@ -566,10 +630,13 @@ pub const Session = struct {
             return;
         };
         var label: [core.limits.label_max]u8 = undefined;
-        const added = accounts.add(&label) catch {
+        const added = accounts.add(&label, self.seed[0..self.seed_len]) catch {
+            // The assistant paints over the session; repaint from scratch.
+            self.invalidate_screen();
             self.state.set_alert("Could not add the account", .{});
             return;
         };
+        self.invalidate_screen();
         self.state.set_status("{s} added · restart to connect it", .{added});
     }
 
@@ -1409,6 +1476,62 @@ test "delete and empty reach the account's server" {
     try testing.expectEqual(@as(u32, 1), rig.session.deps.accounts.len);
 }
 
+test "typing that arrives with the key that opens the assistant is kept" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // One read: "A" opens the overlay, "n" asks for the assistant, and the rest
+    // is the seed it must receive instead of the session dropping it.
+    rig.fake_system.push_input("Annew@example.com");
+    _ = rig.session.step();
+
+    try testing.expectEqual(@as(u8, 15), rig.session.seed_len);
+    try testing.expectEqualStrings("new@example.com", rig.session.seed[0..rig.session.seed_len]);
+    try testing.expect(!rig.session.modal_started);
+}
+
+test "a key that opens the assistant hands over the rest of the input" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // "n" starts the assistant; everything after it in the same read is the
+    // seed it must receive (typed text, Enter, backspace).
+    rig.session.seed_len = 0;
+    rig.session.seed_key(.{ .char = 'a' });
+    rig.session.seed_key(.enter);
+    rig.session.seed_key(.backspace);
+    rig.session.seed_key(.escape);
+    rig.session.seed_key(.{ .char = 0x1f600 }); // non-ASCII is dropped
+    rig.session.seed_raw("bc");
+    try testing.expectEqualStrings("a\r\x7f\x1b" ++ "bc", rig.session.seed[0..rig.session.seed_len]);
+
+    // The buffer is bounded: extra bytes are dropped, not written past the end.
+    rig.session.seed_len = @intCast(rig.session.seed.len);
+    rig.session.seed_raw("overflow");
+    rig.session.seed_key(.{ .char = 'x' });
+    try testing.expectEqual(@as(u8, @intCast(rig.session.seed.len)), rig.session.seed_len);
+}
+
+test "adding an account defers the assistant until the read is dispatched" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // No port: the request is still deferred, then reported without a terminal.
+    rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
+    try testing.expect(rig.session.accounts_add_requested);
+    try testing.expect(rig.session.state.status.is_empty());
+
+    _ = rig.session.step();
+    try testing.expect(!rig.session.accounts_add_requested);
+    try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
+}
+
 test "removing an account rewrites the config and drops its mail" {
     var rig: Rig = .{};
     try rig.seed();
@@ -1446,20 +1569,24 @@ test "removing an account rewrites the config and drops its mail" {
     try testing.expect(before > 0);
     try testing.expect(std.mem.endsWith(u8, rig.session.state.status.slice(), "removed · restart to apply"));
 
-    // A failing port leaves everything alone.
+    // A failing port leaves everything alone. Adding is deferred, so it runs
+    // on the next step.
     port.fail = true;
     rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
+    _ = rig.session.step();
     try testing.expectEqualStrings("Could not add the account", rig.session.state.status.slice());
     rig.session.run_effects_for_test(&.{.{ .remove_account = .{ .account = core.id.AccountId.from_int(2) } }});
     try testing.expectEqualStrings("Could not rewrite the config", rig.session.state.status.slice());
 
     port.fail = false;
     rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
+    _ = rig.session.step();
     try testing.expectEqual(@as(u32, 2), port.added);
     try testing.expect(std.mem.endsWith(u8, rig.session.state.status.slice(), "added · restart to connect it"));
 
     rig.session.deps.accounts_file = null;
     rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
+    _ = rig.session.step();
     try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
 }
 
@@ -1505,6 +1632,23 @@ test "delete and empty report server errors and unknown accounts" {
         .mailbox = .trash,
     } }});
     try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
+}
+
+test "a notice is shown as an alert from the first frame" {
+    var rig: Rig = .{};
+    try rig.seed();
+    try rig.session.init(testing.allocator, .{
+        .accounts = &.{},
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .loading_ms = 0,
+        .notice = "The config file is invalid",
+    });
+    defer rig.deinit();
+
+    try testing.expectEqualStrings("The config file is invalid", rig.session.state.status.slice());
+    try testing.expect(rig.session.state.status_alert);
 }
 
 test "an effect paints the spinner, even when it is instant" {

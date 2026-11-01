@@ -18,15 +18,16 @@ pub const Accounts = struct {
         /// Rewrites the config (and deletes the credential) without `account`.
         remove: *const fn (context: *anyopaque, account: AccountId) Error!void,
         /// Runs the assistant and appends the new account; returns its label.
-        add: *const fn (context: *anyopaque, label: []u8) Error![]const u8,
+        /// `seed` is input the session had already read (see the session).
+        add: *const fn (context: *anyopaque, label: []u8, seed: []const u8) Error![]const u8,
     };
 
     pub fn remove(self: Accounts, account: AccountId) Error!void {
         return self.vtable.remove(self.context, account);
     }
 
-    pub fn add(self: Accounts, label: []u8) Error![]const u8 {
-        return self.vtable.add(self.context, label);
+    pub fn add(self: Accounts, label: []u8, seed: []const u8) Error![]const u8 {
+        return self.vtable.add(self.context, label, seed);
     }
 };
 
@@ -49,7 +50,8 @@ pub const Memory = struct {
         if (self.fail) return error.Unavailable;
     }
 
-    fn addThunk(context: *anyopaque, label: []u8) Error![]const u8 {
+    fn addThunk(context: *anyopaque, label: []u8, seed: []const u8) Error![]const u8 {
+        _ = seed;
         const self: *Memory = @ptrCast(@alignCast(context));
         self.added += 1;
         if (self.fail) return error.Unavailable;
@@ -74,7 +76,7 @@ test "Memory accounts: remove and add record what they were asked" {
     try testing.expectEqual(AccountId.from_int(2), memory.last_removed);
 
     var label: [limits.label_max]u8 = undefined;
-    try testing.expectEqualStrings("new", try accounts.add(&label));
+    try testing.expectEqualStrings("new", try accounts.add(&label, ""));
     try testing.expectEqual(@as(u32, 1), memory.added);
 }
 
@@ -82,5 +84,5 @@ test "Memory accounts: failures surface as Unavailable" {
     var memory: Memory = .{ .fail = true };
     try testing.expectError(error.Unavailable, memory.accounts().remove(AccountId.from_int(1)));
     var label: [limits.label_max]u8 = undefined;
-    try testing.expectError(error.Unavailable, memory.accounts().add(&label));
+    try testing.expectError(error.Unavailable, memory.accounts().add(&label, ""));
 }
