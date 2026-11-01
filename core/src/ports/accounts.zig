@@ -18,7 +18,8 @@ pub const Accounts = struct {
         /// The `[account label]` section, ready to append or to replace with.
         text: []const u8,
         label: []const u8,
-        password: []const u8,
+        /// Null keeps the credential already on disk (editing a name, a host).
+        password: ?[]const u8 = null,
         /// The account this draft replaces, or null for a new one.
         replaces: ?AccountId = null,
     };
@@ -28,6 +29,8 @@ pub const Accounts = struct {
         remove: *const fn (context: *anyopaque, account: AccountId) Error!void,
         /// Adds an account, or replaces one; writes its sealed credential.
         save: *const fn (context: *anyopaque, draft: Accounts.Draft) Error!void,
+        /// Changes only the label: the config section and the credential file.
+        rename: *const fn (context: *anyopaque, account: AccountId, label: []const u8) Error!void,
     };
 
     pub fn remove(self: Accounts, account: AccountId) Error!void {
@@ -36,6 +39,10 @@ pub const Accounts = struct {
 
     pub fn save(self: Accounts, draft: Draft) Error!void {
         return self.vtable.save(self.context, draft);
+    }
+
+    pub fn rename(self: Accounts, account: AccountId, label: []const u8) Error!void {
+        return self.vtable.rename(self.context, account, label);
     }
 };
 
@@ -48,15 +55,30 @@ pub const Memory = struct {
     last_label: [limits.label_max]u8 = @splat(0),
     last_label_len: u8 = 0,
     last_replaces: ?AccountId = null,
+    renamed: AccountId = .unknown,
 
     pub fn accounts(self: *Memory) Accounts {
-        return .{ .context = self, .vtable = &.{ .remove = removeThunk, .save = saveThunk } };
+        return .{ .context = self, .vtable = &.{
+            .remove = removeThunk,
+            .save = saveThunk,
+            .rename = renameThunk,
+        } };
     }
 
     fn removeThunk(context: *anyopaque, account: AccountId) Error!void {
         const self: *Memory = @ptrCast(@alignCast(context));
         self.removed += 1;
         self.last_removed = account;
+        if (self.fail) return error.Unavailable;
+    }
+
+    fn renameThunk(context: *anyopaque, account: AccountId, label: []const u8) Error!void {
+        const self: *Memory = @ptrCast(@alignCast(context));
+        self.renamed = account;
+        self.saved += 1;
+        const length = @min(label.len, self.last_label.len);
+        @memcpy(self.last_label[0..length], label[0..length]);
+        self.last_label_len = @intCast(length);
         if (self.fail) return error.Unavailable;
     }
 
@@ -92,6 +114,10 @@ test "Memory accounts: remove and save record what they were asked" {
 
     try accounts.save(.{ .text = "x", .label = "work", .password = "pw", .replaces = AccountId.from_int(3) });
     try testing.expectEqual(AccountId.from_int(3), memory.last_replaces.?);
+
+    try accounts.rename(AccountId.from_int(1), "club");
+    try testing.expectEqual(AccountId.from_int(1), memory.renamed);
+    try testing.expectEqualStrings("club", memory.last_label[0..memory.last_label_len]);
 }
 
 test "Memory accounts: failures surface as Unavailable" {
@@ -101,4 +127,5 @@ test "Memory accounts: failures surface as Unavailable" {
         error.Unavailable,
         memory.accounts().save(.{ .text = "x", .label = "new", .password = "pw" }),
     );
+    try testing.expectError(error.Unavailable, memory.accounts().rename(AccountId.from_int(1), "x"));
 }

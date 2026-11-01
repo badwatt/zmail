@@ -141,6 +141,7 @@ fn accounts_key(key: Key) ?Command {
             'd' => .accounts_remove,
             'n' => .accounts_add,
             'e' => .accounts_edit,
+            'r' => .accounts_rename,
             'q' => .accounts_close,
             else => null,
         },

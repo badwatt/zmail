@@ -530,7 +530,11 @@ const FileAccounts = struct {
     system: SessionSystem,
 
     fn accounts(self: *FileAccounts) core.accounts_port.Accounts {
-        return .{ .context = self, .vtable = &.{ .remove = removeThunk, .save = saveThunk } };
+        return .{ .context = self, .vtable = &.{
+            .remove = removeThunk,
+            .save = saveThunk,
+            .rename = renameThunk,
+        } };
     }
 
     fn removeThunk(context: *anyopaque, account: core.id.AccountId) core.accounts_port.Error!void {
@@ -549,6 +553,37 @@ const FileAccounts = struct {
         var credential_buffer: [512]u8 = undefined;
         const credential = cli.credential_path(self.path, entry.label.slice(), &credential_buffer);
         std.Io.Dir.cwd().deleteFile(self.io, credential) catch {};
+    }
+
+    fn renameThunk(
+        context: *anyopaque,
+        account: core.id.AccountId,
+        label: []const u8,
+    ) core.accounts_port.Error!void {
+        const self: *FileAccounts = @ptrCast(@alignCast(context));
+
+        var buffer: [8193]u8 = undefined;
+        const text = read_file(self.io, self.path, &buffer) catch return error.Unavailable;
+        const file = core.config.parse(text) catch return error.Unavailable;
+        if (!core.config.has_label(text, label)) {} else return error.Unavailable;
+
+        const index: usize = @intCast(account.to_int() - 1);
+        if (index >= file.len) return error.Unavailable;
+        const old = file.items()[index].label.slice();
+
+        var renamed_buffer: [8193]u8 = undefined;
+        const renamed = core.config.rename_label(text, old, label, &renamed_buffer);
+        if (renamed.len == 0) return error.Unavailable;
+        write_file(self.io, self.path, renamed) catch return error.Unavailable;
+
+        // The credential file follows the label.
+        var old_buffer: [512]u8 = undefined;
+        var new_buffer: [512]u8 = undefined;
+        const from = cli.credential_path(self.path, old, &old_buffer);
+        const to = cli.credential_path(self.path, label, &new_buffer);
+        if (from.len > 0 and to.len > 0) {
+            std.Io.Dir.cwd().rename(from, std.Io.Dir.cwd(), to, self.io) catch {};
+        }
     }
 
     fn saveThunk(context: *anyopaque, draft: core.accounts_port.Accounts.Draft) core.accounts_port.Error!void {
@@ -573,8 +608,11 @@ const FileAccounts = struct {
         }
 
         append_file(self.io, self.path, draft.text) catch return error.Unavailable;
-        write_credential_bytes(self.io, self.path, draft.label, draft.password) catch
-            return error.Unavailable;
+        // No password in the draft means "keep the one on disk".
+        if (draft.password) |password| {
+            write_credential_bytes(self.io, self.path, draft.label, password) catch
+                return error.Unavailable;
+        }
     }
 };
 

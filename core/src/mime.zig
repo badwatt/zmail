@@ -63,6 +63,21 @@ pub fn decode_encoded_words(input: []const u8, out: []u8) []const u8 {
     return writer.buffered();
 }
 
+/// Text from a header for display: valid UTF-8 passes through, and anything
+/// else is read as Windows-1252 (which is what servers mean when they put raw
+/// 8-bit bytes in an ENVELOPE). Without this, every accented letter became a
+/// question mark.
+pub fn to_display(input: []const u8, out: []u8) []const u8 {
+    var writer = std.Io.Writer.fixed(out);
+    if (std.unicode.utf8ValidateSlice(input)) {
+        // Valid UTF-8 still needs the control bytes neutralized.
+        stream_text(input, .utf8, &writer) catch {};
+    } else {
+        stream_text(input, .windows1252, &writer) catch {};
+    }
+    return writer.buffered();
+}
+
 /// Returns the byte length of the encoded word starting at `start`, or null.
 fn decode_word(input: []const u8, start: usize) ?usize {
     // =?charset?[BbQq]?text?=
@@ -751,6 +766,17 @@ test "text_body: invalid UTF-8 becomes question marks" {
     var out: [64]u8 = undefined;
     var scratch: [64]u8 = undefined;
     try testing.expectEqualStrings("ok?bad", text_body(raw, &out, &scratch));
+}
+
+test "to_display: UTF-8 is kept, 8-bit headers are read as Windows-1252" {
+    var out: [64]u8 = undefined;
+    try testing.expectEqualStrings("café", to_display("café", &out));
+
+    // Raw 0xE9 is not valid UTF-8: it is "é" in Windows-1252.
+    try testing.expectEqualStrings("café", to_display("caf\xe9", &out));
+    try testing.expectEqualStrings("\u{201C}hi\u{201D}", to_display("\x93hi\x94", &out));
+    // Control bytes stay out of the list.
+    try testing.expectEqualStrings("a b", to_display("a\x01b", &out));
 }
 
 test "encoded words: bare CRLF is dropped" {

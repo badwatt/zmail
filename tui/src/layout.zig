@@ -39,7 +39,7 @@ pub const Layout = struct {
     reader_text_width: u16 = 0,
 
     show_tabs: bool = false,
-    account_x: u16 = 2,
+    account_x: u16 = 3,
     /// Width of the account label column (0 when the view is one account).
     account_width: u16 = 0,
     account_tags: bool = false,
@@ -77,7 +77,9 @@ pub const Layout = struct {
             @min(@max(@as(u16, label_width), 2), @min(10, columns / 6))
         else
             0;
-        layout.sender_x = layout.dot_x + 1 + layout.account_width + @as(u16, if (account_tags) 1 else 1);
+        // A space after the unread dot and another after the label.
+        layout.account_x = layout.dot_x + 2;
+        layout.sender_x = if (account_tags) layout.account_x + layout.account_width + 1 else 3;
         layout.sender_width = @max(8, @min(24, columns / 4) - @as(u16, if (account_tags) 2 else 0));
         layout.subject_x = layout.sender_x + layout.sender_width + 1;
         layout.flag_x = columns - 1;
@@ -206,14 +208,14 @@ test "account tags shift the sender column right" {
     const tagged = Layout.compute(100, 30, 8);
     try testing.expect(tagged.account_tags);
     try testing.expectEqual(@as(u16, 8), tagged.account_width);
-    try testing.expectEqual(@as(u16, 2), tagged.account_x);
-    try testing.expectEqual(@as(u16, 11), tagged.sender_x);
+    try testing.expectEqual(@as(u16, 3), tagged.account_x);
+    try testing.expectEqual(@as(u16, 12), tagged.sender_x);
     try testing.expectEqual(@as(u16, 22), tagged.sender_width);
 
     // Narrow: the label column shrinks but never disappears.
     const narrow = Layout.compute(60, 30, 8);
     try testing.expectEqual(@as(u16, 8), narrow.account_width);
-    try testing.expectEqual(@as(u16, 11), narrow.sender_x);
+    try testing.expectEqual(@as(u16, 12), narrow.sender_x);
 }
 
 test "reader geometry uses the full screen and leaves room for the body" {

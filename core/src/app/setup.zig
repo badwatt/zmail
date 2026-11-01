@@ -56,6 +56,12 @@ pub const Setup = struct {
         return setup;
     }
 
+    /// Editing an existing account starts at the summary: Enter saves as is,
+    /// Esc walks back to the field that needs changing. No retyping.
+    pub fn start_at_review(self: *Setup) void {
+        self.step = .review;
+    }
+
     pub fn deinit(self: *Setup) void {
         self.password.deinit();
     }

@@ -117,6 +117,7 @@ pub const Session = struct {
     /// The account form, when it is open. It lives here, not in the core state,
     /// because it holds a password and is pure UI.
     settings: ?Settings = null,
+    renaming: ?Rename = null,
 
     /// One row of encoded ANSI. Bounded by the widest row times the longest
     /// possible style run, so a frame never allocates.
@@ -375,6 +376,7 @@ pub const Session = struct {
     }
 
     fn handle_key(self: *Session, key: input.Key) bool {
+        if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
         const command = keymap.translate(key, .{ .mode = self.state.mode, .view = self.state.view }) orelse return false;
@@ -486,6 +488,7 @@ pub const Session = struct {
                 .empty_mailbox => |args| self.empty_mailbox(args.account, args.mailbox),
                 .remove_account => |args| self.remove_account(args.account),
                 .edit_account => |args| self.open_settings(args.account),
+                .rename_account => |args| self.open_rename(args.account),
                 .refresh => self.start_refresh(),
                 .send => |outgoing| self.send(&outgoing),
             }
@@ -590,9 +593,37 @@ pub const Session = struct {
         self.state.set_status("{s} removed · restart to apply", .{label});
     }
 
+    /// Every field on one screen: Tab moves, characters type, Ctrl+S saves.
+    pub const Field = enum(u8) {
+        address,
+        imap_host,
+        imap_port,
+        smtp_host,
+        smtp_port,
+        username,
+        password,
+
+        fn step(self: Field) core.setup.Step {
+            return switch (self) {
+                .address => .address,
+                .imap_host => .imap_host,
+                .imap_port => .imap_port,
+                .smtp_host => .smtp_host,
+                .smtp_port => .smtp_port,
+                .username => .username,
+                .password => .password,
+            };
+        }
+
+        fn count() u8 {
+            return 7;
+        }
+    };
+
     const Settings = struct {
         setup: core.setup.Setup = .{},
         editing: ?core.id.AccountId = null,
+        field: Field = .address,
     };
 
     /// Opens the account form: empty for a new account, prefilled for an edit.
@@ -616,6 +647,8 @@ pub const Session = struct {
             }
             form.setup.username.set(info.username.slice());
             form.setup.send_enabled = info.smtp;
+            // Start on the name so a rename is one keystroke away.
+            form.field = .address;
         }
 
         self.settings = form;
@@ -624,32 +657,39 @@ pub const Session = struct {
         self.needs_render = true;
     }
 
-    fn settings_key(self: *Session, form: *Settings, key: input.Key) bool {
+    /// A one-line rename prompt: the label is the only thing that changes.
+    const Rename = struct {
+        account: core.id.AccountId = .unknown,
+        text: core.text.Text(core.limits.label_max) = .{},
+    };
+
+    fn open_rename(self: *Session, account: core.id.AccountId) void {
+        const index = self.state.accounts.index_of(account) orelse return;
+        self.renaming = .{ .account = account };
+        self.renaming.?.text.set(self.state.accounts.items[index].label.slice());
+        self.state.view = .accounts;
+        self.needs_render = true;
+    }
+
+    fn rename_key(self: *Session, rename: *Rename, key: input.Key) bool {
         switch (key) {
             .char => |codepoint| {
-                form.setup.append(codepoint);
+                if (codepoint >= 0x20 and codepoint != 0x7f) rename.text.append_codepoint(codepoint);
                 self.needs_render = true;
-            },
-            .enter => {
-                form.setup.next();
-                self.needs_render = true;
-                if (form.setup.done) self.save_settings(form);
-            },
-            .escape => {
-                if (form.setup.step == .address) {
-                    self.close_settings();
-                } else {
-                    form.setup.back();
-                    self.needs_render = true;
-                }
             },
             .backspace => {
-                form.setup.backspace();
+                rename.text.pop_codepoint();
                 self.needs_render = true;
             },
+            .escape => {
+                self.renaming = null;
+                self.state.set_status("", .{});
+                self.needs_render = true;
+            },
+            .enter => self.commit_rename(rename),
             .ctrl => |letter| switch (letter) {
                 'u' => {
-                    form.setup.clear_field();
+                    rename.text.clear();
                     self.needs_render = true;
                 },
                 'c', 'q' => self.state.quit = true,
@@ -658,6 +698,70 @@ pub const Session = struct {
             else => {},
         }
         return true;
+    }
+
+    fn commit_rename(self: *Session, rename: *Rename) void {
+        const accounts = self.deps.accounts_file orelse {
+            self.renaming = null;
+            self.state.set_alert("Accounts cannot be changed here", .{});
+            return;
+        };
+        if (rename.text.is_empty()) {
+            self.state.set_alert("A name cannot be empty", .{});
+            return;
+        }
+
+        accounts.rename(rename.account, rename.text.slice()) catch {
+            self.renaming = null;
+            self.state.set_alert("Could not rename the account", .{});
+            return;
+        };
+        if (self.state.accounts.index_of(rename.account)) |index| {
+            self.state.accounts.items[index].label.set(rename.text.slice());
+        }
+        self.state.set_status("{s} renamed · restart to apply", .{rename.text.slice()});
+        self.renaming = null;
+        self.needs_render = true;
+    }
+
+    fn settings_key(self: *Session, form: *Settings, key: input.Key) bool {
+        // The model routes by step, so point it at the field being edited.
+        form.setup.step = form.field.step();
+        self.needs_render = true;
+
+        switch (key) {
+            .char => |codepoint| {
+                if (codepoint >= 0x20 and codepoint != 0x7f) form.setup.append(codepoint);
+            },
+            .backspace => form.setup.backspace(),
+            .tab, .down => self.move_field(form, 1),
+            .back_tab, .up => self.move_field(form, -1),
+            .enter => {
+                if (form.field == .password) {
+                    self.save_settings(form);
+                } else {
+                    self.move_field(form, 1);
+                }
+            },
+            .escape => self.close_settings(),
+            .ctrl => |letter| switch (letter) {
+                'u' => form.setup.clear_field(),
+                's' => self.save_settings(form),
+                'c', 'q' => self.state.quit = true,
+                else => {},
+            },
+            else => {},
+        }
+        return true;
+    }
+
+    fn move_field(self: *Session, form: *Settings, delta: i8) void {
+        const count: i16 = Field.count();
+        const current: i16 = @backingInt(form.field);
+        const next = @mod(current + delta + count, count);
+        form.field = @fromBackingInt(@intCast(@as(u8, @intCast(next))));
+        form.setup.step = form.field.step();
+        self.needs_render = true;
     }
 
     fn close_settings(self: *Session) void {
@@ -675,6 +779,16 @@ pub const Session = struct {
             return;
         };
 
+        // Validate the whole account before writing anything.
+        form.setup.step = .review;
+        form.setup.next();
+        if (!form.setup.done) {
+            form.field = .address;
+            form.setup.step = form.field.step();
+            self.needs_render = true;
+            return;
+        }
+
         var text_buffer: [4096]u8 = undefined;
         const text = form.setup.config_text(&text_buffer);
         var label_buffer: [core.limits.label_max]u8 = undefined;
@@ -683,7 +797,9 @@ pub const Session = struct {
         accounts.save(.{
             .text = text,
             .label = label,
-            .password = form.setup.password.expose(),
+            // An empty field means "keep the stored password", so editing does
+            // not silently blank the credential.
+            .password = if (form.setup.password.len == 0) null else form.setup.password.expose(),
             .replaces = form.editing,
         }) catch {
             self.close_settings();
@@ -766,8 +882,13 @@ pub const Session = struct {
     }
 
     fn render(self: *Session) void {
+        if (self.renaming) |*rename| {
+            render_mod.rename_prompt(&self.screen, self.deps.theme, rename.text.slice());
+            self.flush();
+            return;
+        }
         if (self.settings) |*form| {
-            render_mod.settings(&form.setup, self.deps.theme, &self.screen);
+            render_mod.settings(&form.setup, form.field, form.editing != null, self.deps.theme, &self.screen);
             self.flush();
             return;
         }
@@ -1567,13 +1688,19 @@ test "the account form opens empty, validates, and saves through the port" {
     _ = rig.session.step();
     try testing.expectEqualStrings("x", form.setup.address.slice());
 
+    // Tab moves between fields on the same screen.
+    _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.imap_host, form.field);
+    _ = rig.session.settings_key(form, .back_tab);
+    try testing.expectEqual(Session.Field.address, form.field);
+
     // An invalid address is refused instead of saved.
     form.setup.address.set("not-an-address");
-    _ = rig.session.settings_key(form, .enter);
+    _ = rig.session.settings_key(form, .{ .ctrl = 's' });
     try testing.expect(!form.setup.problem.is_empty());
     try testing.expectEqual(@as(u32, 0), port.saved);
 
-    // A valid one, then through every step, ends in a save.
+    // A valid one, then Ctrl+S saves.
     form.setup.address.set("me@example.com");
     _ = rig.session.settings_key(form, .enter);
     form.setup.imap_host.set("imap.example.com");
@@ -1627,6 +1754,81 @@ test "editing prefills the form and replaces the account" {
     try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "saved") != null);
 }
 
+test "the rename prompt is painted while it is open" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.session.open_rename(core.id.AccountId.from_int(1));
+    try testing.expect(rig.session.renaming != null);
+    // Render straight through: the prompt row and its caret.
+    rig.session.render();
+    try testing.expect(rig.fake_system.output_len > 0);
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Account name") != null);
+}
+
+test "renaming an account touches only its label" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var port: core.accounts_port.Memory = .{};
+    rig.session.deps.accounts_file = port.accounts();
+
+    rig.session.run_effects_for_test(&.{.{ .rename_account = .{ .account = core.id.AccountId.from_int(1) } }});
+    try testing.expect(rig.session.renaming != null);
+    try testing.expectEqualStrings("account", rig.session.renaming.?.text.slice());
+
+    // Typing replaces nothing: the old name is the starting point.
+    _ = rig.session.rename_key(&rig.session.renaming.?, .{ .ctrl = 'u' });
+    _ = rig.session.rename_key(&rig.session.renaming.?, .{ .char = 'w' });
+    _ = rig.session.rename_key(&rig.session.renaming.?, .backspace);
+    _ = rig.session.rename_key(&rig.session.renaming.?, .{ .char = 'w' });
+    _ = rig.session.step();
+    try testing.expectEqualStrings("w", rig.session.renaming.?.text.slice());
+
+    _ = rig.session.rename_key(&rig.session.renaming.?, .enter);
+    try testing.expectEqual(@as(u32, 1), port.saved);
+    try testing.expectEqualStrings("w", port.last_label[0..port.last_label_len]);
+    try testing.expectEqual(core.id.AccountId.from_int(1), port.renamed);
+    try testing.expect(rig.session.renaming == null);
+    try testing.expectEqualStrings("w", rig.session.state.accounts.items[0].label.slice());
+
+    // An empty name is refused, and so is a failing port.
+    rig.session.run_effects_for_test(&.{.{ .rename_account = .{ .account = core.id.AccountId.from_int(1) } }});
+    _ = rig.session.rename_key(&rig.session.renaming.?, .{ .ctrl = 'u' });
+    _ = rig.session.rename_key(&rig.session.renaming.?, .enter);
+    try testing.expectEqualStrings("A name cannot be empty", rig.session.state.status.slice());
+
+    port.fail = true;
+    _ = rig.session.rename_key(&rig.session.renaming.?, .{ .char = 'x' });
+    _ = rig.session.rename_key(&rig.session.renaming.?, .enter);
+    try testing.expectEqualStrings("Could not rename the account", rig.session.state.status.slice());
+
+    // Other keys are ignored, and an account that is not in the list is a no-op.
+    rig.session.open_rename(core.id.AccountId.from_int(1));
+    rig.session.needs_render = true;
+    _ = rig.session.step(); // paints the prompt row
+    _ = rig.session.rename_key(&rig.session.renaming.?, .{ .char = 0x1f600 });
+    _ = rig.session.rename_key(&rig.session.renaming.?, .{ .ctrl = 'c' });
+    try testing.expect(rig.session.state.quit);
+    rig.session.state.quit = false;
+    rig.session.open_rename(core.id.AccountId.from_int(9));
+    try testing.expect(rig.session.renaming != null);
+
+    // Escape cancels; without a port it refuses.
+    rig.session.open_rename(core.id.AccountId.from_int(1));
+    _ = rig.session.rename_key(&rig.session.renaming.?, .escape);
+    try testing.expect(rig.session.renaming == null);
+    rig.session.deps.accounts_file = null;
+    rig.session.open_rename(core.id.AccountId.from_int(1));
+    _ = rig.session.rename_key(&rig.session.renaming.?, .{ .ctrl = 'x' });
+    _ = rig.session.rename_key(&rig.session.renaming.?, .enter);
+    try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
+}
+
 test "the form's keys edit, submit, back out, and quit" {
     var rig: Rig = .{};
     try rig.start();
@@ -1635,6 +1837,7 @@ test "the form's keys edit, submit, back out, and quit" {
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     var form = &rig.session.settings.?;
 
+    rig.session.render(); // the form row
     _ = rig.session.settings_key(form, .{ .char = 'a' });
     _ = rig.session.settings_key(form, .backspace);
     try testing.expect(form.setup.address.is_empty());
@@ -1672,7 +1875,7 @@ test "closing the form twice, and after a failed save, is safe" {
     try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
 }
 
-test "the account form backs up a step and clears a field with Ctrl+U" {
+test "Ctrl+U clears the current field, and Esc cancels the form" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -1681,17 +1884,25 @@ test "the account form backs up a step and clears a field with Ctrl+U" {
     rig.session.deps.accounts_file = port.accounts();
 
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
-    rig.fake_system.push_input("me@example.com\r");
-    _ = rig.session.step();
-    try testing.expectEqual(core.setup.Step.imap_host, rig.session.settings.?.setup.step);
+    var form = &rig.session.settings.?;
+    _ = rig.session.settings_key(form, .{ .char = 'm' });
+    _ = rig.session.settings_key(form, .{ .char = 'e' });
+    _ = rig.session.settings_key(form, .{ .ctrl = 'u' });
+    try testing.expect(form.setup.address.is_empty());
 
-    // Back to the address, clear it, and it is gone.
+    // The last field saves on Enter; a fresh form is closed by Esc.
+    form.setup.address.set("me@example.com");
+    form.setup.imap_host.set("imap.example.com");
+    form.setup.imap_port.set("993");
+    form.setup.username.set("me");
+    form.setup.password.append_codepoint('s');
+    form.field = .password;
+    _ = rig.session.settings_key(form, .enter);
+    try testing.expectEqual(@as(u32, 1), port.saved);
+
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     _ = rig.session.settings_key(&rig.session.settings.?, .escape);
-    _ = rig.session.step();
-    try testing.expectEqual(core.setup.Step.address, rig.session.settings.?.setup.step);
-    rig.fake_system.push_input("\x15");
-    _ = rig.session.step();
-    try testing.expect(rig.session.settings.?.setup.address.is_empty());
+    try testing.expect(rig.session.settings == null);
 }
 
 test "removing an account rewrites the config and drops its mail" {

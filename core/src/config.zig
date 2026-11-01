@@ -190,6 +190,26 @@ fn smtp_server(entry: *Entry) *account.Server {
     return &entry.smtp.?;
 }
 
+/// The same file with one account's label changed.
+pub fn rename_label(text: []const u8, old: []const u8, new: []const u8, buffer: []u8) []const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len > 1 and line[0] == '[') {
+            const inside = std.mem.trim(u8, line[1..], " \t]");
+            if (std.mem.startsWith(u8, inside, "account ") and
+                std.mem.eql(u8, std.mem.trim(u8, inside["account ".len..], " \t"), old))
+            {
+                writer.print("[account {s}]\n", .{new}) catch return "";
+                continue;
+            }
+        }
+        writer.print("{s}\n", .{raw_line}) catch return "";
+    }
+    return writer.buffered();
+}
+
 /// The same file with the `[account label]` section removed. A flat
 /// (section-less) file has nothing to remove, so it yields "".
 pub fn without(text: []const u8, label: []const u8, buffer: []u8) []const u8 {
@@ -268,6 +288,21 @@ const minimal =
     \\imap_security = tls
     \\
 ;
+
+test "rename_label changes one section header only" {
+    const text =
+        "[account work]\naddress = a@work.example\n\n[account home]\naddress = a@home.example\n";
+    var buffer: [512]u8 = undefined;
+    const renamed = rename_label(text, "work", "office", &buffer);
+    try testing.expect(std.mem.indexOf(u8, renamed, "[account office]") != null);
+    try testing.expect(std.mem.indexOf(u8, renamed, "[account work]") == null);
+    try testing.expect(std.mem.indexOf(u8, renamed, "[account home]") != null);
+    try testing.expect(std.mem.indexOf(u8, renamed, "a@work.example") != null);
+
+    var untouched: [512]u8 = undefined;
+    const same = rename_label(text, "missing", "x", &untouched);
+    try testing.expect(std.mem.indexOf(u8, same, "[account work]") != null);
+}
 
 test "without removes exactly one section and keeps the rest" {
     const text =

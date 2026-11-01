@@ -33,67 +33,94 @@ pub const Inputs = struct {
     rows: u16 = 24,
 };
 
-/// The account form, drawn by the same renderer as everything else (no second
-/// full-screen program, no second screen buffer).
-pub fn settings(setup: *const core.setup.Setup, theme: Theme, out: *Screen) void {
+/// One line for renaming an account: the label, and nothing else changes.
+pub fn rename_prompt(out: *Screen, theme: Theme, label: []const u8) void {
     out.clear();
-    const width = out.columns;
+    var buffer: [96]u8 = undefined;
+    const text = std.fmt.bufPrint(&buffer, "Account name: {s}", .{label}) catch "Account name:";
+    _ = out.put_text(1, out.rows / 2, text, out.columns -| 2, theme.text);
+    out.put(1 + screen.text_columns(text), out.rows / 2, ' ', theme.text.with_reverse());
+    _ = out.put_text(1, out.rows -| 1, "Enter rename · Esc cancel · Ctrl+U clear", out.columns -| 2, theme.dim);
+}
 
-    _ = out.put_text(1, 0, "amail  accounts", 20, theme.accent.with_bold());
-    var progress_buffer: [16]u8 = undefined;
-    const progress = std.fmt.bufPrint(&progress_buffer, "step {d}/{d}", .{
-        setup.step.number(),
-        core.setup.Step.count(),
-    }) catch "";
-    put_right(out, width -| 2, 0, progress, theme.dim);
-    out.hline(0, 1, width, '─', theme.border);
+/// The account form: every field on one card, the active one marked. Drawn by
+/// the same renderer as the rest of the app — no second full-screen program.
+pub fn settings(
+    setup: *const core.setup.Setup,
+    field: anytype,
+    editing: bool,
+    theme: Theme,
+    out: *Screen,
+) void {
+    out.clear();
 
-    const label = switch (setup.step) {
-        .address => "Email address",
-        .imap_host => "IMAP server",
-        .imap_port => "IMAP port",
-        .smtp_host => "SMTP server (empty skips sending)",
-        .smtp_port => "SMTP port",
-        .username => "Username",
-        .password => "Password",
-        .review => "Review: Enter saves",
+    const card_width: u16 = @min(66, out.columns -| 4);
+    const rows: u16 = 7;
+    const card_height: u16 = rows + 6; // title, blanks, fields, problem
+    const rect = Rect{
+        .x = (out.columns -| card_width) / 2,
+        .y = (out.rows -| card_height) / 2,
+        .width = card_width,
+        .height = card_height,
     };
-    _ = out.put_text(1, 3, label, width -| 2, theme.text.with_bold());
 
-    if (setup.step == .review) {
-        _ = out.put_text(1, 4, setup.address.slice(), width -| 3, theme.text);
-        _ = out.put_text(1, 5, setup.imap_host.slice(), width -| 3, theme.dim);
-    } else {
+    out.fill_rect(rect, ' ', theme.text);
+    out.box(rect, theme.border);
+    _ = out.put_text(rect.x + 2, rect.y, if (editing) " Edit account " else " New account ", card_width -| 4, theme.accent.with_bold());
+
+    const labels = [_][]const u8{
+        "Address",
+        "IMAP server",
+        "IMAP port",
+        "SMTP server",
+        "SMTP port",
+        "Username",
+        "Password",
+    };
+
+    var index: u8 = 0;
+    while (index < rows) : (index += 1) {
+        const y = rect.y + 2 + index;
+        const active = index == @backingInt(field);
+        if (active) {
+            out.fill_rect(.{ .x = rect.x + 1, .y = y, .width = rect.width - 2, .height = 1 }, ' ', theme.selection);
+            out.put(rect.x + 1, y, '▌', theme.accent);
+        }
+
+        _ = out.put_text(rect.x + 3, y, labels[index], 13, if (active) theme.accent else theme.dim);
+
         var masked: [core.limits.secret_max]u8 = @splat('*');
-        const plain = active_value(setup);
-        const value = if (setup.step == .password) masked[0..@min(plain.len, 24)] else plain;
-        const written = out.put_text(1, 4, value, width -| 3, theme.text);
-        out.put(1 + written, 4, ' ', theme.text.with_reverse());
+        const raw = field_value(setup, index);
+        const value = if (index == 6) masked[0..@min(raw.len, 32)] else raw;
+        const style = if (active) theme.text.with_bold() else theme.text;
+        const written = out.put_text(rect.x + 17, y, value, rect.width -| 19, style);
+        if (active) out.put(rect.x + 17 + written, y, ' ', theme.text.with_reverse());
     }
 
+    const hint_y = rect.y + rect.height - 2;
     if (!setup.problem.is_empty()) {
-        _ = out.put_text(1, 6, setup.problem.slice(), width -| 2, theme.alert);
+        _ = out.put_text(rect.x + 3, hint_y, setup.problem.slice(), rect.width -| 4, theme.alert);
+    } else {
+        _ = out.put_text(rect.x + 3, hint_y, "Tab moves · Enter saves on the last field", rect.width -| 4, theme.dim);
     }
 
     const hints = [_]Hint{
-        .{ .keys = "Enter", .action = "next" },
-        .{ .keys = "Esc", .action = "back" },
-        .{ .keys = "Ctrl+U", .action = "clear" },
-        .{ .keys = "Ctrl+Q", .action = "quit" },
+        .{ .keys = "Tab", .action = "next field" },
+        .{ .keys = "Ctrl+S", .action = "save" },
+        .{ .keys = "Esc", .action = "cancel" },
     };
-    render_hints(&hints, out.rows -| 1, width -| 2, &theme, out);
+    render_hints(&hints, out.rows -| 1, out.columns -| 2, &theme, out);
 }
 
-fn active_value(setup: *const core.setup.Setup) []const u8 {
-    return switch (setup.step) {
-        .address => setup.address.slice(),
-        .imap_host => setup.imap_host.slice(),
-        .imap_port => setup.imap_port.slice(),
-        .smtp_host => setup.smtp_host.slice(),
-        .smtp_port => setup.smtp_port.slice(),
-        .username => setup.username.slice(),
-        .password => setup.password.expose(),
-        .review => "",
+fn field_value(setup: *const core.setup.Setup, index: u8) []const u8 {
+    return switch (index) {
+        0 => setup.address.slice(),
+        1 => setup.imap_host.slice(),
+        2 => setup.imap_port.slice(),
+        3 => setup.smtp_host.slice(),
+        4 => setup.smtp_port.slice(),
+        5 => setup.username.slice(),
+        else => setup.password.expose(),
     };
 }
 
@@ -521,6 +548,7 @@ const accounts_hints = [_]Hint{
     .{ .keys = "Enter", .action = "select" },
     .{ .keys = "n", .action = "add" },
     .{ .keys = "e", .action = "edit" },
+    .{ .keys = "r", .action = "rename" },
     .{ .keys = "d", .action = "remove" },
     .{ .keys = "Esc", .action = "close" },
 };
@@ -674,7 +702,7 @@ const help_rows = [_]Hint{
     .{ .keys = "#", .action = "move to trash" },
     .{ .keys = "X", .action = "delete for good (Trash)" },
     .{ .keys = "E", .action = "empty Trash" },
-    .{ .keys = "A", .action = "accounts: pick, add, edit, remove" },
+    .{ .keys = "A", .action = "accounts: pick, add, edit, rename" },
     .{ .keys = "a", .action = "next account scope" },
     .{ .keys = "/", .action = "search" },
     .{ .keys = "Tab / [ ]", .action = "next mailbox" },
@@ -736,7 +764,7 @@ fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     _ = out.put_text(
         rect.x + 2,
         rect.y + rect.height - 1,
-        "Enter select · n add · e edit · d remove · Esc close",
+        "Enter select · n add · e edit · r rename · d remove · Esc",
         rect.width -| 4,
         inputs.theme.dim,
     );
@@ -963,13 +991,14 @@ test "with several accounts, each row carries its account tag" {
     // The whole label, not just its initial, in its account's hue.
     try row_contains(&out, 2, "home");
     try row_contains(&out, 3, "work");
+    // account_x now leaves a space after the unread dot.
     try testing.expectEqual(
         screen.Color{ .ansi256 = 74 },
-        out.cells[2][2].style.fg,
+        out.cells[2][3].style.fg,
     );
     try testing.expectEqual(
         screen.Color{ .ansi256 = 180 },
-        out.cells[3][2].style.fg,
+        out.cells[3][3].style.fg,
     );
     try row_contains(&out, 0, "all accounts");
 }
@@ -1323,38 +1352,28 @@ test "the list footer advertises the accounts overlay" {
     try row_contains(&out, 23, "refresh");
 }
 
-test "the account settings card shows the step, the value, and the problem" {
+test "the account card shows every field on one screen" {
     var form = core.setup.Setup.init();
     defer form.deinit();
     form.address.set("me@example.com");
-    form.step = .address;
-
-    var out = Screen.init(80, 24);
-    settings(&form, theme_mod.Theme.dark(), &out);
-    try row_contains(&out, 0, "accounts");
-    try row_contains(&out, 3, "Email address");
-    try row_contains(&out, 4, "me@example.com");
-    try row_contains(&out, 23, "next");
-
-    form.problem.set("That email address does not look right");
-    settings(&form, theme_mod.Theme.dark(), &out);
-    try row_contains(&out, 6, "does not look right");
-
-    // Every field renders its own value.
-    inline for (.{ .imap_host, .imap_port, .smtp_host, .smtp_port, .username, .password }) |step| {
-        form.step = step;
-        settings(&form, theme_mod.Theme.dark(), &out);
-    }
-
-    // Password is masked, review shows the summary.
-    form.step = .password;
     form.password.append_codepoint('s');
-    settings(&form, theme_mod.Theme.dark(), &out);
-    try row_contains(&out, 4, "*");
+    form.problem.set("That email address does not look right");
 
-    form.step = .review;
-    settings(&form, theme_mod.Theme.dark(), &out);
-    try row_contains(&out, 4, "me@example.com");
+    var out = Screen.init(90, 24);
+    const field: @import("session.zig").Session.Field = .imap_port;
+    settings(&form, field, true, theme_mod.Theme.dark(), &out);
+
+    // Every row is visible at once, not one step at a time.
+    try row_contains(&out, 7, "Address");
+    try row_contains(&out, 7, "me@example.com");
+    try row_contains(&out, 8, "IMAP server");
+    try row_contains(&out, 9, "993");
+    try row_contains(&out, 10, "SMTP server");
+    try row_contains(&out, 13, "Password");
+    try row_contains(&out, 13, "*");
+    try row_contains(&out, 5, "Edit account");
+    try row_contains(&out, 16, "does not look right");
+    try row_contains(&out, 23, "save");
 }
 
 test "the accounts overlay lists every account and marks the scope" {
@@ -1372,7 +1391,7 @@ test "the accounts overlay lists every account and marks the scope" {
     try row_contains(&out, 10, "home");
     try row_contains(&out, 10, "me@home.example");
     try row_contains(&out, 11, "work  me@work.example");
-    try row_contains(&out, 14, "d remove");
+    try row_contains(&out, 14, "r rename");
     // The scope in use is marked, and the cursor row is filled.
     var marker: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, out.row_text(11, &marker), "*") != null);

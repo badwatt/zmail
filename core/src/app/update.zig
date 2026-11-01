@@ -47,6 +47,7 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .accounts_remove => accounts_remove(state, &effects),
         .accounts_add => effects.add(.{ .edit_account = .{ .account = null } }),
         .accounts_edit => accounts_edit(state, &effects),
+        .accounts_rename => accounts_rename(state, &effects),
         .accounts_close => state.view = .list,
         .begin_search => begin_search(state),
         .search_char => |byte| search_char(state, store, byte),
@@ -303,6 +304,18 @@ fn accounts_edit(state: *State, effects: *Effects) void {
         return;
     };
     effects.add(.{ .edit_account = .{ .account = account.id } });
+}
+
+fn accounts_rename(state: *State, effects: *Effects) void {
+    if (state.accounts_cursor == 0) {
+        state.set_status("Pick an account to rename", .{});
+        return;
+    }
+    const account = state.accounts.at(state.accounts_cursor - 1) orelse {
+        state.set_status("No account there", .{});
+        return;
+    };
+    effects.add(.{ .rename_account = .{ .account = account.id } });
 }
 
 fn accounts_remove(state: *State, effects: *Effects) void {
@@ -712,6 +725,24 @@ test "moving the accounts cursor with an unmapped move leaves it alone" {
 
     _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .page_down });
     try testing.expectEqual(@as(u8, 1), fixture.state.accounts_cursor);
+}
+
+test "renaming needs an account too" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.accounts.add(AccountId.from_int(1), "home", .{}, .{});
+
+    fixture.state.accounts_cursor = 0;
+    _ = apply(&fixture.state, &fixture.store, .accounts_rename);
+    try testing.expectEqualStrings("Pick an account to rename", fixture.state.status.slice());
+
+    fixture.state.accounts_cursor = 4;
+    _ = apply(&fixture.state, &fixture.store, .accounts_rename);
+    try testing.expectEqualStrings("No account there", fixture.state.status.slice());
+
+    fixture.state.accounts_cursor = 1;
+    const effects = apply(&fixture.state, &fixture.store, .accounts_rename);
+    try expect_effects(&effects, &.{.{ .rename_account = .{ .account = AccountId.from_int(1) } }});
 }
 
 test "editing needs an account: the first row is not one" {

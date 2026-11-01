@@ -376,13 +376,21 @@ fn message_from(fetch: *const response.Fetch, mailbox: Mailbox) Message {
         // Subjects and names travel as RFC 2047 encoded words; decode them at
         // the protocol boundary so nothing above ever sees "=?utf-8?Q?...".
         var name_buffer: [limits.name_max * 4]u8 = undefined;
+        var name_display: [limits.name_max * 4]u8 = undefined;
         var subject_buffer: [limits.subject_max * 4]u8 = undefined;
+        var subject_display: [limits.subject_max * 4]u8 = undefined;
         message.from = Address.from_parts(
-            mime.decode_encoded_words(envelope.from_name orelse "", &name_buffer),
+            mime.to_display(
+                mime.decode_encoded_words(envelope.from_name orelse "", &name_buffer),
+                &name_display,
+            ),
             envelope.from_mailbox orelse "",
             envelope.from_host orelse "",
         );
-        message.subject.set(mime.decode_encoded_words(envelope.subject orelse "", &subject_buffer));
+        message.subject.set(mime.to_display(
+            mime.decode_encoded_words(envelope.subject orelse "", &subject_buffer),
+            &subject_display,
+        ));
     }
     return message;
 }
@@ -511,6 +519,24 @@ test "escaped envelope strings survive the message builder" {
     try testing.expectEqual(@as(u32, 1), try client.fetch_envelopes(.inbox, 1, 1, &messages));
     try testing.expectEqualStrings("he said \"hi\"", messages[0].subject.slice());
     try testing.expectEqualStrings("Al \"A\" Ice", messages[0].from.label());
+}
+
+test "raw 8-bit headers become letters, not question marks" {
+    var scripted: Scripted = .{ .input = "* OK ready\r\n" ++
+        "a1 OK LOGIN completed\r\n" ++
+        "* 1 EXISTS\r\n" ++
+        "a2 OK selected\r\n" ++
+        "* 1 FETCH (UID 9 ENVELOPE (NIL \"Aviso de renovaci\xf3n\" ((\"Jos\xe9\" NIL \"jose\" \"example.com\")) NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
+        "a3 OK\r\n" };
+
+    var client = Client.init(scripted.transport());
+    try client.login("me", "pw");
+    _ = try client.select(.inbox);
+
+    var messages: [2]Message = undefined;
+    try testing.expectEqual(@as(u32, 1), try client.fetch_envelopes(.inbox, 1, 1, &messages));
+    try testing.expectEqualStrings("Aviso de renovación", messages[0].subject.slice());
+    try testing.expectEqualStrings("José", messages[0].from.label());
 }
 
 test "envelopes decode RFC 2047 subjects and names" {
