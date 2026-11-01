@@ -159,7 +159,8 @@ const LiveAccount = struct {
     fn openMail(context: *anyopaque) core.mail_port.Error!core.mail_port.Mail {
         const self: *LiveAccount = @ptrCast(@alignCast(context));
         if (self.has_imap) return self.imap.mail();
-        if (!self.password_ready) {
+        // An OAuth account has a token, not a password: do not demand one.
+        if (self.token.access.is_empty() and !self.password_ready) {
             self.failure = "No password for an account: run setup again or set AMAIL_PASSWORD";
             return error.Unavailable;
         }
@@ -395,7 +396,8 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         if (read_token(io, path, entry.label.slice())) |token| {
             if (token.is_fresh(os.now_unix())) account.token = token;
         } else |_| {}
-        if (!account.password_ready and missing_password == null) {
+        // An OAuth account lives on its token: a missing password is expected.
+        if (!account.password_ready and account.token.access.is_empty() and missing_password == null) {
             missing_password = "No password for an account: set AMAIL_PASSWORD or run amail --add-account";
         }
 

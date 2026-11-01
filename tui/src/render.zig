@@ -89,7 +89,9 @@ pub fn settings(
             out.put(rect.x + 1, y, '▌', theme.accent);
         }
 
-        _ = out.put_text(rect.x + 3, y, labels[index], 13, if (active) theme.accent else theme.dim);
+        // An OAuth account has no password row: say so instead of hiding it silently.
+        const shown = if (index == 6 and setup.oauth) "— (OAuth)" else labels[index];
+        _ = out.put_text(rect.x + 3, y, shown, 13, if (active) theme.accent else theme.dim);
 
         var masked: [core.limits.secret_max]u8 = @splat('*');
         const raw = switch (index) {
@@ -97,7 +99,12 @@ pub fn settings(
             8 => setup.oauth_client_id.slice(),
             else => field_value(setup, index),
         };
-        const value = if (index == 6) masked[0..@min(raw.len, 32)] else raw;
+        const value = if (index == 6 and setup.oauth)
+            "not used"
+        else if (index == 6)
+            masked[0..@min(raw.len, 32)]
+        else
+            raw;
         const style = if (active) theme.text.with_bold() else theme.text;
         const written = out.put_text(rect.x + 17, y, value, rect.width -| 19, style);
         if (active) out.put(rect.x + 17 + written, y, ' ', theme.text.with_reverse());

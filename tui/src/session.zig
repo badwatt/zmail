@@ -2001,6 +2001,32 @@ test "the form shows the servers the source reported" {
     try testing.expectEqualStrings("993", form.setup.imap_port.slice());
 }
 
+test "with OAuth the password row is skipped" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+
+    // Walk down to Username, then Tab: with OAuth off it lands on Password.
+    form.setup.address.set("me@example.com");
+    _ = rig.session.settings_key(form, .enter); // imap_host
+    while (form.field != .username) _ = rig.session.settings_key(form, .tab);
+    _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.password, form.field);
+
+    // Turn OAuth on: the password row is skipped entirely.
+    form.field = .sign_in;
+    _ = rig.session.settings_key(form, .{ .char = ' ' });
+    try testing.expect(form.setup.oauth);
+    _ = rig.session.settings_key(form, .tab);
+    try testing.expectEqual(Session.Field.client_id, form.field);
+    _ = rig.session.settings_key(form, .back_tab);
+    try testing.expectEqual(Session.Field.sign_in, form.field);
+}
+
 test "a new OAuth account saves without a password and signs in" {
     var rig: Rig = .{};
     try rig.start();

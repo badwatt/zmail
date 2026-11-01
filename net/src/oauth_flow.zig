@@ -42,6 +42,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
     var state: [16]u8 = undefined;
     _ = std.base64.url_safe_no_pad.Encoder.encode(&state, &state_random);
 
+    // No listener: this Zig's network streams cannot be read here yet, so the
+    // redirect is pasted back. Headless and phone (QR) friendly.
     var redirect_buffer: [64]u8 = undefined;
     const redirect = std.fmt.bufPrint(&redirect_buffer, "http://127.0.0.1:8123/", .{}) catch
         return error.Unavailable;
@@ -59,16 +61,16 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
 
     // 2. Show it: browser if there is one, QR for a headless terminal.
     show_url(io, options, url);
-    options.write(options.context, "\nPaste the URL your browser ended on (it may say it cannot connect):\n\n");
+    options.write(options.context, "\nFinish in the browser; if nothing happens, paste the URL here:\n\n");
 
     // 3. Read the pasted URL.
     var pasted: [2048]u8 = undefined;
     const length = options.read(options.context, &pasted) catch return error.Unavailable;
-    const code = core.oauth.parse_redirect(pasted[0..length]) orelse return error.Cancelled;
+    const auth_code = core.oauth.parse_redirect(pasted[0..length]) orelse return error.Cancelled;
 
     // 5. Exchange the code for a token.
     var body_buffer: [2048]u8 = undefined;
-    const body = core.oauth.code_body(&body_buffer, options.provider, options.client_id, code, redirect, pkce.verifier_slice());
+    const body = core.oauth.code_body(&body_buffer, options.provider, options.client_id, auth_code, redirect, pkce.verifier_slice());
     var response_buffer: [https.max_response]u8 = undefined;
 
     const e = core.oauth.endpoints(options.provider);
