@@ -40,7 +40,11 @@ test "--version prints the name and version from build.zig.zon" {
     defer result.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u8, 0), result.code);
-    try testing.expectEqualStrings("amail 0.1.0\n", result.stdout);
+    var expected_buffer: [64]u8 = undefined;
+    const expected = std.fmt.bufPrint(&expected_buffer, "{s} {s}\n", .{
+        core.meta.name, core.meta.version,
+    }) catch unreachable;
+    try testing.expectEqualStrings(expected, result.stdout);
     try testing.expectEqualStrings("", result.stderr);
 }
 

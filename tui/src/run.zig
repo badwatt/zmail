@@ -6,6 +6,7 @@
 const std = @import("std");
 const cli = @import("cli.zig");
 const launch_mod = @import("launch.zig");
+const meta = @import("core").meta;
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
@@ -95,14 +96,22 @@ test "decide: --version prints the version and exits 0" {
     var out: [1024]u8 = undefined;
     var err: [256]u8 = undefined;
     const outcome = decide(&[_][]const u8{ "amail", "--version" }, &out, &err);
-    try testing.expectEqualStrings("amail 0.1.0\n", outcome.print_stdout);
+    var expected_buffer: [64]u8 = undefined;
+    const expected = std.fmt.bufPrint(&expected_buffer, "{s} {s}\n", .{
+        meta.name, meta.version,
+    }) catch unreachable;
+    try testing.expectEqualStrings(expected, outcome.print_stdout);
 }
 
 test "decide: --help prints usage" {
     var out: [1024]u8 = undefined;
     var err: [256]u8 = undefined;
     const outcome = decide(&[_][]const u8{ "amail", "--help" }, &out, &err);
-    try testing.expect(std.mem.startsWith(u8, outcome.print_stdout, "amail 0.1.0"));
+    var expected_buffer: [64]u8 = undefined;
+    const expected = std.fmt.bufPrint(&expected_buffer, "{s} {s}", .{
+        meta.name, meta.version,
+    }) catch unreachable;
+    try testing.expect(std.mem.startsWith(u8, outcome.print_stdout, expected));
 }
 
 test "decide: a bad flag prints to stderr and exits 2" {
@@ -199,7 +208,11 @@ test "main_with routes every outcome, including launch" {
         .io = io,
         .args = .{ .vector = &version_args },
     }, .{ .launch = stub_launch }, &out, &err));
-    try testing.expectEqualStrings("amail 0.1.0\n", out.buffered());
+    var version_buffer: [64]u8 = undefined;
+    const version_text = std.fmt.bufPrint(&version_buffer, "{s} {s}\n", .{
+        meta.name, meta.version,
+    }) catch unreachable;
+    try testing.expectEqualStrings(version_text, out.buffered());
 
     const bad_args = [_][*:0]const u8{ "amail", "--nope" };
     out = std.Io.Writer.fixed(&out_buffer);

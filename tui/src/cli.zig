@@ -366,14 +366,21 @@ test "repeated --demo and --live are harmless" {
 test "render_version names the product and its semver" {
     var buffer: [64]u8 = undefined;
     const output = render_version(&buffer);
-    try testing.expectEqualStrings("amail 0.1.0\n", output);
+    var expected_buffer: [64]u8 = undefined;
+    const expected = std.fmt.bufPrint(&expected_buffer, "{s} {s}\n", .{ meta.name, meta.version }) catch
+        unreachable;
+    try testing.expectEqualStrings(expected, output);
     try testing.expectEqualStrings(meta.name, output[0..meta.name.len]);
 }
 
 test "render_help documents every option and the demo default" {
     var buffer: [1024]u8 = undefined;
     const output = render_help(&buffer);
-    try testing.expect(std.mem.startsWith(u8, output, "amail 0.1.0 - a calm terminal mail client"));
+    var expected_buffer: [64]u8 = undefined;
+    const expected = std.fmt.bufPrint(&expected_buffer, "{s} {s} - a calm terminal mail client", .{
+        meta.name, meta.version,
+    }) catch unreachable;
+    try testing.expect(std.mem.startsWith(u8, output, expected));
     try testing.expect(std.mem.indexOf(u8, output, "--help") != null);
     try testing.expect(std.mem.indexOf(u8, output, "--version") != null);
     try testing.expect(std.mem.indexOf(u8, output, "--demo") != null);
