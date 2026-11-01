@@ -248,7 +248,6 @@ pub const Session = struct {
     /// Runs once, right after the first frame: opens the connections the cache
     /// could not replace. The splash is on screen while this blocks.
     pub fn boot(self: *Session) void {
-        std.debug.print("boot: needs_boot={} sources={} splash={}\n", .{ self.needs_boot, self.source_count, self.deps.splash });
         if (!self.needs_boot) {
             self.stop_splash();
             return;
