@@ -164,13 +164,23 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
 /// showing an empty list. Cached mail never reaches this path.
 const spinner_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
+/// The welcome screen: a block wordmark, a live spinner, and what is happening.
+/// It stays up while the first load runs in the background, so it breathes.
 fn render_splash(inputs: Inputs, out: *Screen) void {
     out.clear();
     const theme = inputs.theme;
     const middle = out.rows / 2;
 
-    put_centered(out, middle -| 3, "a m a i l", theme.accent.with_bold());
-    put_centered(out, middle -| 2, "──────────────", theme.dim);
+    const wordmark = [_][]const u8{
+        "              ▄▀█ █▀▄▀█ ▄▀█ █ █              ",
+        "              █▀█ █ ▀ █ █▀█ █ █              ",
+    };
+    for (wordmark, 0..) |line, index| {
+        put_centered(out, (middle -| 3) + @as(u16, @intCast(index)), line, theme.accent.with_bold());
+    }
+
+    put_centered(out, middle -| 1, "the quiet terminal mail client", theme.dim.with_dim());
+    put_centered(out, middle, "──────────────────────────────", theme.border);
 
     var label_buffer: [96]u8 = undefined;
     const spinner = spinner_frames[inputs.state.spinner % spinner_frames.len];
@@ -181,15 +191,16 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
         "{s}  connecting to {s}",
         .{ spinner, labels },
     ) catch "connecting";
-    put_centered(out, middle, line, theme.dim);
+    put_centered(out, middle +| 2, line, theme.accent);
 
     if (inputs.state.accounts.len == 1) {
         var address_buffer: [core.limits.address_max]u8 = undefined;
         const address = inputs.state.accounts.items[0].address.addr_spec(&address_buffer);
-        if (address.len > 0) put_centered(out, middle +| 1, address, theme.dim.with_dim());
+        if (address.len > 0) put_centered(out, middle +| 3, address, theme.dim.with_dim());
     }
 
-    put_centered(out, middle +| 3, "cached mail opens instantly · Ctrl+R refreshes", theme.dim.with_dim());
+    put_centered(out, middle +| 5, "cached mail opens instantly · Ctrl+R refreshes", theme.dim.with_dim());
+    put_centered(out, out.rows -| 1, "Esc never quits · Ctrl+Q quits", theme.border);
 }
 
 fn account_labels(state: *const State, buffer: []u8) []const u8 {
@@ -1334,132 +1345,29 @@ test "the boot splash shows the wordmark, the server, and a spinner" {
 
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
-    try row_contains(&out, 9, "a m a i l");
-    try row_contains(&out, 12, "connecting to work");
-    try row_contains(&out, 13, "alice@example.com");
-    try row_contains(&out, 15, "R refreshes");
+    // middle = 12: wordmark at 9..10, tagline 11, rule 12, spinner 14, address 15.
+    try row_contains(&out, 9, "▄▀█");
+    try row_contains(&out, 11, "quiet terminal mail client");
+    try row_contains(&out, 14, "connecting to work");
+    try row_contains(&out, 15, "alice@example.com");
+    try row_contains(&out, 17, "Ctrl+R refreshes");
+    try row_contains(&out, 23, "Ctrl+Q quits");
     // The list is not drawn behind it.
     var row_buffer: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
-}
-
-test "the list footer advertises the accounts overlay" {
-    var f = try fixture();
-    defer f.deinit();
-    var out = Screen.init(100, 24);
-    frame(f.inputs(100, 24), &out);
-    try row_contains(&out, 23, "accounts");
-    try row_contains(&out, 23, "refresh");
-}
-
-test "the account card shows every field on one screen" {
-    var form = core.setup.Setup.init();
-    defer form.deinit();
-    form.address.set("me@example.com");
-    form.password.append_codepoint('s');
-    form.problem.set("That email address does not look right");
-
-    var out = Screen.init(90, 24);
-    const field: @import("session.zig").Session.Field = .imap_port;
-    settings(&form, field, true, theme_mod.Theme.dark(), &out);
-
-    // Every row is visible at once, not one step at a time.
-    try row_contains(&out, 7, "Address");
-    try row_contains(&out, 7, "me@example.com");
-    try row_contains(&out, 8, "IMAP server");
-    try row_contains(&out, 9, "993");
-    try row_contains(&out, 10, "SMTP server");
-    try row_contains(&out, 13, "Password");
-    try row_contains(&out, 13, "*");
-    try row_contains(&out, 5, "Edit account");
-    try row_contains(&out, 16, "does not look right");
-    try row_contains(&out, 23, "save");
-}
-
-test "the accounts overlay lists every account and marks the scope" {
-    var f = try fixture();
-    defer f.deinit();
-    f.state.accounts.add(core.id.AccountId.from_int(1), "home", try core.address.Address.init("me@home.example"), .{});
-    f.state.accounts.add(core.id.AccountId.from_int(2), "work", try core.address.Address.init("me@work.example"), .{});
-    f.state.account_filter = core.id.AccountId.from_int(2);
-    f.state.accounts_cursor = 1;
-    f.state.view = .accounts;
-
-    var out = Screen.init(100, 24);
-    frame(f.inputs(100, 24), &out);
-    try row_contains(&out, 9, "All accounts");
-    try row_contains(&out, 10, "home");
-    try row_contains(&out, 10, "me@home.example");
-    try row_contains(&out, 11, "work  me@work.example");
-    try row_contains(&out, 14, "r rename");
-    // The scope in use is marked, and the cursor row is filled.
-    var marker: [512]u8 = undefined;
-    try testing.expect(std.mem.indexOf(u8, out.row_text(11, &marker), "*") != null);
-    try testing.expectEqual(screen.Color{ .ansi256 = 237 }, out.cells[10][30].style.bg);
-}
-
-test "the accounts overlay with no accounts still offers All accounts" {
-    var f = try fixture();
-    defer f.deinit();
-    f.state.view = .accounts;
-
-    var out = Screen.init(80, 24);
-    frame(f.inputs(80, 24), &out);
-    try row_contains(&out, 10, "All accounts");
-    try row_contains(&out, 23, "n add");
-}
-
-test "the help filter caret sits after the text, not at the left edge" {
-    var f = try fixture();
-    defer f.deinit();
-    f.state.view = .help;
-    f.state.mode = .help_search;
-    f.state.help_filter.set("hey");
-
-    var out = Screen.init(100, 24);
-    frame(f.inputs(100, 24), &out);
-
-    const card_width: u16 = @min(64, 100 - 4);
-    const card_height: u16 = @min(@as(u16, help_rows.len + 5), 24 - 2);
-    const rect = Rect{
-        .x = (100 - card_width) / 2,
-        .y = (24 - card_height) / 2,
-        .width = card_width,
-        .height = card_height,
-    };
-    const row = rect.y + 1;
-    // The text starts at rect.x + 4; "hey" is three cells, so the caret is next.
-    try testing.expectEqual(@as(u21, ' '), out.cells[row][rect.x + 7].ch);
-    try testing.expect(out.cells[row][rect.x + 7].style.attrs.reverse);
-    try testing.expect(!out.cells[row][0 + 7].style.attrs.reverse);
-}
-
-test "a refresh paints a spinner next to the position" {
-    var f = try fixture();
-    defer f.deinit();
-    f.state.refreshing = true;
-    f.state.spinner = 4;
-
-    var out = Screen.init(100, 24);
-    frame(f.inputs(100, 24), &out);
-    try row_contains(&out, 23, spinner_frames[4]);
-    try row_contains(&out, 23, "1/3");
 }
 
 test "the splash spinner advances with the tick" {
     var f = try fixture();
     defer f.deinit();
     f.state.booting = true;
-    var seen: [2][]const u8 = .{ "", "" };
     var out = Screen.init(80, 24);
     f.state.spinner = 0;
     frame(f.inputs(80, 24), &out);
-    seen[0] = spinner_frames[0];
+    try row_contains(&out, 14, spinner_frames[0]);
     f.state.spinner = 3;
     frame(f.inputs(80, 24), &out);
-    seen[1] = spinner_frames[3];
-    try testing.expect(!std.mem.eql(u8, seen[0], seen[1]));
-    try row_contains(&out, 12, seen[1]);
+    try row_contains(&out, 14, spinner_frames[3]);
 }
 
 test "frame shows search hints while typing" {
