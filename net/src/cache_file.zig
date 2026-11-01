@@ -8,6 +8,8 @@ const std = @import("std");
 const core = @import("core");
 
 const cache_mod = core.cache;
+const sealed = core.sealed;
+const KeyFile = @import("keyfile.zig").KeyFile;
 const port = core.cache_port;
 const Message = core.message.Message;
 const AccountId = core.id.AccountId;
@@ -23,10 +25,19 @@ pub const FileCache = struct {
     io: std.Io,
     base_dir: []const u8,
     labels: []const Label,
-    buffer: [2 * 1024 * 1024]u8 = undefined,
+    keys: KeyFile,
+    buffer: [1024 * 1024]u8 = undefined,
+    /// Sealed bytes read from disk, opened into `plain` before decoding.
+    plain: [1024 * 1024]u8 = undefined,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, base_dir: []const u8, labels: []const Label) FileCache {
-        return .{ .gpa = gpa, .io = io, .base_dir = base_dir, .labels = labels };
+        return .{
+            .gpa = gpa,
+            .io = io,
+            .base_dir = base_dir,
+            .labels = labels,
+            .keys = KeyFile.init(gpa, io, base_dir),
+        };
     }
 
     pub fn cache(self: *FileCache) port.Cache {
@@ -42,7 +53,7 @@ pub const FileCache = struct {
 
     fn file_path(self: *const FileCache, account: AccountId, mailbox: Mailbox, buffer: []u8) ?[]const u8 {
         const label = self.label_for(account) orelse return null;
-        return std.fmt.bufPrint(buffer, "{s}/{s}/{s}.tsv", .{
+        return std.fmt.bufPrint(buffer, "{s}/{s}/{s}.bin", .{
             self.base_dir,
             label,
             mailbox_file_name(mailbox),
@@ -62,15 +73,25 @@ pub const FileCache = struct {
 
         const count = file.readPositionalAll(self.io, &self.buffer, 0) catch
             return error.Unavailable;
-        return cache_mod.decode(self.buffer[0..count], out) catch 0;
+
+        // Envelopes are sealed too: senders and subjects are mail, not metadata.
+        const key = self.keys.get() orelse return error.Unavailable;
+        const text = sealed.open(key, self.buffer[0..count], &self.plain) catch return 0;
+        return cache_mod.decode(text, out) catch 0;
     }
 
     fn saveThunk(context: *anyopaque, account: AccountId, mailbox: Mailbox, messages: []const Message) port.Error!void {
         const self: *FileCache = @ptrCast(@alignCast(context));
         if (messages.len == 0) return;
 
-        var writer = std.Io.Writer.fixed(&self.buffer);
+        var writer = std.Io.Writer.fixed(&self.plain);
         cache_mod.encode(&writer, messages) catch return error.Unavailable;
+
+        const key = self.keys.get() orelse return error.Unavailable;
+        var nonce: sealed.Nonce = undefined;
+        self.io.random(&nonce);
+        const sealed_text = sealed.seal(key, nonce, writer.buffered(), &self.buffer) catch
+            return error.Unavailable;
 
         var path_buffer: [512]u8 = undefined;
         const path = self.file_path(account, mailbox, &path_buffer) orelse return;
@@ -85,7 +106,7 @@ pub const FileCache = struct {
         const file = std.Io.Dir.cwd().createFile(self.io, path, .{ .permissions = file_mode }) catch
             return error.Unavailable;
         defer file.close(self.io);
-        file.writeStreamingAll(self.io, writer.buffered()) catch return error.Unavailable;
+        file.writeStreamingAll(self.io, sealed_text) catch return error.Unavailable;
     }
 };
 

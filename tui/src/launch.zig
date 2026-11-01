@@ -92,7 +92,11 @@ fn run_session(
     bodies: ?core.bodies_port.BodyCache,
     splash: bool,
 ) ?Failure {
-    var session: session_mod.Session = undefined;
+    // The session owns megabytes of bounded buffers; keeping it on the stack
+    // next to the adapters overflows it.
+    const session = gpa.create(session_mod.Session) catch
+        return .{ .message = "Not enough memory to start" };
+    defer gpa.destroy(session);
     session.init(gpa, .{
         .accounts = accounts,
         .outboxes = outboxes,
@@ -405,8 +409,7 @@ fn read_password(
     const path = cli.credential_path(config_path, label, &path_buffer);
     if (path.len > 0) {
         if (read_file(io, path, &buffer)) |text| {
-            try core.secret.Secret.init(std.mem.trimEnd(u8, text, "\r\n"), out);
-            return;
+            if (try open_credential(io, text, out)) return;
         } else |_| {}
     }
 
@@ -421,12 +424,72 @@ fn read_password(
     const legacy = cli.legacy_credential_path(config_path, &legacy_buffer);
     if (legacy.len > 0) {
         if (read_file(io, legacy, &buffer)) |text| {
-            try core.secret.Secret.init(std.mem.trimEnd(u8, text, "\r\n"), out);
+            // An older install wrote the password in the clear. Accept it, then
+            // immediately replace the file with a sealed copy: no plaintext
+            // secret stays on disk after the first run.
+            const trimmed = std.mem.trimEnd(u8, text, "\r\n");
+            try core.secret.Secret.init(trimmed, out);
+            seal_in_place(io, legacy, trimmed) catch {};
+            if (path.len > 0) write_sealed_credential(io, config_path, out, label) catch {};
             return;
         } else |_| {}
     }
 
     return error.NoPassword;
+}
+
+/// Seals an existing plaintext file (used to migrate the old credential).
+fn seal_in_place(io: std.Io, path: []const u8, secret: []const u8) !void {
+    var cache_buffer: [512]u8 = undefined;
+    const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
+    if (cache_dir.len == 0) return error.NameTooLong;
+
+    var keys = net.keyfile.KeyFile.init(undefined, io, cache_dir);
+    const key = keys.get() orelse return error.NameTooLong;
+
+    var sealed_buffer: [core.limits.secret_max + core.sealed.overhead]u8 = undefined;
+    var nonce: core.sealed.Nonce = undefined;
+    io.random(&nonce);
+    const sealed_secret = try core.sealed.seal(key, nonce, secret, &sealed_buffer);
+    try write_file(io, path, sealed_secret);
+}
+
+/// Writes (or rewrites) the sealed credential for `label`.
+fn write_sealed_credential(io: std.Io, config_path: []const u8, password: *const core.secret.Secret, label: []const u8) !void {
+    var credential_buffer: [512]u8 = undefined;
+    const credential = cli.credential_path(config_path, label, &credential_buffer);
+    if (credential.len == 0) return error.NameTooLong;
+
+    const dir = cli.parent_dir(credential);
+    if (dir.len > 0) {
+        std.Io.Dir.cwd().createDir(io, dir, directory_mode) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+    try seal_in_place(io, credential, password.expose());
+}
+
+/// Opens a sealed credential; a plaintext file from an older version is still
+/// accepted so nobody is locked out by the upgrade.
+fn open_credential(io: std.Io, text: []const u8, out: *core.secret.Secret) !bool {
+    var cache_buffer: [512]u8 = undefined;
+    const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
+    if (cache_dir.len == 0) return false;
+
+    var keys = net.keyfile.KeyFile.init(undefined, io, cache_dir);
+    const key = keys.get() orelse return false;
+
+    var plain: [core.limits.secret_max]u8 = undefined;
+    if (core.sealed.open(key, text, &plain)) |value| {
+        try core.secret.Secret.init(value, out);
+        return true;
+    } else |_| {}
+
+    const trimmed = std.mem.trimEnd(u8, text, "\r\n");
+    if (trimmed.len == 0 or trimmed.len > core.limits.secret_max) return false;
+    try core.secret.Secret.init(trimmed, out);
+    return true;
 }
 
 const file_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
@@ -485,6 +548,8 @@ fn append_file(io: std.Io, path: []const u8, text: []const u8) !void {
     try file.writePositionalAll(io, text, size.size + separator.len);
 }
 
+/// The password file is sealed with the cache key (0600), so no secret is ever
+/// written in the clear. The key file is the trust boundary: see docs/SECURITY.
 fn write_credential(io: std.Io, config_path: []const u8, saved: *const setup_session.Saved) !void {
     var credential_buffer: [512]u8 = undefined;
     const credential = cli.credential_path(config_path, saved.label.slice(), &credential_buffer);
@@ -497,7 +562,18 @@ fn write_credential(io: std.Io, config_path: []const u8, saved: *const setup_ses
             else => return err,
         };
     }
-    try write_file(io, credential, saved.password.expose());
+    var cache_buffer: [512]u8 = undefined;
+    const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
+    if (cache_dir.len == 0) return error.NameTooLong;
+
+    var keys = net.keyfile.KeyFile.init(undefined, io, cache_dir);
+    const key = keys.get() orelse return error.NameTooLong;
+
+    var sealed_buffer: [core.limits.secret_max + core.sealed.overhead]u8 = undefined;
+    var nonce: core.sealed.Nonce = undefined;
+    io.random(&nonce);
+    const sealed_password = try core.sealed.seal(key, nonce, saved.password.expose(), &sealed_buffer);
+    try write_file(io, credential, sealed_password);
 }
 
 fn write_setup_files(io: std.Io, config_path: []const u8, saved: *const setup_session.Saved) !void {
@@ -522,7 +598,18 @@ fn write_setup_files(io: std.Io, config_path: []const u8, saved: *const setup_se
             else => return err,
         };
     }
-    try write_file(io, credential, saved.password.expose());
+    var cache_buffer: [512]u8 = undefined;
+    const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
+    if (cache_dir.len == 0) return error.NameTooLong;
+
+    var keys = net.keyfile.KeyFile.init(undefined, io, cache_dir);
+    const key = keys.get() orelse return error.NameTooLong;
+
+    var sealed_buffer: [core.limits.secret_max + core.sealed.overhead]u8 = undefined;
+    var nonce: core.sealed.Nonce = undefined;
+    io.random(&nonce);
+    const sealed_password = try core.sealed.seal(key, nonce, saved.password.expose(), &sealed_buffer);
+    try write_file(io, credential, sealed_password);
 }
 
 fn write_file(io: std.Io, path: []const u8, bytes: []const u8) !void {

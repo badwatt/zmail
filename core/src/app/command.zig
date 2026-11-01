@@ -44,6 +44,10 @@ pub const Command = union(enum) {
     toggle_flag,
     archive_selected,
     delete_selected,
+    /// Trash only: remove the selected message for good.
+    delete_forever,
+    /// Trash only: remove everything in it.
+    empty_trash,
     begin_search,
     search_char: u8,
     search_backspace,
@@ -106,6 +110,8 @@ test "every command is classified for status clearing" {
         .{ .command = .toggle_flag, .clears = true },
         .{ .command = .archive_selected, .clears = true },
         .{ .command = .delete_selected, .clears = true },
+        .{ .command = .delete_forever, .clears = true },
+        .{ .command = .empty_trash, .clears = true },
         .{ .command = .begin_search, .clears = true },
         .{ .command = .{ .search_char = 'a' }, .clears = true },
         .{ .command = .search_backspace, .clears = true },
@@ -135,5 +141,5 @@ test "every command is classified for status clearing" {
     for (commands) |case| {
         try testing.expectEqual(case.clears, case.command.clears_status());
     }
-    try testing.expectEqual(@as(usize, 38), commands.len);
+    try testing.expectEqual(@as(usize, 40), commands.len);
 }

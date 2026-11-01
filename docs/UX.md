@@ -92,6 +92,8 @@ and disappears on the next action.
 | `c` | compose a new message |
 | `r` | reply to the selected message |
 | `a` | cycle account scope: all → account 1 → … → all |
+| `X` | delete the selected message for good (Trash only) |
+| `E`, `E` | empty Trash (asks once) |
 | `Ctrl+Q` `Ctrl+C` | quit. The top level never closes on `Esc`, `q`, or `h` |
 
 Search is live: typing filters as you go, `Enter` keeps the filter, `Esc`

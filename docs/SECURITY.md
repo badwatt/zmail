@@ -82,10 +82,17 @@ milestone. There is no analytics, no update check, and no crash reporting.
   guarded by `0600` and never printed, logged, or included in the config.
 - **Per-account credentials.** One `0600` file per account label under
   `credentials/`; the config still refuses a `password` key.
-- **The envelope cache is private data.** `~/.cache/amail/<label>/<mailbox>.tsv`
-  holds senders, subjects, and snippets in plaintext, mode `0600` inside a
-  `0700` directory. It is only a copy of what the server sends, and `Ctrl+R`
-  replaces it.
+- **Everything on disk is sealed.** One key, `~/.cache/amail/key` (32 random
+  bytes from the IO's CSPRNG, mode `0600`, created on first use), encrypts the
+  envelope cache, the message bodies, and the password file with
+  XChaCha20-Poly1305. No sender, subject, snippet, body, or password is written
+  in the clear.
+- **The key is the trust boundary.** It sits next to the data with mode `0600`:
+  that protects against a stray backup, a synced cache directory, and other
+  users, not against code running as you. An OS keyring (libsecret, the kernel
+  keyring) is the next step.
+- **Migration.** An older install's plaintext `credential` and `.tsv` files are
+  read once and immediately replaced with sealed copies.
 - **Bodies are sealed at rest.** `~/.cache/amail/<label>/bodies/<mailbox>/<uid>.bin`
   is `nonce || XChaCha20-Poly1305 ciphertext || tag`, keyed with
   `~/.cache/amail/key` (32 random bytes, `0600`, created on first use; the key

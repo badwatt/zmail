@@ -14,6 +14,7 @@ const render_mod = @import("render.zig");
 const screen_mod = @import("screen.zig");
 const system_mod = @import("system.zig");
 const theme_mod = @import("theme.zig");
+const os = @import("os.zig");
 const refresh_mod = @import("refresh.zig");
 const wrap = @import("wrap.zig");
 
@@ -57,6 +58,9 @@ pub const Deps = struct {
     /// Sealed bodies on disk: reading a message twice must not touch the
     /// network twice.
     bodies: ?core.bodies_port.BodyCache = null,
+    /// Paint the spinner while an effect runs, and keep it up this long (ms) so
+    /// even an instant fetch reads as "working", not as a jump.
+    loading_ms: u32 = 90,
     system: System,
     theme: theme_mod.Theme = theme_mod.Theme.dark(),
     now: Now = fixed_now,
@@ -399,6 +403,27 @@ pub const Session = struct {
         self.run_effects(effects);
     }
 
+    /// Shows the spinner before an effect that may wait, and keeps it visible
+    /// long enough to be seen. `loading_ms` is 0 in tests that do not want to
+    /// sleep.
+    fn begin_loading(self: *Session) ?i64 {
+        if (self.deps.loading_ms == 0) return null;
+        self.state.loading = true;
+        self.render();
+        return os.monotonic_ms();
+    }
+
+    fn end_loading(self: *Session, started: ?i64) void {
+        if (self.deps.loading_ms == 0) return;
+        if (started) |begin| {
+            const elapsed: i64 = @max(0, os.monotonic_ms() - begin);
+            const minimum: i64 = @intCast(self.deps.loading_ms);
+            if (elapsed < minimum) os.sleep_ms(@intCast(minimum - elapsed));
+        }
+        self.state.loading = false;
+        self.needs_render = true;
+    }
+
     fn run_effects(self: *Session, effects: []const core.effect.Effect) void {
         for (effects) |effect| {
             // One connection: a body asked for while the worker has it is
@@ -419,13 +444,17 @@ pub const Session = struct {
                 else => self.wait_refresh(),
             }
 
+            const timer = self.begin_loading();
             switch (effect) {
                 .fetch_body => |args| self.fetch_body(args.account, args.mailbox, args.id),
                 .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags),
                 .move_message => |args| self.move_message(args.account, args.id, args.to),
+                .delete_message => |args| self.delete_message(args.account, args.mailbox, args.id),
+                .empty_mailbox => |args| self.empty_mailbox(args.account, args.mailbox),
                 .refresh => self.start_refresh(),
                 .send => |outgoing| self.send(&outgoing),
             }
+            self.end_loading(timer);
         }
     }
 
@@ -471,6 +500,37 @@ pub const Session = struct {
         if (self.deps.bodies) |bodies| {
             bodies.save(account, mailbox, id, body) catch {};
         }
+    }
+
+    fn delete_message(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
+        const mail = self.source_for(account) orelse {
+            self.state.set_alert("That account is not connected", .{});
+            return;
+        };
+        mail.delete_message(mailbox, id) catch {
+            self.state.set_alert("Could not delete on the server", .{});
+            return;
+        };
+        self.state.set_status("Deleted for good", .{});
+    }
+
+    fn empty_mailbox(self: *Session, account: ?core.id.AccountId, mailbox: Mailbox) void {
+        var done: u32 = 0;
+        for (self.deps.accounts) |source| {
+            if (account) |filter| {
+                if (source.id != filter) continue;
+            }
+            source.mail.empty_mailbox(mailbox) catch {
+                self.state.set_alert("Could not empty {s} on the server", .{mailbox.title()});
+                return;
+            };
+            done += 1;
+        }
+        if (done == 0) {
+            self.state.set_alert("That account is not connected", .{});
+            return;
+        }
+        self.state.set_status("Trash emptied", .{});
     }
 
     fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags) void {
@@ -602,6 +662,8 @@ const FakeMail = struct {
             .fetch_body = fetchBodyThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
+            .delete_message = deleteThunk,
+            .empty_mailbox = emptyThunk,
         } };
     }
 
@@ -626,6 +688,18 @@ const FakeMail = struct {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         if (self.fail_flags) return error.Unavailable;
         return self.inner.mail().set_flags(id, flags);
+    }
+
+    fn deleteThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId) core.mail_port.Error!void {
+        const self: *FakeMail = @ptrCast(@alignCast(context));
+        if (self.fail_flags) return error.Unavailable;
+        return self.inner.mail().delete_message(mailbox, id);
+    }
+
+    fn emptyThunk(context: *anyopaque, mailbox: Mailbox) core.mail_port.Error!void {
+        const self: *FakeMail = @ptrCast(@alignCast(context));
+        if (self.fail_flags) return error.Unavailable;
+        return self.inner.mail().empty_mailbox(mailbox);
     }
 
     fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) core.mail_port.Error!void {
@@ -672,6 +746,7 @@ const Rig = struct {
             .system = self.fake_system.system(),
             .theme = theme_mod.Theme.dark(),
             .now = fixed_now,
+            .loading_ms = 0,
         });
         // Tests exercise the steady state: the cache is empty, so boot fetches.
         self.session.boot();
@@ -1264,6 +1339,110 @@ test "a cold boot that cannot connect says so, and shows an empty list" {
     // And the failure does not leave the session stuck in boot mode.
     try testing.expect(!rig.session.state.booting);
     try testing.expect(!rig.session.needs_boot);
+}
+
+test "delete and empty reach the account's server" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.session.run_effects_for_test(&.{.{ .delete_message = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(1),
+    } }});
+    try testing.expect(rig.fake_mail.inner.find(MessageId.from_int(1)) == null);
+    try testing.expectEqualStrings("Deleted for good", rig.session.state.status.slice());
+
+    rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+    } }});
+    try testing.expectEqualStrings("Trash emptied", rig.session.state.status.slice());
+
+    // All accounts (null filter) is the same path with no filter.
+    rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
+        .account = null,
+        .mailbox = .sent,
+    } }});
+    try testing.expectEqual(@as(u32, 1), rig.session.deps.accounts.len);
+}
+
+test "delete and empty report server errors and unknown accounts" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.fake_mail.fail_flags = true;
+
+    rig.session.run_effects_for_test(&.{.{ .delete_message = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(1),
+    } }});
+    try testing.expectEqualStrings("Could not delete on the server", rig.session.state.status.slice());
+
+    rig.fake_mail.fail_flags = false;
+    rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
+        .account = core.id.AccountId.from_int(9),
+        .mailbox = .trash,
+    } }});
+    try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
+
+    rig.session.run_effects_for_test(&.{.{ .delete_message = .{
+        .account = core.id.AccountId.from_int(9),
+        .mailbox = .trash,
+        .id = MessageId.from_int(1),
+    } }});
+    try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
+
+    rig.fake_mail.fail_flags = true;
+    rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .trash,
+    } }});
+    try testing.expectEqualStrings("Could not empty Trash on the server", rig.session.state.status.slice());
+    rig.fake_mail.fail_flags = false;
+
+    rig.session.deps.accounts = &.{};
+    rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
+        .account = null,
+        .mailbox = .trash,
+    } }});
+    try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
+}
+
+test "an effect paints the spinner, even when it is instant" {
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .loading_ms = 5,
+    });
+    defer rig.deinit();
+    rig.session.boot();
+    rig.session.render();
+    rig.fake_system.output_len = 0;
+
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(1),
+    } }});
+
+    // A spinner frame was written before the work, and the flag is cleared.
+    try testing.expect(rig.fake_system.output_len > 0);
+    try testing.expect(rig.session.body_len > 0);
+    try testing.expect(!rig.session.state.loading);
 }
 
 test "a body asked for during a refresh is delivered when it finishes" {

@@ -17,6 +17,7 @@ const MessageId = core.id.MessageId;
 const Mailbox = core.mailbox.Mailbox;
 const limits = core.limits;
 
+const KeyFile = @import("keyfile.zig").KeyFile;
 const sealed_max: usize = limits.body_max + sealed.overhead;
 
 pub const Label = @import("cache_file.zig").Label;
@@ -26,12 +27,17 @@ pub const FileBodies = struct {
     io: std.Io,
     base_dir: []const u8,
     labels: []const Label,
-    key: sealed.Key = @splat(0),
-    have_key: bool = false,
+    keys: KeyFile,
     buffer: [sealed_max]u8 = undefined,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, base_dir: []const u8, labels: []const Label) FileBodies {
-        return .{ .gpa = gpa, .io = io, .base_dir = base_dir, .labels = labels };
+        return .{
+            .gpa = gpa,
+            .io = io,
+            .base_dir = base_dir,
+            .labels = labels,
+            .keys = KeyFile.init(gpa, io, base_dir),
+        };
     }
 
     pub fn cache(self: *FileBodies) port.BodyCache {
@@ -55,36 +61,6 @@ pub const FileBodies = struct {
         }) catch null;
     }
 
-    /// Reads the key, creating it the first time. Not a secret to hide from the
-    /// process owner (the password file has the same trust boundary), only from
-    /// backups and other users.
-    fn ensure_key(self: *FileBodies) bool {
-        if (self.have_key) return true;
-
-        var key_buffer: [512]u8 = undefined;
-        const path = std.fmt.bufPrint(&key_buffer, "{s}/key", .{self.base_dir}) catch return false;
-
-        if (std.Io.Dir.cwd().openFile(self.io, path, .{})) |file| {
-            defer file.close(self.io);
-            const read = file.readPositionalAll(self.io, &self.key, 0) catch return false;
-            if (read != sealed.key_len) return false;
-            self.have_key = true;
-            return true;
-        } else |err| switch (err) {
-            error.FileNotFound => {},
-            else => return false,
-        }
-
-        self.io.random(&self.key);
-        _ = std.Io.Dir.cwd().createDirPathStatus(self.io, self.base_dir, directory_mode) catch return false;
-        const file = std.Io.Dir.cwd().createFile(self.io, path, .{ .permissions = file_mode }) catch
-            return false;
-        defer file.close(self.io);
-        file.writeStreamingAll(self.io, &self.key) catch return false;
-        self.have_key = true;
-        return true;
-    }
-
     fn loadThunk(
         context: *anyopaque,
         account: AccountId,
@@ -93,7 +69,7 @@ pub const FileBodies = struct {
         out: []u8,
     ) port.Error!?[]const u8 {
         const self: *FileBodies = @ptrCast(@alignCast(context));
-        if (!self.ensure_key()) return error.Unavailable;
+        const key = self.keys.get() orelse return error.Unavailable;
 
         var path_buffer: [512]u8 = undefined;
         const path = self.file_path(account, mailbox, id, &path_buffer) orelse return null;
@@ -105,7 +81,7 @@ pub const FileBodies = struct {
         defer file.close(self.io);
 
         const size = file.readPositionalAll(self.io, &self.buffer, 0) catch return error.Unavailable;
-        return sealed.open(self.key, self.buffer[0..size], out) catch null;
+        return sealed.open(key, self.buffer[0..size], out) catch null;
     }
 
     fn saveThunk(
@@ -117,11 +93,11 @@ pub const FileBodies = struct {
     ) port.Error!void {
         const self: *FileBodies = @ptrCast(@alignCast(context));
         if (body.len == 0 or body.len > limits.body_max) return;
-        if (!self.ensure_key()) return error.Unavailable;
+        const key = self.keys.get() orelse return error.Unavailable;
 
         var nonce: sealed.Nonce = undefined;
         self.io.random(&nonce);
-        const sealed_body = sealed.seal(self.key, nonce, body, &self.buffer) catch return;
+        const sealed_body = sealed.seal(key, nonce, body, &self.buffer) catch return;
 
         var path_buffer: [512]u8 = undefined;
         const path = self.file_path(account, mailbox, id, &path_buffer) orelse return;
@@ -143,8 +119,8 @@ pub const FileBodies = struct {
     }
 };
 
-const file_mode: std.Io.File.Permissions = @enumFromInt(0o600);
-const directory_mode: std.Io.Dir.Permissions = @enumFromInt(0o700);
+const file_mode = @import("keyfile.zig").file_mode;
+const directory_mode = @import("keyfile.zig").directory_mode;
 
 fn mailbox_file_name(mailbox: Mailbox) []const u8 {
     return switch (mailbox) {

@@ -448,6 +448,15 @@ const Hint = struct {
     action: []const u8,
 };
 
+const trash_hints = [_]Hint{
+    .{ .keys = "j/k", .action = "move" },
+    .{ .keys = "Enter", .action = "open" },
+    .{ .keys = "X", .action = "delete" },
+    .{ .keys = "E", .action = "empty" },
+    .{ .keys = "^R", .action = "refresh" },
+    .{ .keys = "?", .action = "help" },
+};
+
 const list_hints = [_]Hint{
     .{ .keys = "j/k", .action = "move" },
     .{ .keys = "Enter", .action = "open" },
@@ -495,7 +504,7 @@ fn hints_for(state: *const State) []const Hint {
     if (state.mode == .search) return &search_hints;
     if (state.mode == .help_search) return &help_search_hints;
     return switch (state.view) {
-        .list => &list_hints,
+        .list => if (state.mailbox == .trash) &trash_hints else &list_hints,
         .reader => &reader_hints,
         .help => &help_hints,
         .compose => &compose_hints,
@@ -509,7 +518,7 @@ fn render_footer(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     // A refresh in progress turns the position into "⠹ 3/24": no new row, no
     // transient message, just the spinner next to where you are.
     var spinner_buffer: [32]u8 = undefined;
-    const right = if (inputs.state.refreshing) blk: {
+    const right = if (inputs.state.busy()) blk: {
         const glyph = spinner_frames[inputs.state.spinner % spinner_frames.len];
         break :blk std.fmt.bufPrint(&spinner_buffer, "{s} {s}", .{ glyph, position }) catch position;
     } else position;
@@ -585,10 +594,12 @@ const help_rows = [_]Hint{
     .{ .keys = "s / *", .action = "star" },
     .{ .keys = "d", .action = "archive" },
     .{ .keys = "#", .action = "move to trash" },
+    .{ .keys = "X", .action = "delete for good (Trash)" },
+    .{ .keys = "E", .action = "empty Trash" },
     .{ .keys = "/", .action = "search" },
     .{ .keys = "Tab / [ ]", .action = "next mailbox" },
     .{ .keys = "1 - 6", .action = "jump to mailbox" },
-    .{ .keys = "R", .action = "refresh" },
+    .{ .keys = "Ctrl+R", .action = "refresh" },
     .{ .keys = "Ctrl+Q / C", .action = "quit" },
 };
 

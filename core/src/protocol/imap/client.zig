@@ -206,6 +206,41 @@ pub const Client = struct {
         try self.wait_ok(tag);
     }
 
+    /// Marks one message deleted and expunges it. UID EXPUNGE needs UIDPLUS;
+    /// plain EXPUNGE is the fallback and is safe because the mailbox was just
+    /// selected and nothing else was flagged.
+    pub fn delete_message(self: *Client, uid: u32) Error!void {
+        var tag_buffer: [16]u8 = undefined;
+        var tag = self.beginCommand(&tag_buffer);
+        const command_buffer = self.command_slice();
+        try self.send(command.delete_forever(command_buffer, tag, uid) catch return error.ProtocolError);
+        try self.wait_ok(tag);
+
+        tag = self.beginCommand(&tag_buffer);
+        try self.send(command.expunge_uid(self.command_slice(), tag, uid) catch return error.ProtocolError);
+        self.wait_ok(tag) catch |err| switch (err) {
+            // Servers without UIDPLUS reject the UID form; plain EXPUNGE works.
+            error.Rejected => {
+                tag = self.beginCommand(&tag_buffer);
+                try self.send(command.expunge(self.command_slice(), tag) catch return error.ProtocolError);
+                try self.wait_ok(tag);
+            },
+            else => return err,
+        };
+    }
+
+    /// Empties a mailbox: flag everything, then expunge.
+    pub fn empty_mailbox(self: *Client) Error!void {
+        var tag_buffer: [16]u8 = undefined;
+        var tag = self.beginCommand(&tag_buffer);
+        try self.send(command.delete_all(self.command_slice(), tag) catch return error.ProtocolError);
+        try self.wait_ok(tag);
+
+        tag = self.beginCommand(&tag_buffer);
+        try self.send(command.expunge(self.command_slice(), tag) catch return error.ProtocolError);
+        try self.wait_ok(tag);
+    }
+
     pub fn move_message(self: *Client, uid: u32, to: Mailbox) Error!void {
         return self.move_message_to(uid, to.title());
     }

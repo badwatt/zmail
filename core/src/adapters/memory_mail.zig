@@ -48,6 +48,8 @@ pub const MemoryMail = struct {
             .fetch_body = fetchBodyThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
+            .delete_message = deleteThunk,
+            .empty_mailbox = emptyThunk,
         } };
     }
 
@@ -74,6 +76,36 @@ pub const MemoryMail = struct {
         const self: *MemoryMail = @ptrCast(@alignCast(context));
         const message = self.find(id) orelse return error.NotFound;
         message.flags = flags;
+    }
+
+    fn deleteThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId) port.Error!void {
+        const self: *MemoryMail = @ptrCast(@alignCast(context));
+        var index: u32 = 0;
+        while (index < self.len) : (index += 1) {
+            if (self.messages[index].id == id and self.messages[index].mailbox == mailbox) {
+                self.len -= 1;
+                var cursor = index;
+                while (cursor < self.len) : (cursor += 1) {
+                    self.messages[cursor] = self.messages[cursor + 1];
+                }
+                self.messages[self.len] = @import("../domain/message.zig").Message{};
+                return;
+            }
+        }
+        return error.NotFound;
+    }
+
+    fn emptyThunk(context: *anyopaque, mailbox: Mailbox) port.Error!void {
+        const self: *MemoryMail = @ptrCast(@alignCast(context));
+        var read: u32 = 0;
+        var write: u32 = 0;
+        while (read < self.len) : (read += 1) {
+            if (self.messages[read].mailbox != mailbox) {
+                self.messages[write] = self.messages[read];
+                write += 1;
+            }
+        }
+        self.len = write;
     }
 
     fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) port.Error!void {
@@ -246,6 +278,22 @@ test "MemoryMail: fetch_body is scoped to a mailbox" {
     var out: [64]u8 = undefined;
     // UIDs are per mailbox: the right id in the wrong mailbox is not found.
     try testing.expectError(error.NotFound, mail.mail().fetch_body(.sent, MessageId.from_int(1), &out));
+}
+
+test "MemoryMail: delete removes one message, empty clears the mailbox" {
+    var mail = try seeded();
+    const before = mail.len;
+
+    try mail.mail().delete_message(.inbox, MessageId.from_int(1));
+    try testing.expectEqual(before - 1, mail.len);
+    try testing.expect(mail.find(MessageId.from_int(1)) == null);
+    try testing.expectError(error.NotFound, mail.mail().delete_message(.inbox, MessageId.from_int(99)));
+
+    try mail.mail().empty_mailbox(.inbox);
+    var index: u32 = 0;
+    while (index < mail.len) : (index += 1) {
+        try testing.expect(mail.messages[index].mailbox != .inbox);
+    }
 }
 
 test "MemoryMail: set_flags mutates the server copy" {

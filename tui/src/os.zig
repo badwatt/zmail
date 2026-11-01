@@ -121,6 +121,24 @@ pub fn env(name: [:0]const u8) ?[]const u8 {
     return std.mem.span(value);
 }
 
+/// Monotonic milliseconds, for measuring how long the spinner has been up.
+/// `CLOCK_MONOTONIC` is 1 on Linux; 0 means "unknown".
+pub fn monotonic_ms() i64 {
+    var ts: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
+    if (clock_gettime(1, &ts) != 0) return 0;
+    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
+}
+
+/// Sleeps for `ms`. Signals may shorten it, which only matters for a spinner.
+pub fn sleep_ms(ms: u64) void {
+    if (ms == 0) return;
+    const request: std.posix.timespec = .{
+        .sec = @intCast(ms / 1000),
+        .nsec = @intCast((ms % 1000) * 1_000_000),
+    };
+    _ = std.c.nanosleep(&request, null);
+}
+
 /// Wall clock in Unix seconds, from CLOCK_REALTIME. `0` means "unknown", which
 /// only makes relative dates read as "now"; it never affects correctness.
 pub fn now_unix() i64 {
@@ -316,4 +334,19 @@ test "env reads the process environment" {
 test "now_unix returns a plausible current time" {
     const now = now_unix();
     try testing.expect(now > 1_600_000_000);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "monotonic_ms advances, and sleep_ms waits at least one tick" {
+    const before = monotonic_ms();
+    try testing.expect(before > 0);
+    sleep_ms(1);
+    const after = monotonic_ms();
+    try testing.expect(after >= before);
+
+    // Zero means "no wait", and must not spin.
+    sleep_ms(0);
 }

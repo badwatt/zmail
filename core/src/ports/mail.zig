@@ -36,6 +36,10 @@ pub const Mail = struct {
         fetch_body: *const fn (context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) Error![]const u8,
         set_flags: *const fn (context: *anyopaque, id: MessageId, flags: Flags) Error!void,
         move_message: *const fn (context: *anyopaque, id: MessageId, to: Mailbox) Error!void,
+        /// Removes a message for good: mark deleted, then expunge.
+        delete_message: *const fn (context: *anyopaque, mailbox: Mailbox, id: MessageId) Error!void,
+        /// Removes every message in a mailbox for good.
+        empty_mailbox: *const fn (context: *anyopaque, mailbox: Mailbox) Error!void,
     };
 
     pub fn fetch(self: Mail, mailbox: Mailbox, out: []Message) Error!u32 {
@@ -52,6 +56,14 @@ pub const Mail = struct {
 
     pub fn move_message(self: Mail, id: MessageId, to: Mailbox) Error!void {
         return self.vtable.move_message(self.context, id, to);
+    }
+
+    pub fn delete_message(self: Mail, mailbox: Mailbox, id: MessageId) Error!void {
+        return self.vtable.delete_message(self.context, mailbox, id);
+    }
+
+    pub fn empty_mailbox(self: Mail, mailbox: Mailbox) Error!void {
+        return self.vtable.empty_mailbox(self.context, mailbox);
     }
 };
 
@@ -83,6 +95,8 @@ const Recorder = struct {
             .fetch_body = fetchBodyThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
+            .delete_message = deleteThunk,
+            .empty_mailbox = emptyThunk,
         } };
     }
 
@@ -109,6 +123,17 @@ const Recorder = struct {
         const self: *Recorder = @ptrCast(@alignCast(context));
         self.last_id = id;
         self.last_flags = flags;
+    }
+
+    fn deleteThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId) Error!void {
+        const self: *Recorder = @ptrCast(@alignCast(context));
+        self.last_id = id;
+        self.last_mailbox = mailbox;
+    }
+
+    fn emptyThunk(context: *anyopaque, mailbox: Mailbox) Error!void {
+        const self: *Recorder = @ptrCast(@alignCast(context));
+        self.last_mailbox = mailbox;
     }
 
     fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) Error!void {
@@ -167,6 +192,17 @@ test "Mail.move_message forwards id and target mailbox" {
     try recorder.mail().move_message(MessageId.from_int(4), .trash);
     try testing.expectEqual(MessageId.from_int(4), recorder.last_id);
     try testing.expectEqual(Mailbox.trash, recorder.last_target);
+}
+
+test "Mail.delete_message and empty_mailbox reach the vtable" {
+    var recorder: Recorder = .{};
+    const mail = recorder.mail();
+    try mail.delete_message(.trash, MessageId.from_int(5));
+    try testing.expectEqual(MessageId.from_int(5), recorder.last_id);
+    try testing.expectEqual(Mailbox.trash, recorder.last_mailbox);
+
+    try mail.empty_mailbox(.junk);
+    try testing.expectEqual(Mailbox.junk, recorder.last_mailbox);
 }
 
 test "Deps carries the mail port" {

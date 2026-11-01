@@ -34,6 +34,8 @@ pub const LazyMail = struct {
             .fetch_body = fetchBodyThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
+            .delete_message = deleteThunk,
+            .empty_mailbox = emptyThunk,
         } };
     }
 
@@ -71,6 +73,16 @@ pub const LazyMail = struct {
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) mail_port.Error!void {
         const self: *LazyMail = @ptrCast(@alignCast(context));
         return (try self.ensure()).set_flags(id, flags);
+    }
+
+    fn deleteThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId) mail_port.Error!void {
+        const self: *LazyMail = @ptrCast(@alignCast(context));
+        return (try self.ensure()).delete_message(mailbox, id);
+    }
+
+    fn emptyThunk(context: *anyopaque, mailbox: Mailbox) mail_port.Error!void {
+        const self: *LazyMail = @ptrCast(@alignCast(context));
+        return (try self.ensure()).empty_mailbox(mailbox);
     }
 
     fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) mail_port.Error!void {
@@ -185,6 +197,25 @@ test "lazy mail: a failed open is Unavailable and is retried next time" {
     _ = lazy.mail().fetch(.inbox, &out) catch {};
     _ = lazy.mail().fetch_body(.inbox, MessageId.from_int(1), &body) catch {};
     try testing.expectEqual(@as(u32, 3), opener.opens);
+}
+
+test "lazy mail: delete and empty go through the opened connection" {
+    var opener: Opener = .{};
+    var lazy = opener.lazy();
+    defer lazy.close();
+
+    var message = Message{
+        .id = MessageId.from_int(1),
+        .account = AccountId.from_int(1),
+        .mailbox = .trash,
+    };
+    try opener.mail.seed(&message);
+
+    try lazy.mail().delete_message(.trash, MessageId.from_int(1));
+    try testing.expectEqual(@as(u32, 1), opener.opens);
+    try testing.expect(opener.mail.find(MessageId.from_int(1)) == null);
+
+    try lazy.mail().empty_mailbox(.trash);
 }
 
 test "lazy mail: flags and moves go through the opened connection" {

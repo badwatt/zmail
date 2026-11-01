@@ -20,6 +20,10 @@ pub const Effect = union(enum) {
     fetch_body: struct { account: AccountId, mailbox: Mailbox, id: MessageId },
     /// Null account means every account (the unified view).
     refresh: struct { account: ?AccountId, mailbox: Mailbox, force: bool = false },
+    /// Remove for good (only offered in Trash).
+    delete_message: struct { account: AccountId, mailbox: Mailbox, id: MessageId },
+    /// Empty a mailbox for good (only offered in Trash). Null account = all.
+    empty_mailbox: struct { account: ?AccountId, mailbox: Mailbox },
     /// Hand the message to the outbox. The body is borrowed from compose state.
     send: Outgoing,
 };

@@ -23,6 +23,8 @@ const View = @import("state.zig").View;
 pub fn apply(state: *State, store: *Store, command: Command) Effects {
     var effects: Effects = .{};
     if (command.clears_status()) state.clear_status();
+    // A confirmation only survives the command that asked for it.
+    if (command != .empty_trash) state.pending_empty = false;
 
     switch (command) {
         .noop => {},
@@ -37,6 +39,8 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .toggle_flag => toggle_flag(state, store, &effects),
         .archive_selected => move_selected(state, store, .archive, "Archived", &effects),
         .delete_selected => move_selected(state, store, .trash, "Moved to Trash", &effects),
+        .delete_forever => delete_forever(state, store, &effects),
+        .empty_trash => empty_trash(state, store, &effects),
         .begin_search => begin_search(state),
         .search_char => |byte| search_char(state, store, byte),
         .search_backspace => search_backspace(state, store),
@@ -238,6 +242,75 @@ fn toggle_flag(state: *State, store: *Store, effects: *Effects) void {
     } else {
         state.set_status("Unstarred", .{});
     }
+}
+
+/// Only in Trash: there is no "undo" here, so it is a separate command.
+fn delete_forever(state: *State, store: *Store, effects: *Effects) void {
+    if (state.mailbox != .trash) {
+        state.set_status("Only in Trash: d moves a message here first", .{});
+        return;
+    }
+    const message = state.selected(store) orelse {
+        state.set_status("No message selected", .{});
+        return;
+    };
+
+    const account = message.account;
+    const id = message.id;
+    _ = store.remove_by_id(account, id);
+    state.rebuild(store);
+    if (state.view == .reader) {
+        state.view = .list;
+        state.reader_scroll = 0;
+    }
+    effects.add(.{ .delete_message = .{ .account = account, .mailbox = .trash, .id = id } });
+    state.set_status("Deleted for good", .{});
+}
+
+/// Only in Trash: empties it for every account in scope.
+fn empty_trash(state: *State, store: *Store, effects: *Effects) void {
+    if (state.mailbox != .trash) {
+        state.set_status("Emptying is only offered in Trash", .{});
+        return;
+    }
+
+    var empty: bool = true;
+    for (store.messages[0..store.len]) |*message| {
+        if (message.mailbox != .trash) continue;
+        if (state.account_filter) |filter| {
+            if (message.account != filter) continue;
+        }
+        empty = false;
+    }
+    if (empty) {
+        state.set_status("Trash is already empty", .{});
+        return;
+    }
+    if (!state.pending_empty) {
+        state.pending_empty = true;
+        state.set_status("Press E again to empty Trash", .{});
+        return;
+    }
+    state.pending_empty = false;
+
+    effects.add(.{ .empty_mailbox = .{ .account = state.account_filter, .mailbox = .trash } });
+    if (state.account_filter) |filter| {
+        _ = store.remove_in(filter, .trash);
+    } else {
+        // Whatever account a trashed message belongs to, it goes.
+        var index: u32 = 0;
+        while (index < store.len) {
+            const message = store.at(index);
+            if (message.mailbox == .trash) {
+                _ = store.remove_by_id(message.account, message.id);
+                continue;
+            }
+            index += 1;
+        }
+    }
+    state.rebuild(store);
+    if (state.view == .reader) state.view = .list;
+    state.set_status("Trash emptied", .{});
 }
 
 fn move_selected(state: *State, store: *Store, target: Mailbox, status_text: []const u8, effects: *Effects) void {
@@ -497,6 +570,136 @@ fn ready() !struct { store: Store, state: State } {
     var state: State = .{ .list_rows = 3 };
     state.rebuild(&store);
     return .{ .store = store, .state = state };
+}
+
+test "delete_forever removes the message and asks the server, in Trash only" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    // Outside Trash it just explains itself.
+    const refused = apply(&fixture.state, &fixture.store, .delete_forever);
+    try testing.expect(refused.is_empty());
+    try testing.expectEqualStrings("Only in Trash: d moves a message here first", fixture.state.status.slice());
+
+    fixture.state.mailbox = .trash;
+    fixture.store.at(0).mailbox = .trash;
+    fixture.state.rebuild(&fixture.store);
+    const before = fixture.store.len;
+
+    const effects = apply(&fixture.state, &fixture.store, .delete_forever);
+    try expect_effects(&effects, &.{.{ .delete_message = .{
+        .account = AccountId.from_int(1),
+        .mailbox = .trash,
+        .id = MessageId.from_int(1),
+    } }});
+    try testing.expectEqual(before - 1, fixture.store.len);
+    try testing.expectEqualStrings("Deleted for good", fixture.state.status.slice());
+}
+
+test "delete_forever with nothing selected says so" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.mailbox = .trash;
+    fixture.state.visible_len = 0;
+    fixture.state.cursor = 0;
+
+    _ = apply(&fixture.state, &fixture.store, .delete_forever);
+    try testing.expectEqualStrings("No message selected", fixture.state.status.slice());
+}
+
+test "delete_forever from the reader returns to the list" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.mailbox = .trash;
+    fixture.store.at(0).mailbox = .trash;
+    fixture.state.rebuild(&fixture.store);
+    fixture.state.view = .reader;
+    fixture.state.reader_scroll = 4;
+
+    _ = apply(&fixture.state, &fixture.store, .delete_forever);
+    try testing.expectEqual(View.list, fixture.state.view);
+    try testing.expectEqual(@as(u32, 0), fixture.state.reader_scroll);
+}
+
+test "empty_trash asks once, then empties the scope" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.mailbox = .trash;
+    fixture.store.at(0).mailbox = .trash;
+    fixture.store.at(1).mailbox = .trash;
+    fixture.state.rebuild(&fixture.store);
+
+    // First press only arms it.
+    const armed = apply(&fixture.state, &fixture.store, .empty_trash);
+    try testing.expect(armed.is_empty());
+    try testing.expect(fixture.state.pending_empty);
+    try testing.expectEqualStrings("Press E again to empty Trash", fixture.state.status.slice());
+    try testing.expectEqual(@as(u32, 2), fixture.state.visible_len);
+
+    // Anything else disarms it.
+    const other = apply(&fixture.state, &fixture.store, .{ .move = .down });
+    try testing.expectEqual(@as(u32, 0), other.len);
+    try testing.expect(!fixture.state.pending_empty);
+
+    _ = apply(&fixture.state, &fixture.store, .empty_trash);
+    const effects = apply(&fixture.state, &fixture.store, .empty_trash);
+    try expect_effects(&effects, &.{.{ .empty_mailbox = .{ .account = null, .mailbox = .trash } }});
+    try testing.expectEqual(@as(u32, 0), fixture.state.visible_len);
+    try testing.expectEqualStrings("Trash emptied", fixture.state.status.slice());
+}
+
+test "empty_trash outside Trash, and when empty, is refused" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .empty_trash);
+    try testing.expectEqualStrings("Emptying is only offered in Trash", fixture.state.status.slice());
+
+    fixture.state.mailbox = .trash;
+    fixture.state.rebuild(&fixture.store);
+    _ = apply(&fixture.state, &fixture.store, .empty_trash);
+    try testing.expectEqualStrings("Trash is already empty", fixture.state.status.slice());
+}
+
+test "emptying Trash from the reader returns to the list" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.mailbox = .trash;
+    fixture.store.at(0).mailbox = .trash;
+    fixture.state.rebuild(&fixture.store);
+    fixture.state.view = .reader;
+
+    fixture.state.pending_empty = true;
+    _ = apply(&fixture.state, &fixture.store, .empty_trash);
+    try testing.expectEqual(View.list, fixture.state.view);
+}
+
+test "empty_trash honours the account filter" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    var second = message_with(9, "other account", .trash, 100);
+    second.account = AccountId.from_int(2);
+    try fixture.store.insert(&second);
+    fixture.store.at(0).mailbox = .trash;
+    fixture.state.mailbox = .trash;
+    fixture.state.account_filter = AccountId.from_int(1);
+    fixture.state.rebuild(&fixture.store);
+
+    fixture.state.pending_empty = true;
+    const effects = apply(&fixture.state, &fixture.store, .empty_trash);
+    try expect_effects(&effects, &.{.{ .empty_mailbox = .{
+        .account = AccountId.from_int(1),
+        .mailbox = .trash,
+    } }});
+
+    // Only account 1's trash went away.
+    var index: u32 = 0;
+    var survivors: u32 = 0;
+    while (index < fixture.store.len) : (index += 1) {
+        if (fixture.store.at(index).mailbox == .trash) survivors += 1;
+    }
+    try testing.expectEqual(@as(u32, 1), survivors);
 }
 
 test "sample_store propagates allocation failure without leaking" {

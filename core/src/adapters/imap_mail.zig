@@ -58,6 +58,8 @@ pub const ImapMail = struct {
             .fetch_body = fetchBodyThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
+            .delete_message = deleteThunk,
+            .empty_mailbox = emptyThunk,
         } };
     }
 
@@ -149,6 +151,18 @@ pub const ImapMail = struct {
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) port.Error!void {
         const self: *ImapMail = @ptrCast(@alignCast(context));
         self.client.set_flags(try uid_of(id), flags) catch |err| return mapError(err);
+    }
+
+    fn deleteThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId) port.Error!void {
+        const self: *ImapMail = @ptrCast(@alignCast(context));
+        if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
+        self.client.delete_message(try uid_of(id)) catch |err| return mapError(err);
+    }
+
+    fn emptyThunk(context: *anyopaque, mailbox: Mailbox) port.Error!void {
+        const self: *ImapMail = @ptrCast(@alignCast(context));
+        if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
+        self.client.empty_mailbox() catch |err| return mapError(err);
     }
 
     fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) port.Error!void {
@@ -302,6 +316,55 @@ test "body, flags, and move reach the right commands" {
     try testing.expect(std.mem.indexOf(u8, output, "UID FETCH 7") != null);
     try testing.expect(std.mem.indexOf(u8, output, "UID STORE 7 FLAGS.SILENT (\\Seen)") != null);
     try testing.expect(std.mem.indexOf(u8, output, "UID MOVE 7 \"Trash\"") != null);
+}
+
+test "delete flags the message and expunges it, falling back without UIDPLUS" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "* 1 EXISTS\r\na2 OK selected\r\n" ++
+        "a3 OK flagged\r\n" ++
+        "a4 NO [CANNOT] UID EXPUNGE unsupported\r\n" ++
+        "a5 OK expunged\r\n" };
+
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+    try imap.mail().delete_message(.inbox, MessageId.from_int(7));
+
+    const output = scripted.output_text();
+    try testing.expect(std.mem.indexOf(u8, output, "UID STORE 7 +FLAGS.SILENT (\\Deleted)") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "UID EXPUNGE 7") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "EXPUNGE\r\n") != null);
+}
+
+test "delete uses UID EXPUNGE when the server supports it, and empty clears all" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "* 1 EXISTS\r\na2 OK selected\r\n" ++
+        "a3 OK flagged\r\n" ++
+        "a4 OK expunged\r\n" ++
+        "a5 OK flagged all\r\n" ++
+        "a6 OK expunged all\r\n" };
+
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+    try imap.mail().delete_message(.inbox, MessageId.from_int(7));
+    try imap.mail().empty_mailbox(.inbox);
+
+    const output = scripted.output_text();
+    try testing.expect(std.mem.indexOf(u8, output, "STORE 1:* +FLAGS.SILENT (\\Deleted)") != null);
+}
+
+test "delete in a mailbox the server does not have is NotFound" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "a2 NO [NONEXISTENT] no such mailbox\r\n" ++
+        "* LIST (\\Sent) \"/\" \"Sent Items\"\r\n" ++
+        "a3 OK LIST done\r\n" };
+
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+    try testing.expectError(
+        error.NotFound,
+        imap.mail().delete_message(.inbox, MessageId.from_int(7)),
+    );
+    try testing.expectError(error.NotFound, imap.mail().empty_mailbox(.inbox));
 }
 
 test "login failure is reported as Rejected through the port, and open fails" {

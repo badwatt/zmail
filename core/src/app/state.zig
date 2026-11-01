@@ -117,6 +117,12 @@ pub const State = struct {
     booting: bool = false,
     /// True while a background refresh runs: the footer shows a spinner.
     refreshing: bool = false,
+    /// Set by the first `empty_trash`; the second press does it. Anything else
+    /// cancels it, so a stray key cannot empty a mailbox.
+    pending_empty: bool = false,
+    /// True while any other work is in flight (fetching a body, moving a
+    /// message): the footer shows the spinner for that too, however quick.
+    loading: bool = false,
     /// Free-running tick for the splash spinner.
     spinner: u8 = 0,
     status: Text(limits.status_max) = .{},
@@ -126,6 +132,11 @@ pub const State = struct {
 
     /// Recomputes the visible rows from the store. Called after any mutation
     /// that can change the list: mailbox switch, filter, archive, refresh.
+    /// Whether the footer should show the spinner.
+    pub fn busy(self: *const State) bool {
+        return self.refreshing or self.loading;
+    }
+
     pub fn rebuild(self: *State, store: *const Store) void {
         self.visible_len = 0;
         var index: u32 = 0;

@@ -81,6 +81,14 @@ The port exists; this milestone fills it in.
   tree. `BODYSTRUCTURE` plus `BODY.PEEK[<n>]` for the chosen text part would cut
   a 40 KiB newsletter with images to a few KiB, and prefetching the bodies of
   the visible rows would make the first open instant too.
+- **Trash and destruction (done).** `X` deletes one message for good and `E`
+  empties Trash (asking once), via `STORE \Deleted` + `UID EXPUNGE`, with a
+  plain `EXPUNGE` fallback for servers without UIDPLUS.
+- **Sealed at rest, everything (done).** Envelopes, bodies, and the password
+  file share one key file; nothing secret is plaintext on disk.
+- **Accounts in the TUI (next).** Adding, removing, and editing accounts is
+  still `--add-account` plus hand-editing the config; the overlay is the
+  missing piece.
 - **An account picker (next).** `a` cycles the scope; a small overlay listing
   every account (and "All accounts") would be clearer than cycling.
 - **Lazy connections (done).** The launcher builds accounts without touching

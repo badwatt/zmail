@@ -158,6 +158,33 @@ pub fn store_flags(buffer: []u8, tag: []const u8, uid: u32, flags: Flags) Error!
     return render.finish();
 }
 
+/// Flags one message as deleted (the expunge follows).
+pub fn delete_forever(buffer: []u8, tag: []const u8, uid: u32) Error![]const u8 {
+    if (uid == 0) return error.InvalidNumber;
+    var render = Render.begin(buffer, tag, "UID STORE ");
+    render.number(uid);
+    render.text(" +FLAGS.SILENT (\\Deleted)");
+    return render.finish();
+}
+
+/// Flags every message in the selected mailbox as deleted.
+pub fn delete_all(buffer: []u8, tag: []const u8) Error![]const u8 {
+    var render = Render.begin(buffer, tag, "STORE 1:* +FLAGS.SILENT (\\Deleted)");
+    return render.finish();
+}
+
+pub fn expunge_uid(buffer: []u8, tag: []const u8, uid: u32) Error![]const u8 {
+    if (uid == 0) return error.InvalidNumber;
+    var render = Render.begin(buffer, tag, "UID EXPUNGE ");
+    render.number(uid);
+    return render.finish();
+}
+
+pub fn expunge(buffer: []u8, tag: []const u8) Error![]const u8 {
+    var render = Render.begin(buffer, tag, "EXPUNGE");
+    return render.finish();
+}
+
 pub fn move_message(buffer: []u8, tag: []const u8, uid: u32, mailbox: []const u8) Error![]const u8 {
     if (uid == 0) return error.InvalidNumber;
 
