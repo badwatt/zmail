@@ -24,25 +24,52 @@ pub const Accounts = struct {
         replaces: ?AccountId = null,
     };
 
+    /// A freshly opened account: enough to add it to the view and fetch mail.
+    pub const Connected = struct {
+        id: AccountId = .unknown,
+        label: []const u8 = "",
+        address_text: []const u8 = "",
+        imap_host: []const u8 = "",
+        imap_port: u16 = 0,
+        username: []const u8 = "",
+        smtp_host: []const u8 = "",
+        smtp_port: u16 = 0,
+        smtp: bool = false,
+        mail: ?@import("../ports/mail.zig").Mail = null,
+    };
+
     pub const VTable = struct {
         /// Rewrites the config (and deletes the credential) without `account`.
         remove: *const fn (context: *anyopaque, account: AccountId) Error!void,
         /// Adds an account, or replaces one; writes its sealed credential.
-        save: *const fn (context: *anyopaque, draft: Accounts.Draft) Error!void,
+        /// Adds or replaces an account and returns its id (1-based).
+        save: *const fn (context: *anyopaque, draft: Accounts.Draft) Error!AccountId,
         /// Changes only the label: the config section and the credential file.
         rename: *const fn (context: *anyopaque, account: AccountId, label: []const u8) Error!void,
+        /// Opens the account now, so it can be used without a restart.
+        connect: *const fn (context: *anyopaque, account: AccountId, out: *Connected) Error!void,
+        /// Closes a connection opened by `connect`.
+        disconnect: *const fn (context: *anyopaque, account: AccountId) Error!void,
     };
 
     pub fn remove(self: Accounts, account: AccountId) Error!void {
         return self.vtable.remove(self.context, account);
     }
 
-    pub fn save(self: Accounts, draft: Draft) Error!void {
+    pub fn save(self: Accounts, draft: Draft) Error!AccountId {
         return self.vtable.save(self.context, draft);
     }
 
     pub fn rename(self: Accounts, account: AccountId, label: []const u8) Error!void {
         return self.vtable.rename(self.context, account, label);
+    }
+
+    pub fn connect(self: Accounts, account: AccountId, out: *Connected) Error!void {
+        return self.vtable.connect(self.context, account, out);
+    }
+
+    pub fn disconnect(self: Accounts, account: AccountId) Error!void {
+        return self.vtable.disconnect(self.context, account);
     }
 };
 
@@ -56,12 +83,17 @@ pub const Memory = struct {
     last_label_len: u8 = 0,
     last_replaces: ?AccountId = null,
     renamed: AccountId = .unknown,
+    connected: AccountId = .unknown,
+    connect_mail: ?@import("../ports/mail.zig").Mail = null,
+    disconnected: AccountId = .unknown,
 
     pub fn accounts(self: *Memory) Accounts {
         return .{ .context = self, .vtable = &.{
             .remove = removeThunk,
             .save = saveThunk,
             .rename = renameThunk,
+            .connect = connectThunk,
+            .disconnect = disconnectThunk,
         } };
     }
 
@@ -70,6 +102,26 @@ pub const Memory = struct {
         self.removed += 1;
         self.last_removed = account;
         if (self.fail) return error.Unavailable;
+    }
+
+    fn connectThunk(context: *anyopaque, account: AccountId, out: *Accounts.Connected) Error!void {
+        const self: *Memory = @ptrCast(@alignCast(context));
+        self.connected = account;
+        if (self.fail) return error.Unavailable;
+        out.* = .{
+            .id = account,
+            .label = "new",
+            .address_text = "new@example.com",
+            .imap_host = "imap.example.com",
+            .imap_port = 993,
+            .username = "new",
+            .mail = self.connect_mail,
+        };
+    }
+
+    fn disconnectThunk(context: *anyopaque, account: AccountId) Error!void {
+        const self: *Memory = @ptrCast(@alignCast(context));
+        self.disconnected = account;
     }
 
     fn renameThunk(context: *anyopaque, account: AccountId, label: []const u8) Error!void {
@@ -82,7 +134,7 @@ pub const Memory = struct {
         if (self.fail) return error.Unavailable;
     }
 
-    fn saveThunk(context: *anyopaque, draft: Accounts.Draft) Error!void {
+    fn saveThunk(context: *anyopaque, draft: Accounts.Draft) Error!AccountId {
         const self: *Memory = @ptrCast(@alignCast(context));
         self.saved += 1;
         self.last_replaces = draft.replaces;
@@ -90,6 +142,7 @@ pub const Memory = struct {
         @memcpy(self.last_label[0..length], draft.label[0..length]);
         self.last_label_len = @intCast(length);
         if (self.fail) return error.Unavailable;
+        return AccountId.from_int(1);
     }
 };
 
@@ -107,13 +160,20 @@ test "Memory accounts: remove and save record what they were asked" {
     try testing.expectEqual(@as(u32, 1), memory.removed);
     try testing.expectEqual(AccountId.from_int(2), memory.last_removed);
 
-    try accounts.save(.{ .text = "x", .label = "new", .password = "pw" });
+    _ = try accounts.save(.{ .text = "x", .label = "new", .password = "pw" });
     try testing.expectEqual(@as(u32, 1), memory.saved);
     try testing.expectEqualStrings("new", memory.last_label[0..memory.last_label_len]);
     try testing.expect(memory.last_replaces == null);
 
-    try accounts.save(.{ .text = "x", .label = "work", .password = "pw", .replaces = AccountId.from_int(3) });
+    _ = try accounts.save(.{ .text = "x", .label = "work", .password = "pw", .replaces = AccountId.from_int(3) });
     try testing.expectEqual(AccountId.from_int(3), memory.last_replaces.?);
+
+    var opened: Accounts.Connected = .{};
+    try accounts.connect(AccountId.from_int(1), &opened);
+    try testing.expectEqual(AccountId.from_int(1), memory.connected);
+    try testing.expectEqualStrings("imap.example.com", opened.imap_host);
+    try accounts.disconnect(AccountId.from_int(1));
+    try testing.expectEqual(AccountId.from_int(1), memory.disconnected);
 
     try accounts.rename(AccountId.from_int(1), "club");
     try testing.expectEqual(AccountId.from_int(1), memory.renamed);

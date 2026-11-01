@@ -48,6 +48,15 @@ pub const MailSource = struct {
     smtp: bool = false,
 };
 
+/// Text the session owns for a source: slices in `MailSource` point here, so an
+/// account added at runtime never borrows the caller's memory.
+const SourceText = struct {
+    label: core.text.Text(core.limits.label_max) = .{},
+    imap_host: core.text.Text(core.limits.host_max) = .{},
+    username: core.text.Text(core.limits.username_max) = .{},
+    smtp_host: core.text.Text(core.limits.host_max) = .{},
+};
+
 pub const OutboxSource = struct {
     id: core.id.AccountId,
     outbox: core.outbox_port.Outbox,
@@ -110,6 +119,11 @@ pub const Session = struct {
     refresh_scratch: []Message = undefined,
     refresh_sources: [core.state.accounts_max]refresh_mod.Source = undefined,
     refresh_mailbox: Mailbox = .inbox,
+    /// The live account list: a copy of what the launcher built, plus anything
+    /// added from the TUI (and minus anything removed).
+    sources: [core.state.accounts_max]MailSource = undefined,
+    source_text: [core.state.accounts_max]SourceText = undefined,
+    source_count: u8 = 0,
     /// A body asked for while the worker holds the connection. Applied as soon
     /// as the refresh finishes, so the reader shows text instead of a frozen UI.
     pending_body: ?struct { account: core.id.AccountId, mailbox: Mailbox, id: MessageId } = null,
@@ -144,16 +158,9 @@ pub const Session = struct {
 
         self.state = .{};
         self.state.from_address = deps.from_address;
-        for (deps.accounts) |source| {
-            self.state.accounts.add(source.id, source.label, source.from, .{
-                .imap_host = source.imap_host,
-                .imap_port = source.imap_port,
-                .username = source.username,
-                .smtp_host = source.smtp_host,
-                .smtp_port = source.smtp_port,
-                .smtp = source.smtp,
-            });
-        }
+        self.source_count = 0;
+        self.source_text = @splat(.{});
+        for (deps.accounts) |source| self.add_source(source);
         if (deps.notice) |notice| self.state.set_alert("{s}", .{notice});
         self.parser = .{};
         self.body_loaded = false;
@@ -168,10 +175,42 @@ pub const Session = struct {
         self.load_cached(self.state.mailbox, true);
     }
 
+    /// Copies one account into the session's own list and registers it.
+    fn add_source(self: *Session, source: MailSource) void {
+        const index = self.source_count;
+        if (index >= self.sources.len) return;
+
+        const text = &self.source_text[index];
+        text.label.set(source.label);
+        text.imap_host.set(source.imap_host);
+        text.username.set(source.username);
+        text.smtp_host.set(source.smtp_host);
+
+        self.sources[index] = source;
+        self.sources[index].label = text.label.slice();
+        self.sources[index].imap_host = text.imap_host.slice();
+        self.sources[index].username = text.username.slice();
+        self.sources[index].smtp_host = text.smtp_host.slice();
+        self.source_count += 1;
+
+        self.state.accounts.add(source.id, text.label.slice(), source.from, .{
+            .imap_host = text.imap_host.slice(),
+            .imap_port = source.imap_port,
+            .username = text.username.slice(),
+            .smtp_host = text.smtp_host.slice(),
+            .smtp_port = source.smtp_port,
+            .smtp = source.smtp,
+        });
+    }
+
+    fn live_sources(self: *Session) []const MailSource {
+        return self.sources[0..self.source_count];
+    }
+
     /// Fills the store from the on-disk cache and remembers whether the network
     /// is still needed.
     fn load_cached(self: *Session, mailbox: Mailbox, detect_boot: bool) void {
-        for (self.deps.accounts, 0..) |source, index| {
+        for (self.live_sources(), 0..) |source, index| {
             const mask = mask_bit(@intCast(index), @backingInt(mailbox));
             if (self.deps.cache) |cache| {
                 const cached = cache.load(source.id, mailbox, self.scratch) catch 0;
@@ -193,7 +232,7 @@ pub const Session = struct {
     pub fn boot(self: *Session) void {
         if (!self.needs_boot) return;
         self.needs_boot = false;
-        if (self.deps.accounts.len == 0) return;
+        if (self.source_count == 0) return;
 
         // The first connection must be made on this thread: the transport's
         // Io belongs to the event loop, and opening it from the worker leaves
@@ -268,17 +307,17 @@ pub const Session = struct {
         // would then pay TCP + TLS + LOGIN before the first byte of mail, so
         // warm it in the background (this is the worker thread: no freeze)
         // while the user reads what is already on screen.
-        if (!needs_network and self.deps.accounts.len > 0) self.start_refresh();
+        if (!needs_network and self.source_count > 0) self.start_refresh();
 
         while (self.step()) {}
     }
 
     fn start_refresh(self: *Session) void {
         if (self.refreshing) return;
-        const count = self.deps.accounts.len;
+        const count = self.source_count;
         if (count == 0) return;
 
-        for (self.deps.accounts, 0..) |source, index| {
+        for (self.live_sources(), 0..) |source, index| {
             self.refresh_sources[index] = .{ .id = source.id, .mail = source.mail };
         }
         // Paint what the cache has first: switching mailboxes stays instant.
@@ -300,7 +339,7 @@ pub const Session = struct {
     fn finish_refresh(self: *Session) void {
         self.refresh_job.join();
 
-        for (self.deps.accounts, 0..) |source, index| {
+        for (self.live_sources(), 0..) |source, index| {
             // A failed account keeps whatever the cache already showed.
             if (!self.refresh_job.ok[index]) continue;
 
@@ -509,7 +548,7 @@ pub const Session = struct {
     }
 
     fn source_for(self: *Session, account: core.id.AccountId) ?core.mail_port.Mail {
-        for (self.deps.accounts) |source| {
+        for (self.live_sources()) |source| {
             if (source.id == account) return source.mail;
         }
         return null;
@@ -566,7 +605,7 @@ pub const Session = struct {
 
     fn empty_mailbox(self: *Session, account: ?core.id.AccountId, mailbox: Mailbox) void {
         var done: u32 = 0;
-        for (self.deps.accounts) |source| {
+        for (self.live_sources()) |source| {
             if (account) |filter| {
                 if (source.id != filter) continue;
             }
@@ -767,6 +806,37 @@ pub const Session = struct {
         return true;
     }
 
+    /// A newly saved account is connected and shown now, not on the next start.
+    fn attach_new_account(self: *Session, id: core.id.AccountId, label: []const u8) void {
+        const accounts = self.deps.accounts_file orelse return;
+
+        var opened: core.accounts_port.Accounts.Connected = .{};
+        accounts.connect(id, &opened) catch {
+            self.state.set_alert("{s} saved, but it did not connect", .{label});
+            return;
+        };
+        const mail = opened.mail orelse {
+            self.state.set_alert("{s} saved, but it did not connect", .{label});
+            return;
+        };
+
+        self.add_source(.{
+            .id = opened.id,
+            .label = opened.label,
+            .from = core.address.Address.init(opened.address_text) catch .{},
+            .mail = mail,
+            .imap_host = opened.imap_host,
+            .imap_port = opened.imap_port,
+            .username = opened.username,
+            .smtp_host = opened.smtp_host,
+            .smtp_port = opened.smtp_port,
+            .smtp = opened.smtp,
+        });
+        self.state.set_status("{s} added", .{label});
+        // Show its mail straight away.
+        self.start_refresh();
+    }
+
     fn move_field(self: *Session, form: *Settings, delta: i8) void {
         const count: i16 = Field.count();
         const current: i16 = @backingInt(form.field);
@@ -806,7 +876,7 @@ pub const Session = struct {
         var label_buffer: [core.limits.label_max]u8 = undefined;
         const label = form.setup.account_label(&label_buffer);
 
-        accounts.save(.{
+        const saved_id = accounts.save(.{
             .text = text,
             .label = label,
             // An empty field means "keep the stored password", so editing does
@@ -831,9 +901,10 @@ pub const Session = struct {
             }
         }
         const added = form.editing == null;
+        const new_id = saved_id;
         self.close_settings();
-        self.state.set_status("{s} saved · restart to apply", .{label});
-        if (added) self.state.set_status("{s} added · restart to connect it", .{label});
+        self.state.set_status("{s} saved", .{label});
+        if (added) self.attach_new_account(new_id, label);
     }
 
     fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags) void {
@@ -874,7 +945,7 @@ pub const Session = struct {
         var failed = false;
         var login_failed = false;
 
-        for (self.deps.accounts, 0..) |source, index| {
+        for (self.live_sources(), 0..) |source, index| {
             const count = source.mail.fetch(mailbox, self.scratch) catch |err| {
                 failed = true;
                 if (err == error.Rejected) login_failed = true;
@@ -1799,7 +1870,8 @@ test "the account form opens empty, validates, and saves through the port" {
     try testing.expectEqualStrings("me", port.last_label[0..port.last_label_len]);
     try testing.expect(port.last_replaces == null);
     try testing.expect(rig.session.settings == null);
-    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "added") != null);
+    // Memory.connect reports no Mail, so the account is saved but not attached.
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "did not connect") != null);
 }
 
 test "the form shows the servers the source reported" {
@@ -1834,6 +1906,32 @@ test "the form shows the servers the source reported" {
     try testing.expectEqualStrings("alvaro", form.setup.username.slice());
     try testing.expectEqualStrings("587", form.setup.smtp_port.slice());
     try testing.expectEqualStrings("993", form.setup.imap_port.slice());
+}
+
+test "a new account is connected and listed without a restart" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var port: core.accounts_port.Memory = .{ .connect_mail = rig.fake_mail.mail() };
+    rig.session.deps.accounts_file = port.accounts();
+    const before = rig.session.source_count;
+
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+    form.setup.address.set("new@example.com");
+    form.setup.imap_host.set("imap.example.com");
+    form.setup.imap_port.set("993");
+    form.setup.username.set("new");
+    form.setup.password.append_codepoint('s');
+    rig.session.save_settings(form);
+
+    // It is in the list, and its mail is on its way.
+    try testing.expectEqual(before + 1, rig.session.source_count);
+    try testing.expect(rig.session.state.accounts.len > 0);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "added") != null);
+    rig.session.settle_refresh_for_test();
 }
 
 test "editing prefills the form and replaces the account" {
@@ -2143,7 +2241,7 @@ test "delete and empty report server errors and unknown accounts" {
     try testing.expectEqualStrings("Could not empty Trash on the server", rig.session.state.status.slice());
     rig.fake_mail.fail_flags = false;
 
-    rig.session.deps.accounts = &.{};
+    rig.session.source_count = 0; // no accounts connected
     rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
         .account = null,
         .mailbox = .trash,

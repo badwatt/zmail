@@ -246,7 +246,7 @@ const Live = struct {
         };
         self.sources[self.mail_count] = .{
             .id = account.id,
-            .label = account.label,
+            .label = stored.label,
             .from = account.from,
             .mail = self.lazy_mail[index].mail(),
             .imap_host = stored.host.slice(),
@@ -407,7 +407,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         bodies = file_bodies.cache();
     }
 
-    var accounts_file = FileAccounts{ .io = io, .path = path, .system = system };
+    var accounts_file = FileAccounts{ .io = io, .path = path, .system = system, .gpa = gpa };
     const account_port: ?core.accounts_port.Accounts = if (live.len > 0) accounts_file.accounts() else null;
 
     const outcome = run_session(
@@ -660,12 +660,26 @@ const FileAccounts = struct {
     io: std.Io,
     path: []const u8,
     system: SessionSystem,
+    gpa: std.mem.Allocator = undefined,
+    // One runtime connection (the TUI adds one account at a time).
+    transport: net.tls.TlsTransport = undefined,
+    imap: core.imap_mail.ImapMail = undefined,
+    open_account: ?core.id.AccountId = null,
+    connected: core.accounts_port.Accounts.Connected = .{},
+    // Owned copies: the config text they came from is a local buffer.
+    owned_label: core.text.Text(core.limits.label_max) = .{},
+    owned_host: core.text.Text(core.limits.host_max) = .{},
+    owned_user: core.text.Text(core.limits.username_max) = .{},
+    owned_address: core.text.Text(core.limits.address_max) = .{},
+    connected_address_buffer: [core.limits.address_max]u8 = undefined,
 
     fn accounts(self: *FileAccounts) core.accounts_port.Accounts {
         return .{ .context = self, .vtable = &.{
             .remove = removeThunk,
             .save = saveThunk,
             .rename = renameThunk,
+            .connect = connectThunk,
+            .disconnect = disconnectThunk,
         } };
     }
 
@@ -685,6 +699,74 @@ const FileAccounts = struct {
         var credential_buffer: [512]u8 = undefined;
         const credential = cli.credential_path(self.path, entry.label.slice(), &credential_buffer);
         std.Io.Dir.cwd().deleteFile(self.io, credential) catch {};
+    }
+
+    fn connectThunk(
+        context: *anyopaque,
+        account: core.id.AccountId,
+        out: *core.accounts_port.Accounts.Connected,
+    ) core.accounts_port.Error!void {
+        const self: *FileAccounts = @ptrCast(@alignCast(context));
+
+        // Only one at a time: close whatever was open.
+        disconnectThunk(context, account) catch {};
+
+        var buffer: [8193]u8 = undefined;
+        const text = read_file(self.io, self.path, &buffer) catch return error.Unavailable;
+        const file = core.config.parse(text) catch return error.Unavailable;
+        const index: usize = @intCast(account.to_int() - 1);
+        if (index >= file.len) return error.Unavailable;
+        const entry = file.items()[index];
+        if (entry.account.imap.security != .tls) return error.Unavailable;
+
+        var password: core.secret.Secret = .{};
+        defer password.deinit();
+        read_password(self.io, self.path, entry.label.slice(), file.len == 1, &password) catch
+            return error.Unavailable;
+
+        self.transport.open(self.gpa, self.io, entry.account.imap.host.slice(), entry.account.imap.port) catch
+            return error.Unavailable;
+        self.imap = core.imap_mail.ImapMail.open(
+            self.transport.transport(),
+            account,
+            entry.account.username.slice(),
+            password.expose(),
+        ) catch |err| {
+            self.transport.deinit();
+            return switch (err) {
+                error.LoginFailed, error.Rejected, error.ProtocolError => error.Unavailable,
+                else => error.Unavailable,
+            };
+        };
+        self.open_account = account;
+
+        self.owned_label.set(entry.label.slice());
+        self.owned_host.set(entry.account.imap.host.slice());
+        self.owned_user.set(entry.account.username.slice());
+        self.owned_address.set(entry.account.address.addr_spec(
+            &self.connected_address_buffer,
+        ));
+        self.connected = .{
+            .id = account,
+            .label = self.owned_label.slice(),
+            .address_text = self.owned_address.slice(),
+            .imap_host = self.owned_host.slice(),
+            .imap_port = entry.account.imap.port,
+            .username = self.owned_user.slice(),
+            .smtp = entry.smtp != null,
+            .mail = self.imap.mail(),
+        };
+        out.* = self.connected;
+    }
+
+    fn disconnectThunk(context: *anyopaque, account: core.id.AccountId) core.accounts_port.Error!void {
+        const self: *FileAccounts = @ptrCast(@alignCast(context));
+        _ = account;
+        if (self.open_account == null) return;
+        self.imap.close();
+        self.transport.deinit();
+        self.open_account = null;
+        self.connected.mail = null;
     }
 
     fn renameThunk(
@@ -718,7 +800,7 @@ const FileAccounts = struct {
         }
     }
 
-    fn saveThunk(context: *anyopaque, draft: core.accounts_port.Accounts.Draft) core.accounts_port.Error!void {
+    fn saveThunk(context: *anyopaque, draft: core.accounts_port.Accounts.Draft) core.accounts_port.Error!core.id.AccountId {
         const self: *FileAccounts = @ptrCast(@alignCast(context));
 
         var buffer: [8193]u8 = undefined;
@@ -745,6 +827,10 @@ const FileAccounts = struct {
             write_credential_bytes(self.io, self.path, draft.label, password) catch
                 return error.Unavailable;
         }
+
+        // The new account's id is its position in the file.
+        if (draft.replaces) |account| return account;
+        return core.id.AccountId.from_int(@intCast(existing.len + 1));
     }
 };
 
