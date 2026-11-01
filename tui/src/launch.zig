@@ -445,7 +445,7 @@ fn read_password(
         if (os.env("AMAIL_PASSWORD")) |value| {
             if (value.len > 0) {
                 try core.secret.Secret.init(value, out);
-                if (path.len > 0) seal_in_place(io, path, value) catch {};
+                if (path.len > 0) seal_in_place(io, config_path, path, value) catch {};
                 return;
             }
         }
@@ -461,7 +461,7 @@ fn read_password(
         if (os.env("AMAIL_PASSWORD")) |value| {
             try core.secret.Secret.init(value, out);
             // Re-seal it: a lost or replaced key heals on the next start.
-            if (path.len > 0) seal_in_place(io, path, value) catch {};
+            if (path.len > 0) seal_in_place(io, config_path, path, value) catch {};
             return;
         }
     }
@@ -478,7 +478,7 @@ fn read_password(
             // blob that cannot be opened must not become a garbage password.
             if (!looks_like_password(trimmed)) return error.NoPassword;
             try core.secret.Secret.init(trimmed, out);
-            seal_in_place(io, legacy, trimmed) catch {};
+            seal_in_place(io, config_path, legacy, trimmed) catch {};
             if (path.len > 0) write_sealed_credential(io, config_path, out, label) catch {};
             return;
         } else |_| {}
@@ -525,10 +525,12 @@ fn key_dir(io: std.Io, config_path: []const u8, buffer: []u8) ?[]const u8 {
     return std.fmt.bufPrint(buffer, "{s}", .{dir}) catch null;
 }
 
-/// Seals an existing plaintext file (used to migrate the old credential).
-fn seal_in_place(io: std.Io, path: []const u8, secret: []const u8) !void {
+/// Seals `secret` into `dest`. The key always comes from the *config*
+/// directory: deriving it from the destination made the read key differ from
+/// the write key, so a freshly saved password could never be opened again.
+fn seal_in_place(io: std.Io, config_path: []const u8, dest: []const u8, secret: []const u8) !void {
     var dir_buffer: [512]u8 = undefined;
-    const dir = key_dir(io, path, &dir_buffer) orelse return error.NameTooLong;
+    const dir = key_dir(io, config_path, &dir_buffer) orelse return error.NameTooLong;
 
     var keys = net.keyfile.KeyFile.init(undefined, io, dir);
     const key = keys.get() orelse return error.NameTooLong;
@@ -537,7 +539,7 @@ fn seal_in_place(io: std.Io, path: []const u8, secret: []const u8) !void {
     var nonce: core.sealed.Nonce = undefined;
     io.random(&nonce);
     const sealed_secret = try core.sealed.seal(key, nonce, secret, &sealed_buffer);
-    try write_file(io, path, sealed_secret);
+    try write_file(io, dest, sealed_secret);
 }
 
 /// A password typed by a human: printable UTF-8, no control bytes.
@@ -562,7 +564,7 @@ fn write_sealed_credential(io: std.Io, config_path: []const u8, password: *const
             else => return err,
         };
     }
-    try seal_in_place(io, credential, password.expose());
+    try seal_in_place(io, config_path, credential, password.expose());
 }
 
 /// Writes (or rewrites) a sealed credential from raw bytes.
