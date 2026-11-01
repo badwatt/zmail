@@ -241,6 +241,12 @@ const Live = struct {
             .label = account.label,
             .from = account.from,
             .mail = self.lazy_mail[index].mail(),
+            .imap_host = account.host.slice(),
+            .imap_port = account.port,
+            .username = account.username.slice(),
+            .smtp_host = account.smtp_host.slice(),
+            .smtp_port = account.smtp_port,
+            .smtp = account.smtp_enabled,
         };
         self.mail_count += 1;
 
@@ -483,6 +489,14 @@ fn write_sealed_credential(io: std.Io, config_path: []const u8, password: *const
     try seal_in_place(io, credential, password.expose());
 }
 
+/// Writes (or rewrites) a sealed credential from raw bytes.
+fn write_credential_bytes(io: std.Io, config_path: []const u8, label: []const u8, password: []const u8) !void {
+    var secret: core.secret.Secret = .{};
+    defer secret.deinit();
+    try core.secret.Secret.init(password, &secret);
+    try write_sealed_credential(io, config_path, &secret, label);
+}
+
 /// Opens a sealed credential; a plaintext file from an older version is still
 /// accepted so nobody is locked out by the upgrade.
 fn open_credential(io: std.Io, text: []const u8, out: *core.secret.Secret) !bool {
@@ -516,7 +530,7 @@ const FileAccounts = struct {
     system: SessionSystem,
 
     fn accounts(self: *FileAccounts) core.accounts_port.Accounts {
-        return .{ .context = self, .vtable = &.{ .remove = removeThunk, .add = addThunk } };
+        return .{ .context = self, .vtable = &.{ .remove = removeThunk, .save = saveThunk } };
     }
 
     fn removeThunk(context: *anyopaque, account: core.id.AccountId) core.accounts_port.Error!void {
@@ -537,28 +551,30 @@ const FileAccounts = struct {
         std.Io.Dir.cwd().deleteFile(self.io, credential) catch {};
     }
 
-    fn addThunk(context: *anyopaque, label: []u8, seed: []const u8) core.accounts_port.Error![]const u8 {
+    fn saveThunk(context: *anyopaque, draft: core.accounts_port.Accounts.Draft) core.accounts_port.Error!void {
         const self: *FileAccounts = @ptrCast(@alignCast(context));
+
         var buffer: [8193]u8 = undefined;
-        const existing = read_file(self.io, self.path, &buffer) catch return error.Unavailable;
-        _ = core.config.parse(existing) catch return error.Unavailable;
+        const text = read_file(self.io, self.path, &buffer) catch |err| switch (err) {
+            error.FileNotFound => "",
+            else => return error.Unavailable,
+        };
+        const existing = core.config.parse(text) catch return error.Unavailable;
 
-        var saved: setup_session.Saved = undefined;
-        const outcome = setup_session.run(self.system, theme_mod.Theme.dark(), self.path, seed) catch
+        if (draft.replaces) |account| {
+            // Replace in place: drop the old section, then append the new one.
+            const index: usize = @intCast(account.to_int() - 1);
+            if (index >= existing.len) return error.Unavailable;
+            var kept_buffer: [8193]u8 = undefined;
+            const kept = core.config.without(text, existing.items()[index].label.slice(), &kept_buffer);
+            write_file(self.io, self.path, kept) catch return error.Unavailable;
+        } else if (core.config.has_label(text, draft.label)) {
             return error.Unavailable;
-        switch (outcome) {
-            .cancelled => return error.Cancelled,
-            .saved => |result| saved = result,
         }
-        defer saved.password.deinit();
 
-        if (core.config.has_label(existing, saved.label.slice())) return error.Unavailable;
-        append_file(self.io, self.path, saved.config_text()) catch return error.Unavailable;
-        write_credential(self.io, self.path, &saved) catch return error.Unavailable;
-
-        const length = @min(saved.label.slice().len, label.len);
-        @memcpy(label[0..length], saved.label.slice()[0..length]);
-        return label[0..length];
+        append_file(self.io, self.path, draft.text) catch return error.Unavailable;
+        write_credential_bytes(self.io, self.path, draft.label, draft.password) catch
+            return error.Unavailable;
     }
 };
 

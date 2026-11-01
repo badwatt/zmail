@@ -45,7 +45,8 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .accounts_move => |move| accounts_move(state, move),
         .accounts_select => accounts_select(state),
         .accounts_remove => accounts_remove(state, &effects),
-        .accounts_add => effects.add(.{ .add_account = .{} }),
+        .accounts_add => effects.add(.{ .edit_account = .{ .account = null } }),
+        .accounts_edit => accounts_edit(state, &effects),
         .accounts_close => state.view = .list,
         .begin_search => begin_search(state),
         .search_char => |byte| search_char(state, store, byte),
@@ -287,6 +288,18 @@ fn accounts_select(state: *State) void {
     state.cursor = 0;
     state.offset = 0;
     state.set_status("{s}", .{account.label.slice()});
+}
+
+fn accounts_edit(state: *State, effects: *Effects) void {
+    if (state.accounts_cursor == 0) {
+        state.set_status("Pick an account to edit", .{});
+        return;
+    }
+    const account = state.accounts.at(state.accounts_cursor - 1) orelse {
+        state.set_status("No account there", .{});
+        return;
+    };
+    effects.add(.{ .edit_account = .{ .account = account.id } });
 }
 
 fn accounts_remove(state: *State, effects: *Effects) void {
@@ -633,8 +646,8 @@ fn ready() !struct { store: Store, state: State } {
 test "the accounts overlay opens, moves, selects, and closes" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
-    fixture.state.accounts.add(AccountId.from_int(1), "home", .{});
-    fixture.state.accounts.add(AccountId.from_int(2), "work", .{});
+    fixture.state.accounts.add(AccountId.from_int(1), "home", .{}, .{});
+    fixture.state.accounts.add(AccountId.from_int(2), "work", .{}, .{});
     fixture.state.accounts_cursor = 1;
 
     _ = apply(&fixture.state, &fixture.store, .open_accounts);
@@ -683,7 +696,7 @@ test "dismissing the accounts overlay returns to the list" {
 test "moving the accounts cursor with an unmapped move leaves it alone" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
-    fixture.state.accounts.add(AccountId.from_int(1), "home", .{});
+    fixture.state.accounts.add(AccountId.from_int(1), "home", .{}, .{});
     fixture.state.view = .accounts;
     fixture.state.accounts_cursor = 1;
 
@@ -691,10 +704,28 @@ test "moving the accounts cursor with an unmapped move leaves it alone" {
     try testing.expectEqual(@as(u8, 1), fixture.state.accounts_cursor);
 }
 
+test "editing needs an account: the first row is not one" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.accounts.add(AccountId.from_int(1), "home", .{}, .{});
+
+    fixture.state.accounts_cursor = 0;
+    _ = apply(&fixture.state, &fixture.store, .accounts_edit);
+    try testing.expectEqualStrings("Pick an account to edit", fixture.state.status.slice());
+
+    fixture.state.accounts_cursor = 5;
+    _ = apply(&fixture.state, &fixture.store, .accounts_edit);
+    try testing.expectEqualStrings("No account there", fixture.state.status.slice());
+
+    fixture.state.accounts_cursor = 1;
+    const effects = apply(&fixture.state, &fixture.store, .accounts_edit);
+    try expect_effects(&effects, &.{.{ .edit_account = .{ .account = AccountId.from_int(1) } }});
+}
+
 test "removing and adding accounts emits the effects the session runs" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
-    fixture.state.accounts.add(AccountId.from_int(1), "home", .{});
+    fixture.state.accounts.add(AccountId.from_int(1), "home", .{}, .{});
 
     fixture.state.accounts_cursor = 0;
     const refused = apply(&fixture.state, &fixture.store, .accounts_remove);
@@ -711,7 +742,7 @@ test "removing and adding accounts emits the effects the session runs" {
     try testing.expectEqualStrings("No account there", fixture.state.status.slice());
 
     const add = apply(&fixture.state, &fixture.store, .accounts_add);
-    try expect_effects(&add, &.{.{ .add_account = .{} }});
+    try expect_effects(&add, &.{.{ .edit_account = .{ .account = null } }});
 }
 
 test "delete_forever removes the message and asks the server, in Trash only" {
@@ -1584,8 +1615,8 @@ test "set_viewport tolerates zero rows and clamps the reader scroll" {
 test "cycle_account walks all accounts and returns to the unified view" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
-    fixture.state.accounts.add(AccountId.from_int(1), "personal", .{});
-    fixture.state.accounts.add(AccountId.from_int(2), "work", .{});
+    fixture.state.accounts.add(AccountId.from_int(1), "personal", .{}, .{});
+    fixture.state.accounts.add(AccountId.from_int(2), "work", .{}, .{});
     fixture.state.cursor = 1;
 
     _ = apply(&fixture.state, &fixture.store, .cycle_account);
@@ -1606,7 +1637,7 @@ test "cycle_account without accounts or with an unknown filter stays safe" {
     _ = apply(&fixture.state, &fixture.store, .cycle_account);
     try testing.expect(fixture.state.account_filter == null);
 
-    fixture.state.accounts.add(AccountId.from_int(1), "personal", .{});
+    fixture.state.accounts.add(AccountId.from_int(1), "personal", .{}, .{});
     fixture.state.account_filter = AccountId.from_int(9);
     _ = apply(&fixture.state, &fixture.store, .cycle_account);
     try testing.expect(fixture.state.account_filter == null);

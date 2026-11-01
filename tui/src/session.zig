@@ -39,6 +39,13 @@ pub const MailSource = struct {
     label: []const u8,
     from: core.address.Address = .{},
     mail: core.mail_port.Mail,
+    /// Enough to edit the account without re-reading the config.
+    imap_host: []const u8 = "",
+    imap_port: u16 = 0,
+    username: []const u8 = "",
+    smtp_host: []const u8 = "",
+    smtp_port: u16 = 0,
+    smtp: bool = false,
 };
 
 pub const OutboxSource = struct {
@@ -107,14 +114,9 @@ pub const Session = struct {
     /// as the refresh finishes, so the reader shows text instead of a frozen UI.
     pending_body: ?struct { account: core.id.AccountId, mailbox: Mailbox, id: MessageId } = null,
 
-    /// A key asked for the assistant; it runs after the current read is fully
-    /// dispatched, so typing that arrived in the same read is not lost.
-    accounts_add_requested: bool = false,
-    /// Set when a key started a modal flow that reads the terminal itself, and
-    /// the bytes buffered after it (see handle_bytes).
-    modal_started: bool = false,
-    seed: [128]u8 = undefined,
-    seed_len: u8 = 0,
+    /// The account form, when it is open. It lives here, not in the core state,
+    /// because it holds a password and is pure UI.
+    settings: ?Settings = null,
 
     /// One row of encoded ANSI. Bounded by the widest row times the longest
     /// possible style run, so a frame never allocates.
@@ -142,7 +144,14 @@ pub const Session = struct {
         self.state = .{};
         self.state.from_address = deps.from_address;
         for (deps.accounts) |source| {
-            self.state.accounts.add(source.id, source.label, source.from);
+            self.state.accounts.add(source.id, source.label, source.from, .{
+                .imap_host = source.imap_host,
+                .imap_port = source.imap_port,
+                .username = source.username,
+                .smtp_host = source.smtp_host,
+                .smtp_port = source.smtp_port,
+                .smtp = source.smtp,
+            });
         }
         if (deps.notice) |notice| self.state.set_alert("{s}", .{notice});
         self.parser = .{};
@@ -203,6 +212,7 @@ pub const Session = struct {
             while (!self.refresh_job.finished()) std.atomic.spinLoopHint();
             self.refresh_job.join();
         }
+        if (self.settings) |*form| form.setup.deinit();
         self.store.deinit(self.gpa);
         self.gpa.free(self.refresh_scratch);
         self.gpa.free(self.scratch);
@@ -229,11 +239,6 @@ pub const Session = struct {
             }
             self.state.set_alert("Terminal error", .{});
             self.needs_render = true;
-        }
-
-        if (self.accounts_add_requested) {
-            self.accounts_add_requested = false;
-            self.add_account();
         }
 
         self.sync_size();
@@ -364,47 +369,13 @@ pub const Session = struct {
             const end = @min(bytes.len, index + input.keys_max);
             var keys: input.Keys = .{};
             self.parser.decode(bytes[index..end], &keys);
-            const decoded = keys.slice();
-            var key_index: usize = 0;
-            while (key_index < decoded.len) : (key_index += 1) {
-                _ = self.handle_key(decoded[key_index]);
-                if (!self.modal_started) continue;
-                // The rest of the input belongs to the assistant, not to the
-                // session: hand over the keys we did not deliver plus the bytes
-                // we did not even decode.
-                self.seed_len = 0;
-                for (decoded[key_index + 1 ..]) |pending| self.seed_key(pending);
-                self.seed_raw(bytes[end..]);
-                self.modal_started = false;
-                return;
-            }
+            for (keys.slice()) |key| _ = self.handle_key(key);
             index = end;
         }
     }
 
-    fn seed_key(self: *Session, key: input.Key) void {
-        const codepoint: u21 = switch (key) {
-            .char => |value| value,
-            .enter => '\r',
-            .backspace => 0x7f,
-            .escape => 0x1b,
-            .tab => '\t',
-            else => return,
-        };
-        if (codepoint > 0x7f or self.seed_len == self.seed.len) return;
-        self.seed[self.seed_len] = @intCast(codepoint);
-        self.seed_len += 1;
-    }
-
-    fn seed_raw(self: *Session, bytes: []const u8) void {
-        var index: usize = 0;
-        while (index < bytes.len and self.seed_len < self.seed.len) : (index += 1) {
-            self.seed[self.seed_len] = bytes[index];
-            self.seed_len += 1;
-        }
-    }
-
     fn handle_key(self: *Session, key: input.Key) bool {
+        if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
         const command = keymap.translate(key, .{ .mode = self.state.mode, .view = self.state.view }) orelse return false;
         return self.apply(command);
@@ -514,12 +485,7 @@ pub const Session = struct {
                 .delete_message => |args| self.delete_message(args.account, args.mailbox, args.id),
                 .empty_mailbox => |args| self.empty_mailbox(args.account, args.mailbox),
                 .remove_account => |args| self.remove_account(args.account),
-                .add_account => {
-                    // Deferred: the assistant must run once the rest of this
-                    // read has been handed to it (see handle_bytes).
-                    self.modal_started = true;
-                    self.accounts_add_requested = true;
-                },
+                .edit_account => |args| self.open_settings(args.account),
                 .refresh => self.start_refresh(),
                 .send => |outgoing| self.send(&outgoing),
             }
@@ -624,20 +590,122 @@ pub const Session = struct {
         self.state.set_status("{s} removed · restart to apply", .{label});
     }
 
-    fn add_account(self: *Session) void {
+    const Settings = struct {
+        setup: core.setup.Setup = .{},
+        editing: ?core.id.AccountId = null,
+    };
+
+    /// Opens the account form: empty for a new account, prefilled for an edit.
+    fn open_settings(self: *Session, account: ?core.id.AccountId) void {
+        var form = Settings{ .editing = account };
+
+        if (account) |id| {
+            const index = self.state.accounts.index_of(id) orelse 0;
+            const info = &self.state.accounts.items[index];
+            var label_buffer: [core.limits.label_max]u8 = undefined;
+            var port_buffer: [6]u8 = undefined;
+
+            _ = form.setup.address.set(info.address.addr_spec(&label_buffer));
+            form.setup.imap_host.set(info.imap_host.slice());
+            if (info.imap_port != 0) {
+                form.setup.imap_port.set(std.fmt.bufPrint(&port_buffer, "{d}", .{info.imap_port}) catch "");
+            }
+            form.setup.smtp_host.set(info.smtp_host.slice());
+            if (info.smtp_port != 0) {
+                form.setup.smtp_port.set(std.fmt.bufPrint(&port_buffer, "{d}", .{info.smtp_port}) catch "");
+            }
+            form.setup.username.set(info.username.slice());
+            form.setup.send_enabled = info.smtp;
+        }
+
+        self.settings = form;
+        self.state.view = .accounts;
+        self.state.set_status("", .{});
+        self.needs_render = true;
+    }
+
+    fn settings_key(self: *Session, form: *Settings, key: input.Key) bool {
+        switch (key) {
+            .char => |codepoint| {
+                form.setup.append(codepoint);
+                self.needs_render = true;
+            },
+            .enter => {
+                form.setup.next();
+                self.needs_render = true;
+                if (form.setup.done) self.save_settings(form);
+            },
+            .escape => {
+                if (form.setup.step == .address) {
+                    self.close_settings();
+                } else {
+                    form.setup.back();
+                    self.needs_render = true;
+                }
+            },
+            .backspace => {
+                form.setup.backspace();
+                self.needs_render = true;
+            },
+            .ctrl => |letter| switch (letter) {
+                'u' => {
+                    form.setup.clear_field();
+                    self.needs_render = true;
+                },
+                'c', 'q' => self.state.quit = true,
+                else => {},
+            },
+            else => {},
+        }
+        return true;
+    }
+
+    fn close_settings(self: *Session) void {
+        if (self.settings) |*form| form.setup.deinit();
+        self.settings = null;
+        self.state.view = .accounts;
+        self.state.set_status("", .{});
+        self.needs_render = true;
+    }
+
+    fn save_settings(self: *Session, form: *Settings) void {
         const accounts = self.deps.accounts_file orelse {
+            self.close_settings();
             self.state.set_alert("Accounts cannot be changed here", .{});
             return;
         };
-        var label: [core.limits.label_max]u8 = undefined;
-        const added = accounts.add(&label, self.seed[0..self.seed_len]) catch {
-            // The assistant paints over the session; repaint from scratch.
-            self.invalidate_screen();
-            self.state.set_alert("Could not add the account", .{});
+
+        var text_buffer: [4096]u8 = undefined;
+        const text = form.setup.config_text(&text_buffer);
+        var label_buffer: [core.limits.label_max]u8 = undefined;
+        const label = form.setup.account_label(&label_buffer);
+
+        accounts.save(.{
+            .text = text,
+            .label = label,
+            .password = form.setup.password.expose(),
+            .replaces = form.editing,
+        }) catch {
+            self.close_settings();
+            self.state.set_alert("Could not save the account", .{});
             return;
         };
-        self.invalidate_screen();
-        self.state.set_status("{s} added · restart to connect it", .{added});
+
+        // The view can follow a rename; the connection cannot follow a new host.
+        if (form.editing) |id| {
+            if (self.state.accounts.index_of(id)) |index| {
+                var address = core.address.Address{};
+                address = core.address.Address.init(form.setup.address.slice()) catch core.address.Address{};
+                self.state.accounts.items[index].label.set(label);
+                self.state.accounts.items[index].address = address;
+                self.state.accounts.items[index].imap_host.set(form.setup.imap_host.slice());
+                self.state.accounts.items[index].username.set(form.setup.username.slice());
+            }
+        }
+        const added = form.editing == null;
+        self.close_settings();
+        self.state.set_status("{s} saved · restart to apply", .{label});
+        if (added) self.state.set_status("{s} added · restart to connect it", .{label});
     }
 
     fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags) void {
@@ -698,6 +766,11 @@ pub const Session = struct {
     }
 
     fn render(self: *Session) void {
+        if (self.settings) |*form| {
+            render_mod.settings(&form.setup, self.deps.theme, &self.screen);
+            self.flush();
+            return;
+        }
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
         if (self.body_loaded) {
             wrap.wrap(self.body[0..self.body_len], lay.reader_text_width, &self.wrapped);
@@ -1476,60 +1549,149 @@ test "delete and empty reach the account's server" {
     try testing.expectEqual(@as(u32, 1), rig.session.deps.accounts.len);
 }
 
-test "typing that arrives with the key that opens the assistant is kept" {
+test "the account form opens empty, validates, and saves through the port" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
 
-    // One read: "A" opens the overlay, "n" asks for the assistant, and the rest
-    // is the seed it must receive instead of the session dropping it.
-    rig.fake_system.push_input("Annew@example.com");
-    _ = rig.session.step();
+    var port: core.accounts_port.Memory = .{};
+    rig.session.deps.accounts_file = port.accounts();
 
-    try testing.expectEqual(@as(u8, 15), rig.session.seed_len);
-    try testing.expectEqualStrings("new@example.com", rig.session.seed[0..rig.session.seed_len]);
-    try testing.expect(!rig.session.modal_started);
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+    try testing.expectEqual(core.setup.Step.address, form.setup.step);
+
+    // Typing goes into the form.
+    rig.fake_system.push_input("x");
+    _ = rig.session.step();
+    try testing.expectEqualStrings("x", form.setup.address.slice());
+
+    // An invalid address is refused instead of saved.
+    form.setup.address.set("not-an-address");
+    _ = rig.session.settings_key(form, .enter);
+    try testing.expect(!form.setup.problem.is_empty());
+    try testing.expectEqual(@as(u32, 0), port.saved);
+
+    // A valid one, then through every step, ends in a save.
+    form.setup.address.set("me@example.com");
+    _ = rig.session.settings_key(form, .enter);
+    form.setup.imap_host.set("imap.example.com");
+    form.setup.imap_port.set("993");
+    form.setup.username.set("me");
+    form.setup.password.append_codepoint('s');
+    rig.session.save_settings(form);
+
+    try testing.expectEqual(@as(u32, 1), port.saved);
+    try testing.expectEqualStrings("me", port.last_label[0..port.last_label_len]);
+    try testing.expect(port.last_replaces == null);
+    try testing.expect(rig.session.settings == null);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "added") != null);
 }
 
-test "a key that opens the assistant hands over the rest of the input" {
+test "editing prefills the form and replaces the account" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
 
-    // "n" starts the assistant; everything after it in the same read is the
-    // seed it must receive (typed text, Enter, backspace).
-    rig.session.seed_len = 0;
-    rig.session.seed_key(.{ .char = 'a' });
-    rig.session.seed_key(.enter);
-    rig.session.seed_key(.backspace);
-    rig.session.seed_key(.escape);
-    rig.session.seed_key(.{ .char = 0x1f600 }); // non-ASCII is dropped
-    rig.session.seed_raw("bc");
-    try testing.expectEqualStrings("a\r\x7f\x1b" ++ "bc", rig.session.seed[0..rig.session.seed_len]);
+    var port: core.accounts_port.Memory = .{};
+    rig.session.deps.accounts_file = port.accounts();
+    rig.session.state.accounts.items[0].imap_host.set("imap.example.com");
+    rig.session.state.accounts.items[0].imap_port = 993;
+    rig.session.state.accounts.items[0].username.set("me");
+    rig.session.state.accounts.items[0].smtp_host.set("smtp.example.com");
+    rig.session.state.accounts.items[0].smtp_port = 465;
+    rig.session.state.accounts.items[0].smtp = true;
 
-    // The buffer is bounded: extra bytes are dropped, not written past the end.
-    rig.session.seed_len = @intCast(rig.session.seed.len);
-    rig.session.seed_raw("overflow");
-    rig.session.seed_key(.{ .char = 'x' });
-    try testing.expectEqual(@as(u8, @intCast(rig.session.seed.len)), rig.session.seed_len);
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = core.id.AccountId.from_int(1) } }});
+    const form = &rig.session.settings.?;
+    try testing.expectEqualStrings("me@amail.local", form.setup.address.slice());
+    try testing.expectEqualStrings("imap.example.com", form.setup.imap_host.slice());
+    try testing.expectEqualStrings("993", form.setup.imap_port.slice());
+    try testing.expectEqualStrings("me", form.setup.username.slice());
+    try testing.expectEqualStrings("smtp.example.com", form.setup.smtp_host.slice());
+    try testing.expectEqualStrings("465", form.setup.smtp_port.slice());
+    try testing.expect(form.setup.send_enabled);
+    try testing.expectEqual(core.id.AccountId.from_int(1), form.editing.?);
+
+    form.setup.imap_host.set("imap.example.com");
+    form.setup.imap_port.set("993");
+    form.setup.username.set("me");
+    form.setup.password.append_codepoint('s');
+    rig.session.save_settings(form);
+
+    try testing.expectEqual(@as(u32, 1), port.saved);
+    try testing.expectEqual(core.id.AccountId.from_int(1), port.last_replaces.?);
+    try testing.expect(rig.session.settings == null);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "saved") != null);
 }
 
-test "adding an account defers the assistant until the read is dispatched" {
+test "the form's keys edit, submit, back out, and quit" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    var form = &rig.session.settings.?;
+
+    _ = rig.session.settings_key(form, .{ .char = 'a' });
+    _ = rig.session.settings_key(form, .backspace);
+    try testing.expect(form.setup.address.is_empty());
+
+    _ = rig.session.settings_key(form, .{ .ctrl = 'x' });
+    _ = rig.session.settings_key(form, .{ .mouse = .{ .x = 0, .y = 0, .kind = .press, .button = .left } });
+    try testing.expect(!rig.session.state.quit);
+
+    // Ctrl+Q quits from the form, like everywhere else.
+    _ = rig.session.settings_key(&rig.session.settings.?, .{ .ctrl = 'q' });
+    try testing.expect(rig.session.state.quit);
+
+    rig.session.state.quit = false;
+    rig.session.close_settings();
+    try testing.expect(rig.session.settings == null);
+}
+
+test "closing the form twice, and after a failed save, is safe" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
 
-    // No port: the request is still deferred, then reported without a terminal.
-    rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
-    try testing.expect(rig.session.accounts_add_requested);
-    try testing.expect(rig.session.state.status.is_empty());
+    // No port at all: the save path closes the form and reports it.
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+    form.setup.address.set("me@example.com");
+    // Escape on the address step closes it too.
+    _ = rig.session.settings_key(form, .escape);
+    try testing.expect(rig.session.settings == null);
 
-    _ = rig.session.step();
-    try testing.expect(!rig.session.accounts_add_requested);
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    rig.session.save_settings(&rig.session.settings.?);
+    try testing.expect(rig.session.settings == null);
     try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
+}
+
+test "the account form backs up a step and clears a field with Ctrl+U" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    var port: core.accounts_port.Memory = .{};
+    rig.session.deps.accounts_file = port.accounts();
+
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    rig.fake_system.push_input("me@example.com\r");
+    _ = rig.session.step();
+    try testing.expectEqual(core.setup.Step.imap_host, rig.session.settings.?.setup.step);
+
+    // Back to the address, clear it, and it is gone.
+    _ = rig.session.settings_key(&rig.session.settings.?, .escape);
+    _ = rig.session.step();
+    try testing.expectEqual(core.setup.Step.address, rig.session.settings.?.setup.step);
+    rig.fake_system.push_input("\x15");
+    _ = rig.session.step();
+    try testing.expect(rig.session.settings.?.setup.address.is_empty());
 }
 
 test "removing an account rewrites the config and drops its mail" {
@@ -1572,22 +1734,17 @@ test "removing an account rewrites the config and drops its mail" {
     // A failing port leaves everything alone. Adding is deferred, so it runs
     // on the next step.
     port.fail = true;
-    rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
-    _ = rig.session.step();
-    try testing.expectEqualStrings("Could not add the account", rig.session.state.status.slice());
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const failing = &rig.session.settings.?;
+    failing.setup.address.set("me@example.com");
+    failing.setup.imap_host.set("imap.example.com");
+    failing.setup.imap_port.set("993");
+    failing.setup.username.set("me");
+    failing.setup.password.append_codepoint('s');
+    rig.session.save_settings(failing);
+    try testing.expectEqualStrings("Could not save the account", rig.session.state.status.slice());
     rig.session.run_effects_for_test(&.{.{ .remove_account = .{ .account = core.id.AccountId.from_int(2) } }});
     try testing.expectEqualStrings("Could not rewrite the config", rig.session.state.status.slice());
-
-    port.fail = false;
-    rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
-    _ = rig.session.step();
-    try testing.expectEqual(@as(u32, 2), port.added);
-    try testing.expect(std.mem.endsWith(u8, rig.session.state.status.slice(), "added · restart to connect it"));
-
-    rig.session.deps.accounts_file = null;
-    rig.session.run_effects_for_test(&.{.{ .add_account = .{} }});
-    _ = rig.session.step();
-    try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
 }
 
 test "delete and empty report server errors and unknown accounts" {

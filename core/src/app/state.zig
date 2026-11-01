@@ -25,6 +25,22 @@ pub const AccountInfo = struct {
     id: AccountId = .unknown,
     label: Text(limits.label_max) = .{},
     address: Address = .{},
+    imap_host: Text(limits.host_max) = .{},
+    imap_port: u16 = 0,
+    username: Text(limits.username_max) = .{},
+    smtp_host: Text(limits.host_max) = .{},
+    smtp_port: u16 = 0,
+    smtp: bool = false,
+};
+
+/// What the accounts overlay cannot guess: the servers behind an account.
+pub const Servers = struct {
+    imap_host: []const u8 = "",
+    imap_port: u16 = 0,
+    username: []const u8 = "",
+    smtp_host: []const u8 = "",
+    smtp_port: u16 = 0,
+    smtp: bool = false,
 };
 
 /// The accounts the application knows about, in configuration order.
@@ -32,11 +48,21 @@ pub const Accounts = struct {
     items: [accounts_max]AccountInfo = undefined,
     len: u8 = 0,
 
-    pub fn add(self: *Accounts, id: AccountId, label: []const u8, address: Address) void {
+    pub fn add(self: *Accounts, id: AccountId, label: []const u8, address: Address, servers: Servers) void {
         assert(id.is_known());
         assert(self.len < accounts_max);
-        self.items[self.len] = .{ .id = id, .address = address };
-        self.items[self.len].label.set(label);
+        var entry = AccountInfo{
+            .id = id,
+            .address = address,
+            .imap_port = servers.imap_port,
+            .smtp_port = servers.smtp_port,
+            .smtp = servers.smtp,
+        };
+        entry.label.set(label);
+        entry.imap_host.set(servers.imap_host);
+        entry.username.set(servers.username);
+        entry.smtp_host.set(servers.smtp_host);
+        self.items[self.len] = entry;
         self.len += 1;
     }
 
@@ -265,9 +291,9 @@ fn fill(store: *Store) !void {
 
 test "Accounts.remove drops one account, and at() reports the rest" {
     var accounts: Accounts = .{};
-    accounts.add(AccountId.from_int(1), "home", .{});
-    accounts.add(AccountId.from_int(2), "work", .{});
-    accounts.add(AccountId.from_int(3), "club", .{});
+    accounts.add(AccountId.from_int(1), "home", .{}, .{});
+    accounts.add(AccountId.from_int(2), "work", .{}, .{});
+    accounts.add(AccountId.from_int(3), "club", .{}, .{});
 
     try testing.expectEqualStrings("work", accounts.at(1).?.label.slice());
     try testing.expect(accounts.at(9) == null);
@@ -426,8 +452,8 @@ test "accounts keep labels and addresses, and filter by id" {
     try testing.expect(accounts.address_for(AccountId.from_int(1)) == null);
 
     const address = Address.from_parts("Me", "me", "example.com");
-    accounts.add(AccountId.from_int(1), "personal", address);
-    accounts.add(AccountId.from_int(2), "work", .{});
+    accounts.add(AccountId.from_int(1), "personal", address, .{});
+    accounts.add(AccountId.from_int(2), "work", .{}, .{});
 
     try testing.expectEqual(@as(u8, 2), accounts.len);
     try testing.expectEqual(@as(?u8, 1), accounts.index_of(AccountId.from_int(2)));

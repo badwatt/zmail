@@ -14,33 +14,43 @@ pub const Accounts = struct {
     context: *anyopaque,
     vtable: *const VTable,
 
+    pub const Draft = struct {
+        /// The `[account label]` section, ready to append or to replace with.
+        text: []const u8,
+        label: []const u8,
+        password: []const u8,
+        /// The account this draft replaces, or null for a new one.
+        replaces: ?AccountId = null,
+    };
+
     pub const VTable = struct {
         /// Rewrites the config (and deletes the credential) without `account`.
         remove: *const fn (context: *anyopaque, account: AccountId) Error!void,
-        /// Runs the assistant and appends the new account; returns its label.
-        /// `seed` is input the session had already read (see the session).
-        add: *const fn (context: *anyopaque, label: []u8, seed: []const u8) Error![]const u8,
+        /// Adds an account, or replaces one; writes its sealed credential.
+        save: *const fn (context: *anyopaque, draft: Accounts.Draft) Error!void,
     };
 
     pub fn remove(self: Accounts, account: AccountId) Error!void {
         return self.vtable.remove(self.context, account);
     }
 
-    pub fn add(self: Accounts, label: []u8, seed: []const u8) Error![]const u8 {
-        return self.vtable.add(self.context, label, seed);
+    pub fn save(self: Accounts, draft: Draft) Error!void {
+        return self.vtable.save(self.context, draft);
     }
 };
 
 /// In-memory double: records calls and can fail on demand.
 pub const Memory = struct {
     removed: u32 = 0,
-    added: u32 = 0,
+    saved: u32 = 0,
     fail: bool = false,
     last_removed: AccountId = .unknown,
-    new_label: []const u8 = "new",
+    last_label: [limits.label_max]u8 = @splat(0),
+    last_label_len: u8 = 0,
+    last_replaces: ?AccountId = null,
 
     pub fn accounts(self: *Memory) Accounts {
-        return .{ .context = self, .vtable = &.{ .remove = removeThunk, .add = addThunk } };
+        return .{ .context = self, .vtable = &.{ .remove = removeThunk, .save = saveThunk } };
     }
 
     fn removeThunk(context: *anyopaque, account: AccountId) Error!void {
@@ -50,14 +60,14 @@ pub const Memory = struct {
         if (self.fail) return error.Unavailable;
     }
 
-    fn addThunk(context: *anyopaque, label: []u8, seed: []const u8) Error![]const u8 {
-        _ = seed;
+    fn saveThunk(context: *anyopaque, draft: Accounts.Draft) Error!void {
         const self: *Memory = @ptrCast(@alignCast(context));
-        self.added += 1;
+        self.saved += 1;
+        self.last_replaces = draft.replaces;
+        const length = @min(draft.label.len, self.last_label.len);
+        @memcpy(self.last_label[0..length], draft.label[0..length]);
+        self.last_label_len = @intCast(length);
         if (self.fail) return error.Unavailable;
-        const length = @min(self.new_label.len, label.len);
-        @memcpy(label[0..length], self.new_label[0..length]);
-        return label[0..length];
     }
 };
 
@@ -67,7 +77,7 @@ pub const Memory = struct {
 
 const testing = std.testing;
 
-test "Memory accounts: remove and add record what they were asked" {
+test "Memory accounts: remove and save record what they were asked" {
     var memory: Memory = .{};
     const accounts = memory.accounts();
 
@@ -75,14 +85,20 @@ test "Memory accounts: remove and add record what they were asked" {
     try testing.expectEqual(@as(u32, 1), memory.removed);
     try testing.expectEqual(AccountId.from_int(2), memory.last_removed);
 
-    var label: [limits.label_max]u8 = undefined;
-    try testing.expectEqualStrings("new", try accounts.add(&label, ""));
-    try testing.expectEqual(@as(u32, 1), memory.added);
+    try accounts.save(.{ .text = "x", .label = "new", .password = "pw" });
+    try testing.expectEqual(@as(u32, 1), memory.saved);
+    try testing.expectEqualStrings("new", memory.last_label[0..memory.last_label_len]);
+    try testing.expect(memory.last_replaces == null);
+
+    try accounts.save(.{ .text = "x", .label = "work", .password = "pw", .replaces = AccountId.from_int(3) });
+    try testing.expectEqual(AccountId.from_int(3), memory.last_replaces.?);
 }
 
 test "Memory accounts: failures surface as Unavailable" {
     var memory: Memory = .{ .fail = true };
     try testing.expectError(error.Unavailable, memory.accounts().remove(AccountId.from_int(1)));
-    var label: [limits.label_max]u8 = undefined;
-    try testing.expectError(error.Unavailable, memory.accounts().add(&label, ""));
+    try testing.expectError(
+        error.Unavailable,
+        memory.accounts().save(.{ .text = "x", .label = "new", .password = "pw" }),
+    );
 }

@@ -33,6 +33,70 @@ pub const Inputs = struct {
     rows: u16 = 24,
 };
 
+/// The account form, drawn by the same renderer as everything else (no second
+/// full-screen program, no second screen buffer).
+pub fn settings(setup: *const core.setup.Setup, theme: Theme, out: *Screen) void {
+    out.clear();
+    const width = out.columns;
+
+    _ = out.put_text(1, 0, "amail  accounts", 20, theme.accent.with_bold());
+    var progress_buffer: [16]u8 = undefined;
+    const progress = std.fmt.bufPrint(&progress_buffer, "step {d}/{d}", .{
+        setup.step.number(),
+        core.setup.Step.count(),
+    }) catch "";
+    put_right(out, width -| 2, 0, progress, theme.dim);
+    out.hline(0, 1, width, '─', theme.border);
+
+    const label = switch (setup.step) {
+        .address => "Email address",
+        .imap_host => "IMAP server",
+        .imap_port => "IMAP port",
+        .smtp_host => "SMTP server (empty skips sending)",
+        .smtp_port => "SMTP port",
+        .username => "Username",
+        .password => "Password",
+        .review => "Review: Enter saves",
+    };
+    _ = out.put_text(1, 3, label, width -| 2, theme.text.with_bold());
+
+    if (setup.step == .review) {
+        _ = out.put_text(1, 4, setup.address.slice(), width -| 3, theme.text);
+        _ = out.put_text(1, 5, setup.imap_host.slice(), width -| 3, theme.dim);
+    } else {
+        var masked: [core.limits.secret_max]u8 = @splat('*');
+        const plain = active_value(setup);
+        const value = if (setup.step == .password) masked[0..@min(plain.len, 24)] else plain;
+        const written = out.put_text(1, 4, value, width -| 3, theme.text);
+        out.put(1 + written, 4, ' ', theme.text.with_reverse());
+    }
+
+    if (!setup.problem.is_empty()) {
+        _ = out.put_text(1, 6, setup.problem.slice(), width -| 2, theme.alert);
+    }
+
+    const hints = [_]Hint{
+        .{ .keys = "Enter", .action = "next" },
+        .{ .keys = "Esc", .action = "back" },
+        .{ .keys = "Ctrl+U", .action = "clear" },
+        .{ .keys = "Ctrl+Q", .action = "quit" },
+    };
+    render_hints(&hints, out.rows -| 1, width -| 2, &theme, out);
+}
+
+fn active_value(setup: *const core.setup.Setup) []const u8 {
+    return switch (setup.step) {
+        .address => setup.address.slice(),
+        .imap_host => setup.imap_host.slice(),
+        .imap_port => setup.imap_port.slice(),
+        .smtp_host => setup.smtp_host.slice(),
+        .smtp_port => setup.smtp_port.slice(),
+        .username => setup.username.slice(),
+        .password => setup.password.expose(),
+        .review => "",
+    };
+}
+
 pub fn frame(inputs: Inputs, out: *Screen) void {
     out.resize(inputs.columns, inputs.rows);
     // Renderers draw what they need; anything else must not survive from the
@@ -457,6 +521,7 @@ const accounts_hints = [_]Hint{
     .{ .keys = "Enter", .action = "select" },
     .{ .keys = "d", .action = "remove" },
     .{ .keys = "n", .action = "add" },
+    .{ .keys = "e", .action = "edit" },
     .{ .keys = "Esc", .action = "close" },
 };
 
@@ -669,7 +734,7 @@ fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     _ = out.put_text(
         rect.x + 2,
         rect.y + rect.height - 1,
-        "Enter select · d remove · n add · Esc close",
+        "Enter select · n add · e edit · d remove · Esc",
         rect.width -| 4,
         inputs.theme.dim,
     );
@@ -884,8 +949,8 @@ test "frame marks unread rows with a dot and flagged rows with a star" {
 test "with several accounts, each row carries its account tag" {
     var f = try fixture();
     defer f.deinit();
-    f.state.accounts.add(core.id.AccountId.from_int(1), "home", .{});
-    f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{});
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", .{}, .{});
+    f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{}, .{});
     for (0..3) |index| {
         f.store.at(@intCast(index)).account = core.id.AccountId.from_int(if (index == 1) 2 else 1);
     }
@@ -1234,7 +1299,7 @@ test "the boot splash shows the wordmark, the server, and a spinner" {
     var f = try fixture();
     defer f.deinit();
     f.state.booting = true;
-    f.state.accounts.add(core.id.AccountId.from_int(1), "work", try core.address.Address.init("alice@example.com"));
+    f.state.accounts.add(core.id.AccountId.from_int(1), "work", try core.address.Address.init("alice@example.com"), .{});
 
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
@@ -1247,11 +1312,45 @@ test "the boot splash shows the wordmark, the server, and a spinner" {
     try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
 }
 
+test "the account settings card shows the step, the value, and the problem" {
+    var form = core.setup.Setup.init();
+    defer form.deinit();
+    form.address.set("me@example.com");
+    form.step = .address;
+
+    var out = Screen.init(80, 24);
+    settings(&form, theme_mod.Theme.dark(), &out);
+    try row_contains(&out, 0, "accounts");
+    try row_contains(&out, 3, "Email address");
+    try row_contains(&out, 4, "me@example.com");
+    try row_contains(&out, 23, "next");
+
+    form.problem.set("That email address does not look right");
+    settings(&form, theme_mod.Theme.dark(), &out);
+    try row_contains(&out, 6, "does not look right");
+
+    // Every field renders its own value.
+    inline for (.{ .imap_host, .imap_port, .smtp_host, .smtp_port, .username, .password }) |step| {
+        form.step = step;
+        settings(&form, theme_mod.Theme.dark(), &out);
+    }
+
+    // Password is masked, review shows the summary.
+    form.step = .password;
+    form.password.append_codepoint('s');
+    settings(&form, theme_mod.Theme.dark(), &out);
+    try row_contains(&out, 4, "*");
+
+    form.step = .review;
+    settings(&form, theme_mod.Theme.dark(), &out);
+    try row_contains(&out, 4, "me@example.com");
+}
+
 test "the accounts overlay lists every account and marks the scope" {
     var f = try fixture();
     defer f.deinit();
-    f.state.accounts.add(core.id.AccountId.from_int(1), "home", try core.address.Address.init("me@home.example"));
-    f.state.accounts.add(core.id.AccountId.from_int(2), "work", try core.address.Address.init("me@work.example"));
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", try core.address.Address.init("me@home.example"), .{});
+    f.state.accounts.add(core.id.AccountId.from_int(2), "work", try core.address.Address.init("me@work.example"), .{});
     f.state.account_filter = core.id.AccountId.from_int(2);
     f.state.accounts_cursor = 1;
     f.state.view = .accounts;

@@ -140,6 +140,7 @@ fn accounts_key(key: Key) ?Command {
             'G' => .{ .accounts_move = .bottom },
             'd' => .accounts_remove,
             'n' => .accounts_add,
+            'e' => .accounts_edit,
             'q' => .accounts_close,
             else => null,
         },

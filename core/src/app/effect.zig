@@ -22,8 +22,8 @@ pub const Effect = union(enum) {
     refresh: struct { account: ?AccountId, mailbox: Mailbox, force: bool = false },
     /// Accounts: rewrite the config without this one.
     remove_account: struct { account: AccountId },
-    /// Accounts: run the assistant and append a new one.
-    add_account: struct {},
+    /// Accounts: open the form, for a new account (null) or an existing one.
+    edit_account: struct { account: ?AccountId },
     /// Remove for good (only offered in Trash).
     delete_message: struct { account: AccountId, mailbox: Mailbox, id: MessageId },
     /// Empty a mailbox for good (only offered in Trash). Null account = all.
