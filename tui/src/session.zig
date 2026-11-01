@@ -1982,6 +1982,35 @@ test "closing the form twice, and after a failed save, is safe" {
     try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
 }
 
+test "Enter moves between fields and saves on the last one" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    var port: core.accounts_port.Memory = .{};
+    rig.session.deps.accounts_file = port.accounts();
+
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+
+    // Enter is "next field", not "save", until the last row.
+    _ = rig.session.settings_key(form, .enter);
+    try testing.expectEqual(Session.Field.imap_host, form.field);
+    try testing.expectEqual(@as(u32, 0), port.saved);
+
+    form.setup.address.set("me@example.com");
+    form.setup.imap_host.set("imap.example.com");
+    form.setup.imap_port.set("993");
+    form.setup.username.set("me");
+    form.setup.password.append_codepoint('s');
+
+    // On Password, Enter saves the form.
+    form.field = .password;
+    _ = rig.session.settings_key(form, .enter);
+    try testing.expectEqual(@as(u32, 1), port.saved);
+    try testing.expect(rig.session.settings == null);
+}
+
 test "Ctrl+U clears the current field, and Esc cancels the form" {
     var rig: Rig = .{};
     try rig.start();

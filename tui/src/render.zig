@@ -100,6 +100,8 @@ pub fn settings(
     const hint_y = rect.y + rect.height - 2;
     if (!setup.problem.is_empty()) {
         _ = out.put_text(rect.x + 3, hint_y, setup.problem.slice(), rect.width -| 4, theme.alert);
+    } else if (@backingInt(field) == rows - 1) {
+        _ = out.put_text(rect.x + 3, hint_y, "Enter saves · Ctrl+S also saves", rect.width -| 4, theme.accent);
     } else {
         _ = out.put_text(rect.x + 3, hint_y, "Tab moves · Enter saves on the last field", rect.width -| 4, theme.dim);
     }
