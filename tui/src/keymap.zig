@@ -142,6 +142,7 @@ fn accounts_key(key: Key) ?Command {
             'n' => .accounts_add,
             'e' => .accounts_edit,
             'r' => .accounts_rename,
+            'o' => .accounts_oauth,
             'q' => .accounts_close,
             else => null,
         },

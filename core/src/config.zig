@@ -24,6 +24,8 @@ pub const Entry = struct {
     account: account.Account = .{},
     /// Optional: an account without SMTP can read but not send.
     smtp: ?account.Server = null,
+    /// OAuth2 client id for providers that need one (Microsoft, Google).
+    oauth_client_id: Text(256) = .{},
     policy: account.Policy = .{},
 
     pub fn validate(self: *const Entry) account.RuleError!void {
@@ -135,6 +137,8 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
         } else if (std.mem.eql(u8, key, "label")) {
             if (!valid_label(value)) return error.InvalidLabel;
             entry.label.set(value);
+        } else if (std.mem.eql(u8, key, "oauth_client_id")) {
+            entry.oauth_client_id.set(value);
         } else if (std.mem.eql(u8, key, "username")) {
             entry.account.username.set(value);
             pending_entry.seen_username = true;

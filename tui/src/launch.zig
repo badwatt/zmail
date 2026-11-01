@@ -42,6 +42,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
 
 /// Returns null on a clean exit, or what to report once the terminal is back.
 fn run_inside(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
+    if (options.oauth) return run_oauth(gpa, io, options, system);
     if (options.set_password) return run_set_password(io, options, system);
     if (options.add_account) return run_add_account(io, options, system);
     return switch (options.mode) {
@@ -137,6 +138,8 @@ const LiveAccount = struct {
     username: core.text.Text(core.limits.username_max) = .{},
     password: core.secret.Secret = .{},
     password_ready: bool = false,
+    /// An OAuth2 token from the token file, when the provider gave us one.
+    token: core.oauth.Token = .{},
     smtp_host: core.text.Text(core.limits.host_max) = .{},
     smtp_port: u16 = 0,
     smtp_enabled: bool = false,
@@ -164,12 +167,21 @@ const LiveAccount = struct {
             self.failure = "Could not connect to an IMAP server over TLS";
             return error.Unavailable;
         };
-        self.imap = core.imap_mail.ImapMail.open(
-            self.imap_transport.transport(),
-            self.id,
-            self.username.slice(),
-            self.password.expose(),
-        ) catch |err| {
+        const opened = if (self.token.access.is_empty())
+            core.imap_mail.ImapMail.open(
+                self.imap_transport.transport(),
+                self.id,
+                self.username.slice(),
+                self.password.expose(),
+            )
+        else
+            core.imap_mail.ImapMail.open_token(
+                self.imap_transport.transport(),
+                self.id,
+                self.username.slice(),
+                self.token.access.slice(),
+            );
+        self.imap = opened catch |err| {
             self.imap_transport.deinit();
             self.failure = login_message(err);
             // A refused login is not "unavailable": say so.
@@ -377,6 +389,9 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         }
         read_password(io, path, entry.label.slice(), file.len == 1, &account.password) catch {};
         account.password_ready = !account.password.is_empty();
+        if (read_token(io, path, entry.label.slice())) |token| {
+            if (token.is_fresh(os.now_unix())) account.token = token;
+        } else |_| {}
         if (!account.password_ready and missing_password == null) {
             missing_password = "No password for an account: set AMAIL_PASSWORD or run amail --add-account";
         }
@@ -600,6 +615,72 @@ fn open_credential(io: std.Io, text: []const u8, out: *core.secret.Secret, confi
 const file_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
 const directory_mode: std.Io.Dir.Permissions = @fromBackingInt(@intCast(0o700));
 
+/// `--oauth`: the provider round trip for the first account, then the token is
+/// sealed next to the config and used at the next login.
+fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
+    var path_buffer: [512]u8 = undefined;
+    const path = options.config_path orelse cli.default_config_path(
+        &path_buffer,
+        os.env("XDG_CACHE_HOME"),
+        os.env("HOME"),
+    );
+    if (path.len == 0) return .{ .message = "No config path" };
+
+    var buffer: [8193]u8 = undefined;
+    const text = read_file(io, path, &buffer) catch
+        return .{ .message = "No config yet: run amail once to create one" };
+    const file = core.config.parse(text) catch |err| return .{ .message = config_message(err) };
+    if (file.len == 0) return .{ .message = "The config has no accounts" };
+
+    const entry = file.items()[0];
+    const provider = provider_for(entry.account.imap.host.slice());
+    if (provider == .custom) {
+        return .{ .message = "That host is not a known OAuth2 provider (Microsoft or Google)" };
+    }
+
+    const client_id = if (entry.oauth_client_id.is_empty())
+        (os.env("AMAIL_OAUTH_CLIENT_ID") orelse "")
+    else
+        entry.oauth_client_id.slice();
+    if (client_id.len == 0) {
+        return .{ .message = "Add oauth_client_id to the config (or set AMAIL_OAUTH_CLIENT_ID)" };
+    }
+
+    const Io = struct {
+        system: SessionSystem,
+        fn write(context: *anyopaque, bytes: []const u8) void {
+            const this: *@This() = @ptrCast(@alignCast(context));
+            this.system.write(bytes) catch {};
+        }
+        fn read(context: *anyopaque, out: []u8) net.oauth_flow.Error!usize {
+            const this: *@This() = @ptrCast(@alignCast(context));
+            var count: usize = 0;
+            while (count < out.len) {
+                const got = this.system.read(out[count..], 200) catch return error.Unavailable;
+                if (got == 0) continue;
+                count += got;
+                if (std.mem.indexOfScalar(u8, out[0..count], '\n') != null) break;
+            }
+            return count;
+        }
+    };
+    var callbacks = Io{ .system = system };
+
+    var token: core.oauth.Token = .{};
+    net.oauth_flow.run(gpa, io, .{
+        .provider = provider,
+        .client_id = client_id,
+        .write = Io.write,
+        .read = Io.read,
+        .context = &callbacks,
+    }, &token) catch return .{ .message = "OAuth failed: check the client id and try again" };
+
+    write_token(io, path, entry.label.slice(), &token) catch
+        return .{ .message = "Could not save the token" };
+    std.debug.print("amail: signed in {s}\n", .{entry.label.slice()});
+    return null;
+}
+
 /// `--password`: one prompt, sealed, done. The escape hatch when the stored
 /// credential cannot be opened (a wiped key, a moved config).
 fn run_set_password(io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
@@ -655,6 +736,70 @@ fn run_set_password(io: std.Io, options: cli.Launch, system: SessionSystem) ?Fai
     return null;
 }
 
+/// Reads a sealed OAuth2 token for one account.
+fn read_token(io: std.Io, config_path: []const u8, label: []const u8) !core.oauth.Token {
+    var path_buffer: [512]u8 = undefined;
+    const path = token_path(config_path, label, &path_buffer);
+    if (path.len == 0) return error.NameTooLong;
+
+    var buffer: [core.oauth.token_max * 2 + 64]u8 = undefined;
+    const sealed_text = try read_file(io, path, &buffer);
+
+    var dir_buffer: [512]u8 = undefined;
+    const dir = key_dir(io, config_path, &dir_buffer) orelse return error.NameTooLong;
+    var keys = net.keyfile.KeyFile.init(undefined, io, dir);
+    const key = keys.get() orelse return error.NameTooLong;
+
+    var plain: [core.oauth.token_max * 2 + 64]u8 = undefined;
+    const text = try core.sealed.open(key, sealed_text, &plain);
+
+    // access, refresh, expires: one per line.
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var token: core.oauth.Token = .{};
+    token.access.set(lines.next() orelse return error.InvalidData);
+    token.refresh.set(lines.next() orelse "");
+    token.expires_unix = std.fmt.parseInt(i64, std.mem.trim(u8, lines.next() orelse "0", " \r\n"), 10) catch 0;
+    return token;
+}
+
+fn write_token(io: std.Io, config_path: []const u8, label: []const u8, token: *const core.oauth.Token) !void {
+    var path_buffer: [512]u8 = undefined;
+    const path = token_path(config_path, label, &path_buffer);
+    if (path.len == 0) return error.NameTooLong;
+
+    const dir = cli.parent_dir(path);
+    if (dir.len > 0) {
+        std.Io.Dir.cwd().createDir(io, dir, directory_mode) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+
+    var text_buffer: [core.oauth.token_max * 2 + 64]u8 = undefined;
+    const text = std.fmt.bufPrint(&text_buffer, "{s}\n{s}\n{d}", .{
+        token.access.slice(),
+        token.refresh.slice(),
+        token.expires_unix,
+    }) catch return error.NameTooLong;
+
+    var dir_buffer: [512]u8 = undefined;
+    const key_directory = key_dir(io, config_path, &dir_buffer) orelse return error.NameTooLong;
+    var keys = net.keyfile.KeyFile.init(undefined, io, key_directory);
+    const key = keys.get() orelse return error.NameTooLong;
+
+    var sealed_buffer: [core.oauth.token_max * 2 + 64 + core.sealed.overhead]u8 = undefined;
+    var nonce: core.sealed.Nonce = undefined;
+    io.random(&nonce);
+    const sealed_text = try core.sealed.seal(key, nonce, text, &sealed_buffer);
+    try write_file(io, path, sealed_text);
+}
+
+fn token_path(config_path: []const u8, label: []const u8, buffer: []u8) []const u8 {
+    const dir = cli.parent_dir(config_path);
+    if (dir.len == 0) return "";
+    return std.fmt.bufPrint(buffer, "{s}/tokens/{s}", .{ dir, label }) catch "";
+}
+
 /// The accounts port for a real config file: removing rewrites the file and
 /// deletes the credential, adding runs the assistant and appends the section.
 const FileAccounts = struct {
@@ -681,6 +826,7 @@ const FileAccounts = struct {
             .rename = renameThunk,
             .connect = connectThunk,
             .disconnect = disconnectThunk,
+            .oauth_login = oauthThunk,
         } };
     }
 
@@ -758,6 +904,42 @@ const FileAccounts = struct {
             .mail = self.imap.mail(),
         };
         out.* = self.connected;
+    }
+
+    fn oauthThunk(context: *anyopaque, account: core.id.AccountId) core.accounts_port.Error!void {
+        const self: *FileAccounts = @ptrCast(@alignCast(context));
+
+        var buffer: [8193]u8 = undefined;
+        const text = read_file(self.io, self.path, &buffer) catch return error.Unavailable;
+        const file = core.config.parse(text) catch return error.Unavailable;
+        const index: usize = @intCast(account.to_int() - 1);
+        if (index >= file.len) return error.Unavailable;
+        const entry = file.items()[index];
+
+        const provider = provider_for(entry.account.imap.host.slice());
+        if (provider == .custom) return error.Unavailable;
+        const client_id = entry.oauth_client_id.slice();
+        if (client_id.len == 0) return error.Unavailable;
+
+        // A terminal writer, so the URL and the QR land on screen.
+        const WriteContext = struct {
+            system: SessionSystem,
+            fn write(self_context: *anyopaque, bytes: []const u8) void {
+                const this: *@This() = @ptrCast(@alignCast(self_context));
+                this.system.write(bytes) catch {};
+            }
+        };
+        var writer = WriteContext{ .system = self.system };
+
+        var token: core.oauth.Token = .{};
+        net.oauth_flow.run(self.gpa, self.io, .{
+            .provider = provider,
+            .client_id = client_id,
+            .write = WriteContext.write,
+            .context = &writer,
+        }, &token) catch return error.Unavailable;
+
+        write_token(self.io, self.path, entry.label.slice(), &token) catch return error.Unavailable;
     }
 
     fn disconnectThunk(context: *anyopaque, account: core.id.AccountId) core.accounts_port.Error!void {
@@ -976,6 +1158,13 @@ fn config_message(err: anyerror) []const u8 {
         error.InvalidPort => "Invalid imap_port in the config file",
         else => "Invalid config file",
     };
+}
+
+/// Which OAuth2 provider a host belongs to.
+fn provider_for(host: []const u8) core.oauth.Provider {
+    if (containsIgnoreCase(host, "office365") or containsIgnoreCase(host, "outlook")) return .microsoft;
+    if (containsIgnoreCase(host, "gmail") or containsIgnoreCase(host, "googlemail")) return .google;
+    return .custom;
 }
 
 /// Some providers stopped accepting passwords: say which and how to fix it.

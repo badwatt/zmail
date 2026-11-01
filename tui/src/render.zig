@@ -562,6 +562,7 @@ const accounts_hints = [_]Hint{
     .{ .keys = "n", .action = "add" },
     .{ .keys = "e", .action = "edit" },
     .{ .keys = "r", .action = "rename" },
+    .{ .keys = "o", .action = "sign in (OAuth)" },
     .{ .keys = "d", .action = "remove" },
     .{ .keys = "Esc", .action = "close" },
 };
@@ -715,7 +716,7 @@ const help_rows = [_]Hint{
     .{ .keys = "#", .action = "move to trash" },
     .{ .keys = "X", .action = "delete for good (Trash)" },
     .{ .keys = "E", .action = "empty Trash" },
-    .{ .keys = "A", .action = "accounts: pick, add, edit, rename" },
+    .{ .keys = "A", .action = "accounts: pick, add, edit, rename, sign in" },
     .{ .keys = "a", .action = "next account scope" },
     .{ .keys = "/", .action = "search" },
     .{ .keys = "Tab / [ ]", .action = "next mailbox" },

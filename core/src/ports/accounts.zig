@@ -50,6 +50,9 @@ pub const Accounts = struct {
         connect: *const fn (context: *anyopaque, account: AccountId, out: *Connected) Error!void,
         /// Closes a connection opened by `connect`.
         disconnect: *const fn (context: *anyopaque, account: AccountId) Error!void,
+        /// Runs the provider's OAuth2 flow for this account (browser or QR) and
+        /// stores the resulting token.
+        oauth_login: *const fn (context: *anyopaque, account: AccountId) Error!void,
     };
 
     pub fn remove(self: Accounts, account: AccountId) Error!void {
@@ -71,6 +74,10 @@ pub const Accounts = struct {
     pub fn disconnect(self: Accounts, account: AccountId) Error!void {
         return self.vtable.disconnect(self.context, account);
     }
+
+    pub fn oauth_login(self: Accounts, account: AccountId) Error!void {
+        return self.vtable.oauth_login(self.context, account);
+    }
 };
 
 /// In-memory double: records calls and can fail on demand.
@@ -86,6 +93,7 @@ pub const Memory = struct {
     connected: AccountId = .unknown,
     connect_mail: ?@import("../ports/mail.zig").Mail = null,
     disconnected: AccountId = .unknown,
+    oauth: AccountId = .unknown,
 
     pub fn accounts(self: *Memory) Accounts {
         return .{ .context = self, .vtable = &.{
@@ -94,6 +102,7 @@ pub const Memory = struct {
             .rename = renameThunk,
             .connect = connectThunk,
             .disconnect = disconnectThunk,
+            .oauth_login = oauthThunk,
         } };
     }
 
@@ -117,6 +126,12 @@ pub const Memory = struct {
             .username = "new",
             .mail = self.connect_mail,
         };
+    }
+
+    fn oauthThunk(context: *anyopaque, account: AccountId) Error!void {
+        const self: *Memory = @ptrCast(@alignCast(context));
+        self.oauth = account;
+        if (self.fail) return error.Unavailable;
     }
 
     fn disconnectThunk(context: *anyopaque, account: AccountId) Error!void {
@@ -173,6 +188,8 @@ test "Memory accounts: remove and save record what they were asked" {
     try testing.expectEqual(AccountId.from_int(1), memory.connected);
     try testing.expectEqualStrings("imap.example.com", opened.imap_host);
     try accounts.disconnect(AccountId.from_int(1));
+    try accounts.oauth_login(AccountId.from_int(1));
+    try testing.expectEqual(AccountId.from_int(1), memory.oauth);
     try testing.expectEqual(AccountId.from_int(1), memory.disconnected);
 
     try accounts.rename(AccountId.from_int(1), "club");

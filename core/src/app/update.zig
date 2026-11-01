@@ -48,6 +48,7 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .accounts_add => effects.add(.{ .edit_account = .{ .account = null } }),
         .accounts_edit => accounts_edit(state, &effects),
         .accounts_rename => accounts_rename(state, &effects),
+        .accounts_oauth => accounts_oauth(state, &effects),
         .accounts_close => state.view = .list,
         .begin_search => begin_search(state),
         .search_char => |byte| search_char(state, store, byte),
@@ -316,6 +317,19 @@ fn accounts_rename(state: *State, effects: *Effects) void {
         return;
     };
     effects.add(.{ .rename_account = .{ .account = account.id } });
+}
+
+fn accounts_oauth(state: *State, effects: *Effects) void {
+    if (state.accounts_cursor == 0) {
+        state.set_status("Pick an account to sign in", .{});
+        return;
+    }
+    const account = state.accounts.at(state.accounts_cursor - 1) orelse {
+        state.set_status("No account there", .{});
+        return;
+    };
+    effects.add(.{ .oauth_account = .{ .account = account.id } });
+    state.set_status("Opening the browser for {s}…", .{account.label.slice()});
 }
 
 fn accounts_remove(state: *State, effects: *Effects) void {

@@ -550,6 +550,7 @@ pub const Session = struct {
                 .remove_account => |args| self.remove_account(args.account),
                 .edit_account => |args| self.open_settings(args.account),
                 .rename_account => |args| self.open_rename(args.account),
+                .oauth_account => |args| self.oauth_account(args.account),
                 .refresh => self.start_refresh(),
                 .send => |outgoing| self.send(&outgoing),
             }
@@ -630,6 +631,27 @@ pub const Session = struct {
             return;
         }
         self.state.set_status("Trash emptied", .{});
+    }
+
+    fn oauth_account(self: *Session, account: core.id.AccountId) void {
+        const label = self.state.accounts.label_for(account);
+        const accounts = self.deps.accounts_file orelse {
+            self.state.set_alert("Accounts cannot be changed here", .{});
+            return;
+        };
+        accounts.oauth_login(account) catch {
+            self.invalidate_screen();
+            self.state.set_alert("OAuth failed: run amail --oauth with a client id", .{});
+            return;
+        };
+        self.invalidate_screen();
+        self.state.set_status("Signed in {s}", .{label});
+        self.open_settings_after_oauth(account);
+    }
+
+    /// After signing in, attach the account so its mail shows up.
+    fn open_settings_after_oauth(self: *Session, account: core.id.AccountId) void {
+        self.attach_new_account(account, self.state.accounts.label_for(account));
     }
 
     fn remove_account(self: *Session, account: core.id.AccountId) void {

@@ -10,6 +10,8 @@ pub const tls = @import("tls.zig");
 pub const cache_file = @import("cache_file.zig");
 pub const bodies = @import("bodies.zig");
 pub const keyfile = @import("keyfile.zig");
+pub const https = @import("https.zig");
+pub const oauth_flow = @import("oauth_flow.zig");
 
 test {
     _ = @import("tls.zig");

@@ -25,6 +25,8 @@ pub const Launch = struct {
     add_account: bool = false,
     /// `--password`: ask for the password once and seal it.
     set_password: bool = false,
+    /// `--oauth`: run the provider's OAuth2 flow for the first account.
+    oauth: bool = false,
     /// Null means "the default path", resolved at launch time.
     config_path: ?[]const u8 = null,
 };
@@ -60,6 +62,10 @@ pub fn parse(args: []const []const u8) Action {
         }
         if (std.mem.eql(u8, arg, "--password")) {
             launch.set_password = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--oauth")) {
+            launch.oauth = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--config")) {
@@ -174,6 +180,7 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\      --config P      Use config file P (implies --live)
         \\      --add-account   Append another account to the config
         \\      --password      Ask for the password once and seal it
+        \\      --oauth         Sign in with OAuth2 (browser or QR)
         \\
         \\Accounts live in P as [account <label>] sections; add more with
         \\--add-account or by hand. The password is never in the config.

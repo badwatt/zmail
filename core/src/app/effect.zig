@@ -26,6 +26,8 @@ pub const Effect = union(enum) {
     edit_account: struct { account: ?AccountId },
     /// Accounts: rename one, without touching the rest of its settings.
     rename_account: struct { account: AccountId },
+    /// Accounts: run the provider's OAuth2 flow.
+    oauth_account: struct { account: AccountId },
     /// Remove for good (only offered in Trash).
     delete_message: struct { account: AccountId, mailbox: Mailbox, id: MessageId },
     /// Empty a mailbox for good (only offered in Trash). Null account = all.
