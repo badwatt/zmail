@@ -8,6 +8,7 @@ const Outgoing = @import("../domain/outgoing.zig").Outgoing;
 const Message = @import("../domain/message.zig").Message;
 const Address = @import("../domain/address.zig").Address;
 const MessageId = @import("../domain/id.zig").MessageId;
+const AccountId = @import("../domain/id.zig").AccountId;
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
 const Text = @import("../domain/text.zig").Text;
 const limits = @import("../limits.zig");
@@ -38,10 +39,12 @@ pub const MemoryOutbox = struct {
     fn sendThunk(context: *anyopaque, message: *const Outgoing) port.Error!void {
         const self: *MemoryOutbox = @ptrCast(@alignCast(context));
         assert(message.to.local.len > 0);
+        assert(message.account.is_known());
 
         self.next_id += 1;
         var stored = Message{
             .id = MessageId.from_int(self.next_id),
+            .account = message.account,
             .mailbox = .sent,
             .from = message.from,
             .timestamp_unix = self.now_unix,
@@ -76,6 +79,7 @@ test "sending appends to Sent with the outgoing fields" {
     var outbox = MemoryOutbox.init(&mail, 1_700_000_000);
 
     var outgoing = Outgoing{
+        .account = AccountId.from_int(1),
         .from = try Address.init("me <me@amail.local>"),
         .to = try Address.init("alice@example.com"),
         .body = "First line\nsecond line",
@@ -86,6 +90,7 @@ test "sending appends to Sent with the outgoing fields" {
     try testing.expectEqual(@as(u32, 1), outbox.sentCount());
     const sent = mail.find(MessageId.from_int(101)).?;
     try testing.expectEqual(Mailbox.sent, sent.mailbox);
+    try testing.expectEqual(AccountId.from_int(1), sent.account);
     try testing.expectEqualStrings("Hello", sent.subject.slice());
     try testing.expectEqualStrings("First line", sent.snippet.slice());
     try testing.expectEqual(@as(i64, 1_700_000_000), sent.timestamp_unix);
@@ -95,7 +100,11 @@ test "sending appends to Sent with the outgoing fields" {
 test "a missing from address is filled with the demo account" {
     var mail = fixture();
     var outbox = MemoryOutbox.init(&mail, 0);
-    var outgoing = Outgoing{ .to = try Address.init("bob@example.com"), .body = "hi" };
+    var outgoing = Outgoing{
+        .account = AccountId.from_int(1),
+        .to = try Address.init("bob@example.com"),
+        .body = "hi",
+    };
     outgoing.subject.set("Hi");
     try outbox.outbox().send(&outgoing);
 
@@ -112,7 +121,11 @@ test "a full mailbox is reported as Unavailable" {
         try mail.seed(&filler);
     }
     var outbox = MemoryOutbox.init(&mail, 0);
-    try testing.expectError(error.Unavailable, outbox.outbox().send(&.{ .to = try Address.init("a@b.c"), .body = "" }));
+    try testing.expectError(error.Unavailable, outbox.outbox().send(&.{
+        .account = AccountId.from_int(1),
+        .to = try Address.init("a@b.c"),
+        .body = "",
+    }));
 }
 
 test "first_line handles no newline and trims trailing spaces" {

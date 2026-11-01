@@ -203,13 +203,13 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         ) catch return .{ .message = "Could not connect to an IMAP server over TLS" };
         live.has_imap[index] = true;
 
+        const id = core.id.AccountId.from_int(index + 1);
         live.imap[index] = core.imap_mail.ImapMail.open(
             live.imap_transport[index].transport(),
+            id,
             entry.account.username.slice(),
             password.expose(),
         ) catch |err| return .{ .message = login_message(err) };
-
-        const id = core.id.AccountId.from_int(index + 1);
         live.sources[live.imap_count] = .{
             .id = id,
             .label = entry.label.slice(),

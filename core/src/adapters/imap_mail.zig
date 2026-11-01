@@ -17,15 +17,19 @@ const Mailbox = @import("../domain/mailbox.zig").Mailbox;
 const Message = @import("../domain/message.zig").Message;
 const Flags = @import("../domain/message.zig").Flags;
 const MessageId = @import("../domain/id.zig").MessageId;
+const AccountId = @import("../domain/id.zig").AccountId;
 
 pub const ImapMail = struct {
     client: client_mod.Client,
+    /// Which configured account these UIDs belong to. Stamped on every
+    /// envelope: the same UID can exist on several servers.
+    account: AccountId,
     selected: ?Mailbox = null,
     exists: u32 = 0,
 
     /// Logs in. The caller owns the transport from here on.
-    pub fn open(transport: transport_mod.Transport, user: []const u8, password: []const u8) client_mod.Error!ImapMail {
-        var imap = ImapMail{ .client = client_mod.Client.init(transport) };
+    pub fn open(transport: transport_mod.Transport, account: AccountId, user: []const u8, password: []const u8) client_mod.Error!ImapMail {
+        var imap = ImapMail{ .client = client_mod.Client.init(transport), .account = account };
         try imap.client.login(user, password);
         return imap;
     }
@@ -58,7 +62,9 @@ pub const ImapMail = struct {
 
         const total = @min(self.exists, @as(u32, @intCast(out.len)));
         if (total == 0) return 0;
-        return self.client.fetch_envelopes(mailbox, 1, total, out) catch |err| return mapError(err);
+        const count = self.client.fetch_envelopes(mailbox, 1, total, out) catch |err| return mapError(err);
+        for (out[0..count]) |*message| message.account = self.account;
+        return count;
     }
 
     fn fetchBodyThunk(context: *anyopaque, id: MessageId, out: []u8) port.Error![]const u8 {
@@ -108,7 +114,7 @@ test "open logs in and fetch selects the mailbox once" {
         "* 2 FETCH (UID 11 ENVELOPE (NIL \"second\" NIL NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
         "a3 OK fetched\r\n" };
 
-    var imap = try ImapMail.open(scripted.transport(), "me", "pw");
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
 
@@ -117,6 +123,9 @@ test "open logs in and fetch selects the mailbox once" {
     try testing.expectEqualStrings("first", messages[0].subject.slice());
     try testing.expectEqualStrings("Alice", messages[0].from.label());
     try testing.expectEqual(MessageId.from_int(10), messages[0].id);
+    // Every envelope carries the account that fetched it.
+    try testing.expectEqual(AccountId.from_int(1), messages[0].account);
+    try testing.expectEqual(AccountId.from_int(1), messages[1].account);
     try testing.expectEqualStrings("second", messages[1].subject.slice());
 
     // The first fetch selected exactly once.
@@ -131,7 +140,7 @@ test "open logs in and fetch selects the mailbox once" {
 
 test "fetch of an empty mailbox does not ask for envelopes" {
     var scripted: Scripted = .{ .input = login_ok ++ "* 0 EXISTS\r\na2 OK\r\n" };
-    var imap = try ImapMail.open(scripted.transport(), "me", "pw");
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
 
     var messages: [4]Message = undefined;
@@ -146,7 +155,7 @@ test "fetch truncates to the caller's buffer" {
         "* 2 FETCH (UID 2 ENVELOPE (NIL \"b\" NIL NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
         "a3 OK\r\n";
     var scripted: Scripted = .{ .input = script };
-    var imap = try ImapMail.open(scripted.transport(), "me", "pw");
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
 
     var messages: [1]Message = undefined;
@@ -161,7 +170,7 @@ test "switching mailbox selects again" {
         "* 1 FETCH (UID 1)\r\na3 OK\r\n" ++
         "* 1 EXISTS\r\na4 OK\r\n" ++
         "* 1 FETCH (UID 2)\r\na5 OK\r\n" };
-    var imap = try ImapMail.open(scripted.transport(), "me", "pw");
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
 
@@ -176,7 +185,7 @@ test "body, flags, and move reach the right commands" {
         "* 1 FETCH (BODY[TEXT] {2}\r\nhi)\r\na2 OK\r\n" ++
         "a3 OK\r\n" ++
         "a4 OK\r\n" };
-    var imap = try ImapMail.open(scripted.transport(), "me", "pw");
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
 
@@ -193,18 +202,18 @@ test "body, flags, and move reach the right commands" {
 
 test "login failure is reported as Rejected through the port, and open fails" {
     var scripted: Scripted = .{ .input = "* OK ready\r\na1 NO bad credentials\r\n" };
-    try testing.expectError(error.LoginFailed, ImapMail.open(scripted.transport(), "me", "wrong"));
+    try testing.expectError(error.LoginFailed, ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "wrong"));
 }
 
 test "a rejected select is NotFound, and a missing body too" {
     var rejected: Scripted = .{ .input = login_ok ++ "a2 NO [CANNOT] no\r\n" };
-    var imap_rejected = try ImapMail.open(rejected.transport(), "me", "pw");
+    var imap_rejected = try ImapMail.open(rejected.transport(), AccountId.from_int(1), "me", "pw");
     defer imap_rejected.close();
     var messages: [1]Message = undefined;
     try testing.expectError(error.NotFound, imap_rejected.mail().fetch(.inbox, &messages));
 
     var missing: Scripted = .{ .input = login_ok ++ "* 1 EXISTS\r\na2 OK\r\na3 OK\r\n" };
-    var imap_missing = try ImapMail.open(missing.transport(), "me", "pw");
+    var imap_missing = try ImapMail.open(missing.transport(), AccountId.from_int(1), "me", "pw");
     defer imap_missing.close();
     var body: [8]u8 = undefined;
     try testing.expectError(error.NotFound, imap_missing.mail().fetch_body(MessageId.from_int(9), &body));
@@ -222,7 +231,7 @@ test "every client error maps onto one of the port's three cases" {
 
 test "close logs out and closes the transport" {
     var scripted: Scripted = .{ .input = login_ok ++ "* BYE bye\r\na2 OK\r\n" };
-    var imap = try ImapMail.open(scripted.transport(), "me", "pw");
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
     imap.close();
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "LOGOUT") != null);
     try testing.expectEqual(@as(u32, 1), scripted.close_calls);

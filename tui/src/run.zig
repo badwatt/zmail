@@ -73,7 +73,15 @@ pub fn main_with(context: Context, hooks: Hooks, stdout: *std.Io.Writer, stderr:
             try stderr.writeAll(failure.text);
             return failure.exit;
         },
-        .launch => |options| return hooks.launch(context.gpa, context.io, options),
+        .launch => |options| return hooks.launch(context.gpa, context.io, options) catch |err| switch (err) {
+            // A full-screen client on a pipe is a mistake, not a crash: say so
+            // once instead of printing a stack trace.
+            error.NotATerminal => {
+                try stderr.writeAll("amail: this client needs a terminal\n");
+                return 1;
+            },
+            else => return err,
+        },
     }
 }
 
@@ -119,6 +127,40 @@ fn stub_launch(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) anyerror
         .demo => 7,
         .live => 8,
     };
+}
+
+test "main_with reports a missing terminal without a stack trace" {
+    var out_buffer: [512]u8 = undefined;
+    var err_buffer: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buffer);
+    var err = std.Io.Writer.fixed(&err_buffer);
+
+    const args = [_][*:0]const u8{"amail"};
+    const code = try main_with(.{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .args = .{ .vector = &args },
+    }, .{ .launch = stub_no_terminal }, &out, &err);
+
+    try testing.expectEqual(@as(u8, 1), code);
+    try testing.expectEqualStrings("amail: this client needs a terminal\n", err.buffered());
+
+    // Anything else keeps propagating: this is not a catch-all.
+    out = std.Io.Writer.fixed(&out_buffer);
+    err = std.Io.Writer.fixed(&err_buffer);
+    try testing.expectError(error.Boom, main_with(.{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .args = .{ .vector = &args },
+    }, .{ .launch = stub_boom }, &out, &err));
+}
+
+fn stub_boom(_: std.mem.Allocator, _: std.Io, _: cli.Launch) !u8 {
+    return error.Boom;
+}
+
+fn stub_no_terminal(_: std.mem.Allocator, _: std.Io, _: cli.Launch) !u8 {
+    return error.NotATerminal;
 }
 
 test "main_with routes every outcome, including launch" {
