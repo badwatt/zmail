@@ -55,7 +55,7 @@ pub fn settings(
     out.clear();
 
     const card_width: u16 = @min(66, out.columns -| 4);
-    const rows: u16 = 7;
+    const rows: u16 = 9;
     const card_height: u16 = rows + 6; // title, blanks, fields, problem
     const rect = Rect{
         .x = (out.columns -| card_width) / 2,
@@ -76,6 +76,8 @@ pub fn settings(
         "SMTP port",
         "Username",
         "Password",
+        "Sign in",
+        "Client ID",
     };
 
     var index: u8 = 0;
@@ -90,7 +92,11 @@ pub fn settings(
         _ = out.put_text(rect.x + 3, y, labels[index], 13, if (active) theme.accent else theme.dim);
 
         var masked: [core.limits.secret_max]u8 = @splat('*');
-        const raw = field_value(setup, index);
+        const raw = switch (index) {
+            7 => if (setup.oauth) "oauth" else "password",
+            8 => setup.oauth_client_id.slice(),
+            else => field_value(setup, index),
+        };
         const value = if (index == 6) masked[0..@min(raw.len, 32)] else raw;
         const style = if (active) theme.text.with_bold() else theme.text;
         const written = out.put_text(rect.x + 17, y, value, rect.width -| 19, style);

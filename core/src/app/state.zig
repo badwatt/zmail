@@ -25,12 +25,15 @@ pub const AccountInfo = struct {
     id: AccountId = .unknown,
     label: Text(limits.label_max) = .{},
     address: Address = .{},
+    oauth_client: Text(256) = .{},
     imap_host: Text(limits.host_max) = .{},
     imap_port: u16 = 0,
     username: Text(limits.username_max) = .{},
     smtp_host: Text(limits.host_max) = .{},
     smtp_port: u16 = 0,
     smtp: bool = false,
+    /// Set when the account signs in with OAuth2.
+    oauth_client_id: []const u8 = "",
 };
 
 /// What the accounts overlay cannot guess: the servers behind an account.
@@ -41,6 +44,8 @@ pub const Servers = struct {
     smtp_host: []const u8 = "",
     smtp_port: u16 = 0,
     smtp: bool = false,
+    /// Set when the account signs in with OAuth2.
+    oauth_client_id: []const u8 = "",
 };
 
 /// The accounts the application knows about, in configuration order.
@@ -62,6 +67,7 @@ pub const Accounts = struct {
         entry.imap_host.set(servers.imap_host);
         entry.username.set(servers.username);
         entry.smtp_host.set(servers.smtp_host);
+        entry.oauth_client.set(servers.oauth_client_id);
         self.items[self.len] = entry;
         self.len += 1;
     }

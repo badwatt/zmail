@@ -46,6 +46,10 @@ pub const Setup = struct {
     problem: Text(limits.status_max) = .{},
     /// False when the user skips SMTP.
     send_enabled: bool = true,
+    /// Sign in with OAuth2 instead of a password.
+    oauth: bool = false,
+    /// The provider's client id (from the app you registered).
+    oauth_client_id: Text(256) = .{},
     done: bool = false,
     cancelled: bool = false,
 
@@ -58,6 +62,12 @@ pub const Setup = struct {
 
     /// Editing an existing account starts at the summary: Enter saves as is,
     /// Esc walks back to the field that needs changing. No retyping.
+    /// Password or OAuth2: one switch, no extra step.
+    pub fn set_oauth(self: *Setup, enabled: bool) void {
+        self.oauth = enabled;
+        self.problem.clear();
+    }
+
     pub fn start_at_review(self: *Setup) void {
         self.step = .review;
     }
@@ -273,6 +283,9 @@ pub const Setup = struct {
             self.imap_port.slice(),
         }) catch return "";
 
+        if (self.oauth) {
+            writer.print("oauth_client_id = {s}\n", .{self.oauth_client_id.slice()}) catch return "";
+        }
         if (self.send_enabled and !self.smtp_host.is_empty()) {
             writer.print(
                 \\smtp_host = {s}

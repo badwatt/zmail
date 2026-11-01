@@ -46,6 +46,7 @@ pub const MailSource = struct {
     smtp_host: []const u8 = "",
     smtp_port: u16 = 0,
     smtp: bool = false,
+    oauth_client_id: []const u8 = "",
     /// Why this server is known to reject password logins, if it is.
     hint: []const u8 = "",
 };
@@ -202,6 +203,7 @@ pub const Session = struct {
             .smtp_host = text.smtp_host.slice(),
             .smtp_port = source.smtp_port,
             .smtp = source.smtp,
+            .oauth_client_id = source.oauth_client_id,
         });
     }
 
@@ -685,6 +687,12 @@ pub const Session = struct {
         smtp_port,
         username,
         password,
+        sign_in,
+        client_id,
+
+        fn count() u8 {
+            return 9;
+        }
 
         fn step(self: Field) core.setup.Step {
             return switch (self) {
@@ -695,11 +703,8 @@ pub const Session = struct {
                 .smtp_port => .smtp_port,
                 .username => .username,
                 .password => .password,
+                .sign_in, .client_id => .review,
             };
-        }
-
-        fn count() u8 {
-            return 7;
         }
     };
 
@@ -730,6 +735,10 @@ pub const Session = struct {
             }
             form.setup.username.set(info.username.slice());
             form.setup.send_enabled = info.smtp;
+            if (!info.oauth_client.is_empty()) {
+                form.setup.set_oauth(true);
+                form.setup.oauth_client_id.set(info.oauth_client.slice());
+            }
             // Start on the name so a rename is one keystroke away.
             form.field = .address;
         }
@@ -813,22 +822,30 @@ pub const Session = struct {
         self.needs_render = true;
 
         switch (key) {
-            .char => |codepoint| {
-                if (codepoint >= 0x20 and codepoint != 0x7f) form.setup.append(codepoint);
+            .char => |codepoint| switch (form.field) {
+                .sign_in => if (codepoint == ' ') form.setup.set_oauth(!form.setup.oauth),
+                .client_id => if (codepoint >= 0x20 and codepoint != 0x7f) form.setup.oauth_client_id.append_codepoint(codepoint),
+                else => if (codepoint >= 0x20 and codepoint != 0x7f) form.setup.append(codepoint),
             },
-            .backspace => form.setup.backspace(),
+            .backspace => switch (form.field) {
+                .client_id => form.setup.oauth_client_id.pop_codepoint(),
+                .sign_in => {},
+                else => form.setup.backspace(),
+            },
             .tab, .down => self.move_field(form, 1),
             .back_tab, .up => self.move_field(form, -1),
-            .enter => {
-                if (form.field == .password) {
-                    self.save_settings(form);
-                } else {
-                    self.move_field(form, 1);
-                }
+            .enter => switch (form.field) {
+                .password => self.save_settings(form),
+                .sign_in => form.setup.set_oauth(!form.setup.oauth),
+                .client_id => self.save_settings(form),
+                else => self.move_field(form, 1),
             },
             .escape => self.close_settings(),
             .ctrl => |letter| switch (letter) {
-                'u' => form.setup.clear_field(),
+                'u' => switch (form.field) {
+                    .client_id => form.setup.oauth_client_id.clear(),
+                    else => form.setup.clear_field(),
+                },
                 's' => self.save_settings(form),
                 'c', 'q' => self.state.quit = true,
                 else => {},
@@ -895,6 +912,14 @@ pub const Session = struct {
             return;
         };
 
+        // OAuth without a client id cannot even be written: the config would
+        // carry an empty key.
+        if (form.setup.oauth and form.setup.oauth_client_id.is_empty()) {
+            form.setup.problem.set("OAuth needs the Client ID of your registered app");
+            self.needs_render = true;
+            return;
+        }
+
         // Validate the whole account before writing anything.
         form.setup.step = .review;
         form.setup.next();
@@ -915,7 +940,10 @@ pub const Session = struct {
             .label = label,
             // An empty field means "keep the stored password", so editing does
             // not silently blank the credential.
-            .password = if (form.setup.password.len == 0) null else form.setup.password.expose(),
+            .password = if (form.setup.oauth or form.setup.password.len == 0)
+                null
+            else
+                form.setup.password.expose(),
             .replaces = form.editing,
         }) catch {
             form.setup.problem.set("Could not save the account; fix the reason above and try again");
@@ -935,10 +963,18 @@ pub const Session = struct {
             }
         }
         const added = form.editing == null;
+        const oauth = form.setup.oauth;
         const new_id = saved_id;
         self.close_settings();
         self.state.set_status("{s} saved", .{label});
-        if (added) self.attach_new_account(new_id, label);
+        if (!added) return;
+
+        if (oauth) {
+            // A brand-new OAuth account: sign in now, then attach it.
+            self.oauth_account(new_id);
+            return;
+        }
+        self.attach_new_account(new_id, label);
     }
 
     fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags) void {
@@ -1963,6 +1999,38 @@ test "the form shows the servers the source reported" {
     try testing.expectEqualStrings("alvaro", form.setup.username.slice());
     try testing.expectEqualStrings("587", form.setup.smtp_port.slice());
     try testing.expectEqualStrings("993", form.setup.imap_port.slice());
+}
+
+test "a new OAuth account saves without a password and signs in" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var port: core.accounts_port.Memory = .{ .connect_mail = rig.fake_mail.mail() };
+    rig.session.deps.accounts_file = port.accounts();
+
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+    form.setup.address.set("new@example.com");
+    form.setup.imap_host.set("outlook.office365.com");
+    form.setup.imap_port.set("993");
+    form.setup.username.set("new@example.com");
+    form.setup.set_oauth(true);
+
+    // OAuth without a client id is refused, and the form stays.
+    rig.session.save_settings(form);
+    try testing.expect(rig.session.settings != null);
+    try testing.expect(std.mem.indexOf(u8, rig.session.settings.?.setup.problem.slice(), "Client ID") != null);
+
+    // With one, the account is written and signed in through the port.
+    form.setup.oauth_client_id.set("client-123");
+    rig.session.save_settings(form);
+    try testing.expectEqual(@as(u32, 1), port.saved);
+    try testing.expectEqual(core.id.AccountId.from_int(1), port.oauth);
+    // Signed in and attached: its mail is fetched from now on.
+    try testing.expectEqual(@as(u8, 2), rig.session.source_count);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "added") != null);
 }
 
 test "a new account is connected and listed without a restart" {

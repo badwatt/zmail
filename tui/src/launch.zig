@@ -140,6 +140,7 @@ const LiveAccount = struct {
     password_ready: bool = false,
     /// An OAuth2 token from the token file, when the provider gave us one.
     token: core.oauth.Token = .{},
+    oauth_client_id: core.text.Text(256) = .{},
     smtp_host: core.text.Text(core.limits.host_max) = .{},
     smtp_port: u16 = 0,
     smtp_enabled: bool = false,
@@ -267,6 +268,7 @@ const Live = struct {
             .smtp_host = stored.smtp_host.slice(),
             .smtp_port = stored.smtp_port,
             .smtp = stored.smtp_enabled,
+            .oauth_client_id = stored.oauth_client_id.slice(),
             .hint = login_hint(stored.host.slice()),
         };
         self.mail_count += 1;
@@ -389,6 +391,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         }
         read_password(io, path, entry.label.slice(), file.len == 1, &account.password) catch {};
         account.password_ready = !account.password.is_empty();
+        account.oauth_client_id.set(entry.oauth_client_id.slice());
         if (read_token(io, path, entry.label.slice())) |token| {
             if (token.is_fresh(os.now_unix())) account.token = token;
         } else |_| {}
@@ -866,19 +869,33 @@ const FileAccounts = struct {
         const entry = file.items()[index];
         if (entry.account.imap.security != .tls) return error.Unavailable;
 
+        const has_token = read_token(self.io, self.path, entry.label.slice()) catch null;
+        const fresh = if (has_token) |value| value.is_fresh(os.now_unix()) else false;
+
         var password: core.secret.Secret = .{};
         defer password.deinit();
-        read_password(self.io, self.path, entry.label.slice(), file.len == 1, &password) catch
-            return error.Unavailable;
+        if (!fresh) {
+            read_password(self.io, self.path, entry.label.slice(), file.len == 1, &password) catch
+                return error.Unavailable;
+        }
 
         self.transport.open(self.gpa, self.io, entry.account.imap.host.slice(), entry.account.imap.port) catch
             return error.Unavailable;
-        self.imap = core.imap_mail.ImapMail.open(
-            self.transport.transport(),
-            account,
-            entry.account.username.slice(),
-            password.expose(),
-        ) catch |err| {
+        const opened = if (fresh and has_token != null)
+            core.imap_mail.ImapMail.open_token(
+                self.transport.transport(),
+                account,
+                entry.account.username.slice(),
+                has_token.?.access.slice(),
+            )
+        else
+            core.imap_mail.ImapMail.open(
+                self.transport.transport(),
+                account,
+                entry.account.username.slice(),
+                password.expose(),
+            );
+        self.imap = opened catch |err| {
             self.transport.deinit();
             return switch (err) {
                 error.LoginFailed, error.Rejected, error.ProtocolError => error.Unavailable,
