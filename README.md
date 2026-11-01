@@ -75,6 +75,28 @@ The password is **never** in the config. It lives in
 `credentials/<label>` (mode `0600`), and `AMAIL_PASSWORD` overrides it when
 there is only one account.
 
+### OAuth2 (Microsoft and Google)
+
+Providers that no longer accept passwords need OAuth2. Mark the account in the
+form (`Sign in` → `oauth`) or add two keys by hand:
+
+```ini
+oauth_client_id = <your app registration's client id>
+oauth_tenant   = common      # Microsoft only: common | consumers | organizations | <tenant id>
+```
+
+Then `amail --oauth`, or `o` on the account in the `A` overlay. The flow opens
+the browser, listens on `http://127.0.0.1:8123/` and reads the code when the
+provider redirects back; there is nothing to paste unless the port cannot be
+bound, and no QR unless `qrencode` is installed. The token is sealed in
+`~/.config/amail/tokens/<label>` and refreshed in the background when it
+expires, so a password is never asked for again.
+
+For Microsoft the app registration must allow personal accounts (or the tenant
+matching the account), be a public client, and list `http://127.0.0.1:8123/` as
+a redirect URI; otherwise Azure answers `unauthorized_client`, which amail now
+prints verbatim.
+
 Only implicit TLS is supported today (IMAP 993, SMTP 465). Certificate
 verification is mandatory and uses the system CA bundle. Sending authenticates
 with AUTH PLAIN inside that TLS connection. STARTTLS and a real secret store
