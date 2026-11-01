@@ -859,10 +859,12 @@ pub const Session = struct {
     fn reload(self: *Session, mailbox: Mailbox) void {
         var loaded_any = false;
         var failed = false;
+        var login_failed = false;
 
         for (self.deps.accounts, 0..) |source, index| {
-            const count = source.mail.fetch(mailbox, self.scratch) catch {
+            const count = source.mail.fetch(mailbox, self.scratch) catch |err| {
                 failed = true;
+                if (err == error.Rejected) login_failed = true;
                 continue;
             };
             core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..count]);
@@ -875,7 +877,12 @@ pub const Session = struct {
 
         self.state.rebuild(&self.store);
         if (failed and !loaded_any) {
-            self.state.set_alert("Could not load {s}", .{mailbox.title()});
+            // A refused login is the most useful thing we know: say it.
+            if (login_failed) {
+                self.state.set_alert("Login failed: check the password", .{});
+            } else {
+                self.state.set_alert("Could not load {s}", .{mailbox.title()});
+            }
         }
         self.needs_render = true;
     }
@@ -1009,6 +1016,39 @@ const FakeMail = struct {
     }
 };
 
+fn rejectFetch(_: *anyopaque, _: Mailbox, _: []Message) core.mail_port.Error!u32 {
+    return error.Rejected;
+}
+
+fn rejectBody(_: *anyopaque, _: Mailbox, _: MessageId, _: []u8) core.mail_port.Error![]const u8 {
+    return error.Rejected;
+}
+
+fn rejectFlags(_: *anyopaque, _: MessageId, _: core.message.Flags) core.mail_port.Error!void {
+    return error.Rejected;
+}
+
+fn rejectMove(_: *anyopaque, _: MessageId, _: Mailbox) core.mail_port.Error!void {
+    return error.Rejected;
+}
+
+fn rejectDelete(_: *anyopaque, _: Mailbox, _: MessageId) core.mail_port.Error!void {
+    return error.Rejected;
+}
+
+fn rejectEmpty(_: *anyopaque, _: Mailbox) core.mail_port.Error!void {
+    return error.Rejected;
+}
+
+const reject_vtable = core.mail_port.Mail.VTable{
+    .fetch = rejectFetch,
+    .fetch_body = rejectBody,
+    .set_flags = rejectFlags,
+    .move_message = rejectMove,
+    .delete_message = rejectDelete,
+    .empty_mailbox = rejectEmpty,
+};
+
 const Rig = struct {
     fake_system: Fake = .{ .size_value = .{ .columns = 100, .rows = 24 } },
     fake_mail: FakeMail = .{},
@@ -1055,6 +1095,11 @@ const Rig = struct {
 
     fn deinit(self: *Rig) void {
         self.session.deinit();
+    }
+
+    fn rejecting_mail(self: *Rig) core.mail_port.Mail {
+        _ = self;
+        return .{ .context = undefined, .vtable = &reject_vtable };
     }
 
     fn send_without_settle(self: *Rig, bytes: []const u8) void {
@@ -1619,6 +1664,28 @@ test "loop without a splash paints only the data" {
     rig.session.loop();
     try testing.expectEqual(@as(u32, 2), rig.session.store.len);
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "connecting") == null);
+}
+
+test "a refused login is named, not hidden behind a generic error" {
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "work",
+        .mail = rig.rejecting_mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &rig.sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .loading_ms = 0,
+    });
+    defer rig.deinit();
+
+    rig.session.boot();
+    try testing.expectEqualStrings("Login failed: check the password", rig.session.state.status.slice());
+    try testing.expectEqual(@as(u32, 0), rig.session.store.len);
 }
 
 test "a cold boot that cannot connect says so, and shows an empty list" {

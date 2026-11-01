@@ -23,6 +23,8 @@ pub const Launch = struct {
     mode: Mode = .live,
     /// `--add-account`: run the assistant and append the account to the config.
     add_account: bool = false,
+    /// `--password`: ask for the password once and seal it.
+    set_password: bool = false,
     /// Null means "the default path", resolved at launch time.
     config_path: ?[]const u8 = null,
 };
@@ -54,6 +56,10 @@ pub fn parse(args: []const []const u8) Action {
         }
         if (std.mem.eql(u8, arg, "--add-account")) {
             launch.add_account = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--password")) {
+            launch.set_password = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--config")) {
@@ -167,6 +173,7 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\      --live          Connect to the accounts in the config (default)
         \\      --config P      Use config file P (implies --live)
         \\      --add-account   Append another account to the config
+        \\      --password      Ask for the password once and seal it
         \\
         \\Accounts live in P as [account <label>] sections; add more with
         \\--add-account or by hand. The password is never in the config.
@@ -224,6 +231,12 @@ test "--config takes the next argument and implies live" {
 test "--config=path works too" {
     const action = parse(&[_][]const u8{ meta.name, "--config=/tmp/amail.conf" });
     try testing.expectEqualStrings("/tmp/amail.conf", action.launch.config_path.?);
+}
+
+test "--password asks for the password once" {
+    const action = parse(&[_][]const u8{ meta.name, "--password" });
+    try testing.expect(action.launch.set_password);
+    try testing.expectEqual(Mode.live, action.launch.mode);
 }
 
 test "--add-account asks the assistant to append an account" {

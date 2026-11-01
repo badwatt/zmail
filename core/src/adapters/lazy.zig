@@ -50,7 +50,9 @@ pub const LazyMail = struct {
 
     fn ensure(self: *LazyMail) mail_port.Error!mail_port.Mail {
         if (self.inner) |opened| return opened;
-        const opened = self.open_fn(self.context) catch return error.Unavailable;
+        // Keep the reason: a rejected login must be reported as such, not as a
+        // generic "could not load".
+        const opened = self.open_fn(self.context) catch |err| return err;
         self.inner = opened;
         return opened;
     }

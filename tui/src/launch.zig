@@ -42,6 +42,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
 
 /// Returns null on a clean exit, or what to report once the terminal is back.
 fn run_inside(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
+    if (options.set_password) return run_set_password(io, options, system);
     if (options.add_account) return run_add_account(io, options, system);
     return switch (options.mode) {
         .demo => run_demo(gpa, system),
@@ -171,7 +172,11 @@ const LiveAccount = struct {
         ) catch |err| {
             self.imap_transport.deinit();
             self.failure = login_message(err);
-            return error.Unavailable;
+            // A refused login is not "unavailable": say so.
+            return switch (err) {
+                error.LoginFailed, error.Rejected, error.ProtocolError => error.Rejected,
+                else => error.Unavailable,
+            };
         };
         self.has_imap = true;
         self.connected = true;
@@ -433,6 +438,19 @@ fn read_password(
     var path_buffer: [512]u8 = undefined;
 
     const path = cli.credential_path(config_path, label, &path_buffer);
+
+    // The environment wins: it is how a password is set or repaired without
+    // trusting whatever is on disk, and it re-seals itself for next time.
+    if (allow_env) {
+        if (os.env("AMAIL_PASSWORD")) |value| {
+            if (value.len > 0) {
+                try core.secret.Secret.init(value, out);
+                if (path.len > 0) seal_in_place(io, path, value) catch {};
+                return;
+            }
+        }
+    }
+
     if (path.len > 0) {
         if (read_file(io, path, &buffer)) |text| {
             if (try open_credential(io, text, out, config_path)) return;
@@ -578,6 +596,61 @@ fn open_credential(io: std.Io, text: []const u8, out: *core.secret.Secret, confi
 
 const file_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
 const directory_mode: std.Io.Dir.Permissions = @fromBackingInt(@intCast(0o700));
+
+/// `--password`: one prompt, sealed, done. The escape hatch when the stored
+/// credential cannot be opened (a wiped key, a moved config).
+fn run_set_password(io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
+    var path_buffer: [512]u8 = undefined;
+    const path = options.config_path orelse cli.default_config_path(
+        &path_buffer,
+        os.env("XDG_CONFIG_HOME"),
+        os.env("HOME"),
+    );
+    if (path.len == 0) return .{ .message = "No config path" };
+
+    var config_buffer: [8193]u8 = undefined;
+    const text = read_file(io, path, &config_buffer) catch
+        return .{ .message = "No config yet: run amail once to create one" };
+    const file = core.config.parse(text) catch |err| return .{ .message = config_message(err) };
+    if (file.len == 0) return .{ .message = "The config has no accounts" };
+    const label = file.items()[0].label.slice();
+
+    var buffer: [256]u8 = undefined;
+    const prompt = std.fmt.bufPrint(&buffer, "Password for {s}: ", .{label}) catch "Password: ";
+    system.write(prompt) catch {};
+    system.write("\x1b[?25h") catch {};
+
+    var secret: core.secret.Secret = .{};
+    defer secret.deinit();
+    var parser: @import("input.zig").Parser = .{};
+    var typed: [128]u8 = undefined;
+
+    while (true) {
+        var keys: @import("input.zig").Keys = .{};
+        const typed_count = system.read(&typed, 100) catch 0;
+        if (typed_count == 0) continue;
+        parser.decode(typed[0..typed_count], &keys);
+        var done = false;
+        for (keys.slice()) |key| switch (key) {
+            .char => |codepoint| {
+                if (codepoint >= 0x20 and codepoint != 0x7f) secret.append_codepoint(codepoint);
+            },
+            .backspace => secret.pop_codepoint(),
+            .enter => done = true,
+            .ctrl => |letter| if (letter == 'c' or letter == 'q') return .{ .message = "No password saved", .code = 0 },
+            else => {},
+        };
+        if (done) break;
+    }
+
+    system.write("\n") catch {};
+    if (secret.is_empty()) return .{ .message = "A password cannot be empty" };
+
+    write_sealed_credential(io, path, &secret, label) catch
+        return .{ .message = "Could not write the password file" };
+    std.debug.print("amail: password saved for {s}\n", .{label});
+    return null;
+}
 
 /// The accounts port for a real config file: removing rewrites the file and
 /// deletes the credential, adding runs the assistant and appends the section.
