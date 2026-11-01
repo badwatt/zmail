@@ -43,8 +43,14 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
     // Use the encoder's slice, not the whole array: the rest is uninitialised.
     const state = std.base64.url_safe_no_pad.Encoder.encode(&state_buffer, &state_random);
 
-    // No listener: this Zig's network streams cannot be read here yet, so the
-    // redirect is pasted back. Headless and phone (QR) friendly.
+    // Listen first: the browser's redirect lands here and the code is read
+    // without any copy/paste. If the port is taken (another run, a firewall),
+    // fall back to pasting the URL, which also covers headless machines.
+    const address = std.Io.net.IpAddress.parse("127.0.0.1", 8123) catch return error.Unavailable;
+    // reuse_address: the previous run's connection may still be in TIME_WAIT
+    // on this port, which would otherwise make the second sign-in fail.
+    var server: ?std.Io.net.Server = address.listen(io, .{ .reuse_address = true }) catch null;
+    defer if (server) |*listening| listening.deinit(io);
     var redirect_buffer: [64]u8 = undefined;
     const redirect = std.fmt.bufPrint(&redirect_buffer, "http://127.0.0.1:8123/", .{}) catch
         return error.Unavailable;
@@ -62,12 +68,39 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
 
     // 2. Show it: browser if there is one, QR for a headless terminal.
     show_url(io, options, url);
-    options.write(options.context, "\nFinish in the browser; if nothing happens, paste the URL here:\n\n");
+    // Say what will happen next, and only ask for a paste when nothing can be
+    // captured automatically.
+    if (server == null) {
+        options.write(options.context, "\nPaste the URL your browser ended on:\n\n");
+    } else {
+        options.write(options.context, "\nWaiting for the browser to come back...\n\n");
+    }
 
-    // 3. Read the pasted URL.
+    // 3. Wait for the redirect, or for the pasted URL when there is no listener.
     var pasted: [2048]u8 = undefined;
-    const length = options.read(options.context, &pasted) catch return error.Unavailable;
-    const auth_code = core.oauth.parse_redirect(pasted[0..length]) orelse return error.Cancelled;
+    var code: ?[]const u8 = null;
+    if (server) |*listening| {
+        if (listening.accept(io)) |client| {
+            var stream = client;
+            defer stream.close(io);
+            var buffer: [4096]u8 = undefined;
+            var reader = stream.reader(io, &buffer);
+            // The request line alone carries the code.
+            const request = reader.interface.takeDelimiterExclusive('\n') catch "";
+            code = core.oauth.parse_redirect(request);
+            var reply_buffer: [256]u8 = undefined;
+            var writer = stream.writer(io, &reply_buffer);
+            writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n" ++
+                "Content-Length: 36\r\nConnection: close\r\n\r\n" ++
+                "amail: signed in. Close this window.\n") catch {};
+            writer.interface.flush() catch {};
+        } else |_| {}
+    }
+    if (code == null) {
+        const length = options.read(options.context, &pasted) catch return error.Unavailable;
+        code = core.oauth.parse_redirect(pasted[0..length]);
+    }
+    const auth_code = code orelse return error.Cancelled;
 
     // 5. Exchange the code for a token.
     var body_buffer: [2048]u8 = undefined;
