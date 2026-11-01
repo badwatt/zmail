@@ -76,6 +76,11 @@ The port exists; this milestone fills it in.
   so opening a message you have read opens no socket (verified: zero `connect`
   calls). Only rows that changed are written to the terminal, so a ticking
   spinner no longer repaints the screen — that was the header flicker.
+- **Faster first reads (next).** A body fetch downloads the whole raw message
+  (`BODY.PEEK[]`), attachments included, because the MIME decoder needs the
+  tree. `BODYSTRUCTURE` plus `BODY.PEEK[<n>]` for the chosen text part would cut
+  a 40 KiB newsletter with images to a few KiB, and prefetching the bodies of
+  the visible rows would make the first open instant too.
 - **An account picker (next).** `a` cycles the scope; a small overlay listing
   every account (and "All accounts") would be clearer than cycling.
 - **Lazy connections (done).** The launcher builds accounts without touching

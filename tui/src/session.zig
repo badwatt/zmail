@@ -94,6 +94,9 @@ pub const Session = struct {
     refresh_scratch: []Message = undefined,
     refresh_sources: [core.state.accounts_max]refresh_mod.Source = undefined,
     refresh_mailbox: Mailbox = .inbox,
+    /// A body asked for while the worker holds the connection. Applied as soon
+    /// as the refresh finishes, so the reader shows text instead of a frozen UI.
+    pending_body: ?struct { account: core.id.AccountId, mailbox: Mailbox, id: MessageId } = null,
 
     /// One row of encoded ANSI. Bounded by the widest row times the longest
     /// possible style run, so a frame never allocates.
@@ -219,6 +222,7 @@ pub const Session = struct {
     /// Runs until the user quits. `run.zig` wraps this with raw mode and the
     /// alternate screen.
     pub fn loop(self: *Session) void {
+        const needs_network = self.needs_boot;
         if (self.deps.splash) {
             // Paint first (cached mail, or the splash), then do the slow part.
             self.state.booting = self.needs_boot;
@@ -229,6 +233,13 @@ pub const Session = struct {
             self.boot();
             self.render();
         }
+
+        // Starting from cache means no connection is open. Opening a message
+        // would then pay TCP + TLS + LOGIN before the first byte of mail, so
+        // warm it in the background (this is the worker thread: no freeze)
+        // while the user reads what is already on screen.
+        if (!needs_network and self.deps.accounts.len > 0) self.start_refresh();
+
         while (self.step()) {}
     }
 
@@ -283,14 +294,25 @@ pub const Session = struct {
         if (failures > 0) {
             self.state.set_alert("Could not refresh {s}", .{self.refresh_mailbox.title()});
         }
+
+        // Deliver a body that was requested while the worker was busy.
+        if (self.pending_body) |request| {
+            self.pending_body = null;
+            self.fetch_body(request.account, request.mailbox, request.id);
+        }
     }
 
-    /// Test helper: waits for the worker, then applies its results.
-    pub fn settle_refresh_for_test(self: *Session) void {
+    /// Waits for an in-flight refresh, then applies its results. Used when a
+    /// command needs the connection the worker is holding.
+    pub fn wait_refresh(self: *Session) void {
         while (self.refreshing) {
             self.poll_refresh();
             std.atomic.spinLoopHint();
         }
+    }
+
+    pub fn settle_refresh_for_test(self: *Session) void {
+        self.wait_refresh();
     }
 
     fn sync_size(self: *Session) void {
@@ -379,16 +401,22 @@ pub const Session = struct {
 
     fn run_effects(self: *Session, effects: []const core.effect.Effect) void {
         for (effects) |effect| {
-            // One connection: while the worker uses it, cached mail is readable
-            // but no other request may touch the transport.
-            if (self.refreshing) {
-                switch (effect) {
-                    .refresh => {},
-                    else => {
-                        self.state.set_alert("Refreshing mail…", .{});
+            // One connection: a body asked for while the worker has it is
+            // deferred (the reader shows its placeholder) instead of freezing
+            // the UI; everything else waits for the worker.
+            switch (effect) {
+                .refresh => {},
+                .fetch_body => |args| {
+                    if (self.refreshing) {
+                        self.pending_body = .{
+                            .account = args.account,
+                            .mailbox = args.mailbox,
+                            .id = args.id,
+                        };
                         continue;
-                    },
-                }
+                    }
+                },
+                else => self.wait_refresh(),
             }
 
             switch (effect) {
@@ -1238,7 +1266,7 @@ test "a cold boot that cannot connect says so, and shows an empty list" {
     try testing.expect(!rig.session.needs_boot);
 }
 
-test "a request while the refresh runs is refused, not raced" {
+test "a body asked for during a refresh is delivered when it finishes" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -1248,18 +1276,22 @@ test "a request while the refresh runs is refused, not raced" {
     rig.fake_system.push_input("\x12");
     _ = rig.session.step();
     try testing.expect(rig.session.refreshing);
-    try testing.expect(rig.session.state.refreshing);
 
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
         .mailbox = .inbox,
         .id = MessageId.from_int(1),
     } }});
-    try testing.expectEqualStrings("Refreshing mail…", rig.session.state.status.slice());
+
+    // Deferred, not refused and not blocking.
+    try testing.expect(rig.session.refreshing);
+    try testing.expect(rig.session.pending_body != null);
+    try testing.expect(rig.session.body_len == 0);
 
     rig.session.settle_refresh_for_test();
     try testing.expect(!rig.session.refreshing);
-    try testing.expect(!rig.session.state.refreshing);
+    try testing.expect(rig.session.pending_body == null);
+    try testing.expect(rig.session.body_len > 0);
 }
 
 test "init frees what it took when a buffer cannot be allocated" {

@@ -65,6 +65,14 @@ I/O at all and a failed connection is an ordinary port error instead of a
 startup failure. The process boundary (`tui/src/launch.zig`) keeps the
 password, the TLS transports, and the error messages that the opener needs.
 
+**Warming the connection.** A start from cache opens no socket, so the *first*
+message open would otherwise pay DNS, TCP, TLS, LOGIN, SELECT and FETCH before
+the first byte of prose. Right after the first frame the session starts a
+refresh in the background: the connection is warm by the time a message is
+opened, and a body asked for while the worker is busy is deferred (the reader
+shows the envelope immediately and the text arrives when the fetch finishes),
+never blocked and never refused.
+
 **Refreshing.** `Ctrl+R` starts one worker thread (`tui/src/refresh.zig`): it
 fetches the current mailbox for every account into a second buffer, and the UI
 thread swaps the result into the store when an atomic flag says done. The store

@@ -109,6 +109,11 @@ read from disk, and **no socket is opened**. `Ctrl+R` is what talks to the
 server — it pulls the current mailbox for every account, in the background,
 while the footer's position turns into a spinner.
 
+The first seconds after start are spent warming the connection in the
+background. Opening a message then shows its envelope at once and fills the
+body in when the fetch lands; a message you have opened before comes from the
+sealed body cache and never touches a socket.
+
 Without a cache (first run, or a new account) the network is unavoidable, so
 the first frame is a splash instead of an empty list:
 
