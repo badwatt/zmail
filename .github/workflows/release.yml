@@ -19,7 +19,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # setup-zig reads .minimum_zig_version from build.zig.zon.
       - uses: mlugg/setup-zig@v2
       - run: zig build fmt:check
@@ -36,7 +36,7 @@ jobs:
       version: ${{ steps.extract.outputs.version }}
       created: ${{ steps.extract.outputs.created }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: extract
@@ -59,7 +59,7 @@ jobs:
     if: needs.tag.outputs.created == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ needs.tag.outputs.version }}
