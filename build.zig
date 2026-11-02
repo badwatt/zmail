@@ -213,6 +213,10 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         \\export PATTERN="core/src,tui/src"
         \\export SKIP="tui/src/launch.zig,tui/src/main.zig,tui/src/refresh.zig"
         \\steps='
+        \\# A kcov from nix carries its own glibc in LD_LIBRARY_PATH, while the binary
+        \\# under test was linked against the system one: the mixture does not load.
+        \\# kcov runs from its own RUNPATH, so the variable can go for the child.
+        \\kcov() { env -u LD_LIBRARY_PATH kcov "$@"; }
         \\kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/core "$CORE_BIN" &&
         \\kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/tui "$TUI_BIN" &&
         \\kcov --merge coverage .coverage/core .coverage/tui
