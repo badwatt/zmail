@@ -1005,6 +1005,11 @@ pub const Session = struct {
 
         self.text_link_count = core.links.scan(self.shown[0..self.shown_len], &self.text_links);
 
+        // Pictures belong to the message that carried them: "r0" in another mail
+        // is another picture, and keeping the slot hands back the previous bytes.
+        self.image_slot_count = 0;
+        self.image_painted = 0;
+
         self.html_len = 0;
         self.html_ready = false;
         self.html_link_count = 0;
@@ -4213,4 +4218,22 @@ test "the same marker in another message gets another picture id" {
     try testing.expect(image_id(account, MessageId.from_int(10), "r0") == first);
     try testing.expect(image_id(account, MessageId.from_int(10), "r1") != first);
     try testing.expect(image_id(core.id.AccountId.from_int(2), MessageId.from_int(10), "r0") != first);
+}
+
+test "a marker with the same name in another message is another picture" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+
+    // Two parts, both called "logo", with different bytes.
+    const first = "From: a@b\r\nContent-Type: text/plain\r\n\r\nhi";
+    rig.session.set_raw(first);
+    try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
+
+    // The cache remembers what the message carried…
+    _ = rig.session.image_png("logo");
+    try testing.expectEqual(@as(u8, 1), rig.session.image_slot_count);
+    // …and forgets it as soon as another message is opened.
+    rig.session.set_raw(first);
+    try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
 }
