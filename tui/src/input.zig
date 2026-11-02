@@ -70,7 +70,7 @@ pub const Keys = struct {
     }
 };
 
-const State = enum { ground, escape, csi, ss3, utf8 };
+const State = enum { ground, escape, csi, ss3, utf8, apc };
 
 pub const Parser = struct {
     state: State = .ground,
@@ -79,6 +79,8 @@ pub const Parser = struct {
     utf8_bytes: [4]u8 = undefined,
     utf8_len: u8 = 0,
     utf8_need: u8 = 0,
+    /// Set when an APC sequence has just seen an escape: only "ESC \\" ends it.
+    apc_escaped: bool = false,
 
     /// Decodes a whole read buffer. Keys accumulate in `keys`.
     pub fn decode(self: *Parser, bytes: []const u8, keys: *Keys) void {
@@ -96,7 +98,7 @@ pub const Parser = struct {
                 self.state = .ground;
                 return .escape;
             },
-            .csi, .ss3, .utf8 => {
+            .csi, .ss3, .utf8, .apc => {
                 self.reset();
                 return .unknown;
             },
@@ -105,6 +107,7 @@ pub const Parser = struct {
 
     fn reset(self: *Parser) void {
         self.state = .ground;
+        self.apc_escaped = false;
         self.csi_len = 0;
         self.utf8_len = 0;
         self.utf8_need = 0;
@@ -114,6 +117,7 @@ pub const Parser = struct {
         switch (self.state) {
             .ground => self.ground(byte, keys),
             .escape => self.escape(byte, keys),
+            .apc => self.apc_byte(byte),
             .csi => self.csi_byte(byte, keys),
             .ss3 => self.ss3_byte(byte, keys),
             .utf8 => self.utf8_byte(byte, keys),
@@ -156,6 +160,20 @@ pub const Parser = struct {
         self.utf8_need = @intCast(need);
     }
 
+    /// Inside an APC sequence, only "ESC \\" ends it.
+    fn apc_byte(self: *Parser, byte: u8) void {
+        if (self.apc_escaped) {
+            if (byte == '\\') {
+                self.state = .ground;
+            }
+            self.apc_escaped = false;
+            return;
+        }
+        if (byte == 0x1b) {
+            self.apc_escaped = true;
+        }
+    }
+
     fn escape(self: *Parser, byte: u8, keys: *Keys) void {
         if (byte == '[') {
             self.state = .csi;
@@ -164,6 +182,13 @@ pub const Parser = struct {
         }
         if (byte == 'O') {
             self.state = .ss3;
+            return;
+        }
+        // APC: the graphics protocol's answers, and anything else a terminal
+        // says back. Swallowed, not typed: "\x1b_Gi=1;OK\x1b\\" reads as
+        // Escape, underscore, G, i, "=", 1, and a mailbox change.
+        if (byte == '_') {
+            self.state = .apc;
             return;
         }
 
@@ -506,4 +531,20 @@ test "a long paste decodes into many keys" {
     try testing.expectEqual(@as(u32, 9), keys.len);
     try testing.expectEqual(@as(u21, 't'), keys.items[0].char);
     try testing.expectEqual(@as(u21, 'k'), keys.items[8].char);
+}
+
+test "a graphics answer from the terminal is not a keypress" {
+    // What a terminal sends back: ESC _ G i=1;OK ESC \
+    const keys = try decode("\x1b_Gi=1;OK\x1b\\");
+    try testing.expectEqual(@as(u32, 0), keys.len);
+
+    // The sequence before and after it still type normally.
+    const mixed = try decode("a\x1b_Gi=1;OK\x1b\\b");
+    try testing.expectEqual(@as(u32, 2), mixed.len);
+    try testing.expectEqual(@as(u21, 'a'), mixed.items[0].char);
+    try testing.expectEqual(@as(u21, 'b'), mixed.items[1].char);
+
+    // An unterminated one does not eat the keys after it forever.
+    const open = try decode("\x1b_Gi=1;");
+    try testing.expectEqual(@as(u32, 0), open.len);
 }

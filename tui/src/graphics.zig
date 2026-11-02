@@ -53,7 +53,7 @@ pub fn transmit(system: System, png: []const u8, id: u32) bool {
 
         var header: [64]u8 = undefined;
         const text = if (first)
-            std.fmt.bufPrint(&header, "\x1b_Ga=t,f=100,i={d},m={d};", .{ id, @intFromBool(more) }) catch
+            std.fmt.bufPrint(&header, "\x1b_Ga=t,f=100,i={d},q=2,m={d};", .{ id, @intFromBool(more) }) catch
                 return false
         else
             std.fmt.bufPrint(&header, "\x1b_Gm={d};", .{@intFromBool(more)}) catch return false;
@@ -73,7 +73,7 @@ pub fn place(system: System, id: u32, x: u16, y: u16, columns: u16, rows: u16) b
     system.write(at) catch return false;
 
     var escape: [96]u8 = undefined;
-    const placed = std.fmt.bufPrint(&escape, "\x1b_Ga=p,i={d},c={d},r={d}\x1b\\", .{
+    const placed = std.fmt.bufPrint(&escape, "\x1b_Ga=p,i={d},c={d},r={d},q=2\x1b\\", .{
         id, columns, rows,
     }) catch return false;
     system.write(placed) catch return false;
@@ -83,7 +83,9 @@ pub fn place(system: System, id: u32, x: u16, y: u16, columns: u16, rows: u16) b
 /// Deletes every picture the terminal is holding. `d=p` needs a placement id
 /// and is ignored without one, so this asks for all of it.
 pub fn clear_all(system: System) void {
-    system.write("\x1b_Ga=d\x1b\\") catch {};
+    // q=2: the terminal must not answer. Its answers arrive on stdin, and a
+    // reply that reads like "1" switches mailbox.
+    system.write("\x1b_Ga=d,q=2\x1b\\") catch {};
 }
 
 /// Paints `png` with its top-left corner at (x, y), `columns` by `rows` cells.
