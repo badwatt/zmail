@@ -7,7 +7,10 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-pub const max_links = 64;
+/// A newsletter can carry a hundred tracking links and put the unsubscribe one
+/// at the very end: a cap that is too low silently drops the links a reader is
+/// most likely to want.
+pub const max_links = 256;
 
 /// A byte range in the scanned text. The URL is the text itself.
 pub const Link = struct {
@@ -233,6 +236,19 @@ test "scan needs a boundary before the scheme" {
 test "scan stops at the buffer limit instead of overflowing" {
     var buffer: [1]Link = undefined;
     try testing.expectEqual(@as(usize, 1), scan("http://a.example http://b.example", &buffer));
+}
+
+test "the last link of a long newsletter is still found" {
+    var text: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&text);
+    var index: usize = 0;
+    while (index < 100) : (index += 1) {
+        writer.print("https://example.com/{d} ", .{index}) catch unreachable;
+    }
+    var buffer: [max_links]Link = undefined;
+    const count = scan(writer.buffered(), &buffer);
+    try testing.expectEqual(@as(usize, 100), count);
+    try testing.expectEqualStrings("https://example.com/99", buffer[99].text(writer.buffered()));
 }
 
 test "at reports the link under an offset" {

@@ -685,8 +685,12 @@ pub const Session = struct {
         const effects = core.update.apply(&self.state, &self.store, command);
         self.run_effects(effects.slice());
         self.needs_render = true;
-        // A scope is a preference: the next start should open where this one is.
-        if (command == .accounts_select) self.remember_scope();
+        // A scope is a preference, however it was changed: the picker or the
+        // `a` key both end up here, and the next start opens where this one is.
+        switch (command) {
+            .accounts_select, .cycle_account => self.remember_scope(),
+            else => {},
+        }
         return true;
     }
 
