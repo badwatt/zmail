@@ -16,6 +16,8 @@ pub const cli = @import("cli.zig");
 pub const screen = @import("screen.zig");
 pub const theme = @import("theme.zig");
 pub const wrap = @import("wrap.zig");
+pub const selection = @import("selection.zig");
+pub const clipboard = @import("clipboard.zig");
 pub const layout = @import("layout.zig");
 pub const input = @import("input.zig");
 pub const keymap = @import("keymap.zig");
@@ -33,6 +35,8 @@ test {
     _ = @import("screen.zig");
     _ = @import("theme.zig");
     _ = @import("wrap.zig");
+    _ = @import("selection.zig");
+    _ = @import("clipboard.zig");
     _ = @import("layout.zig");
     _ = @import("input.zig");
     _ = @import("keymap.zig");

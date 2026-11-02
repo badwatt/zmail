@@ -10,6 +10,7 @@ const core = @import("core");
 const screen = @import("screen.zig");
 const theme_mod = @import("theme.zig");
 const layout_mod = @import("layout.zig");
+const selection = @import("selection.zig");
 const wrap = @import("wrap.zig");
 
 const Screen = screen.Screen;
@@ -31,6 +32,10 @@ pub const Inputs = struct {
     /// Links in `body`, as byte ranges: one scan for the whole message, so a
     /// URL split by the wrapper is still one link.
     links: []const core.links.Link = &.{},
+    /// What the mouse has covered so far, shown while it is being dragged.
+    selection: ?selection.Selection = null,
+    /// Which wrapped line is being drawn, so the selection can be placed.
+    line_index: ?u32 = null,
     now_unix: i64 = 0,
     columns: u16 = 80,
     rows: u16 = 24,
@@ -568,13 +573,16 @@ fn render_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         const line_index = inputs.state.reader_scroll + row;
         if (line_index >= wrapped.len) break;
         const line = wrapped.at(line_index, inputs.body);
-        draw_line_with_links(inputs, out, line, lay.reader_body_y + row, lay.columns - 2);
+        var line_inputs = inputs;
+        line_inputs.line_index = line_index;
+        draw_line_with_links(line_inputs, out, line, lay.reader_body_y + row, lay.columns - 2);
     }
 }
 
 /// One wrapped line, with its links underlined so they read as links and not
 /// as punctuation soup.
 fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16) void {
+    if (draw_line_selection(inputs, out, line, y, width)) return;
     if (inputs.links.len == 0) {
         _ = out.put_text(1, y, line, width, inputs.theme.text);
         return;
@@ -602,6 +610,25 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
     if (cursor < line_end) {
         draw_segment(out, inputs, line, cursor - line_start, line.len, y, width, false);
     }
+}
+
+/// Paints the selected part of one line, if the drag reaches it. Returns false
+/// when there is nothing selected here, so links can be drawn as usual.
+fn draw_line_selection(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16) bool {
+    const drag = inputs.selection orelse return false;
+    const row = inputs.line_index orelse return false;
+    const range = drag.ordered();
+    if (row < range.first.line or row > range.last.line) return false;
+
+    const length: u16 = @intCast(line.len);
+    const from: u16 = if (row == range.first.line) @min(range.first.column, length) else 0;
+    const to: u16 = if (row == range.last.line) @min(range.last.column + 1, length) else length;
+    if (to <= from) return false;
+
+    if (from > 0) _ = out.put_text(1, y, line[0..from], width, inputs.theme.text);
+    _ = out.put_text(1 + from, y, line[from..to], width -| from, inputs.theme.selection);
+    if (to < length) _ = out.put_text(1 + to, y, line[to..], width -| to, inputs.theme.text);
+    return true;
 }
 
 fn draw_segment(

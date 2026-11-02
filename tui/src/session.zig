@@ -8,6 +8,8 @@ const std = @import("std");
 const core = @import("core");
 
 const input = @import("input.zig");
+const selection_mod = @import("selection.zig");
+const clipboard_mod = @import("clipboard.zig");
 const keymap = @import("keymap.zig");
 const layout_mod = @import("layout.zig");
 const render_mod = @import("render.zig");
@@ -125,6 +127,11 @@ pub const Session = struct {
     /// Whether the HTML part has already been rendered to text. Only `H` asks
     /// for it: a message nobody opens as HTML costs nothing.
     html_ready: bool = false,
+    /// Where a mouse drag started and where it is now. A drag copies; a click
+    /// still opens a link.
+    selection: ?selection_mod.Selection = null,
+    clip_text: [clipboard_mod.max_text]u8 = undefined,
+    clip_encoded: [clipboard_mod.max_encoded]u8 = undefined,
     html_links: [core.links.max_links]core.links.Link = undefined,
     html_link_count: usize = 0,
     text_links: [core.links.max_links]core.links.Link = undefined,
@@ -488,7 +495,8 @@ pub const Session = struct {
     }
 
     fn handle_mouse(self: *Session, mouse: input.Mouse) bool {
-        if (mouse.kind == .release) return false;
+        if (mouse.kind == .release) return self.finish_selection(mouse);
+        if (mouse.kind == .motion and mouse.button == .left) return self.extend_selection(mouse);
 
         switch (mouse.button) {
             .wheel_up => return self.apply(.{ .move = .up }),
@@ -511,11 +519,12 @@ pub const Session = struct {
                 return self.click_row(lay, mouse.y);
             }
         }
+        // A press in the body starts a selection; the release decides whether it
+        // was a click (open a link) or a drag (copy).
+        if (self.start_selection(lay, mouse)) return true;
         return self.click_link(lay, mouse);
     }
 
-    /// The real thing: the HTML part, in the browser, with its white background
-    /// and its images, exactly as another mail client would show it.
     /// The HTML part, read as text: structure kept, nothing fetched, nothing
     /// executed. Rendered on first use and kept for this message.
     fn toggle_html(self: *Session) bool {
@@ -555,6 +564,59 @@ pub const Session = struct {
         const url = link.url(text, &url_buffer);
         if (self.deps.open_url) |open| open(self.deps.open_url_context, url);
         self.state.set_status("Opened {s}", .{url});
+        self.needs_render = true;
+        return true;
+    }
+
+    /// The cell under a mouse report, in the reader's coordinates.
+    fn body_cell(self: *Session, lay: layout_mod.Layout, mouse: input.Mouse) ?selection_mod.Cell {
+        if (self.state.view != .reader or !self.body_loaded) return null;
+        if (mouse.y < lay.reader_body_y) return null;
+        const row = mouse.y - lay.reader_body_y;
+        if (row >= lay.reader_rows) return null;
+        return .{
+            .line = self.state.reader_scroll + row,
+            .column = mouse.x -| 1,
+        };
+    }
+
+    fn start_selection(self: *Session, lay: layout_mod.Layout, mouse: input.Mouse) bool {
+        const cell = self.body_cell(lay, mouse) orelse return false;
+        self.selection = selection_mod.Selection.start(cell);
+        return true;
+    }
+
+    fn extend_selection(self: *Session, mouse: input.Mouse) bool {
+        var active = self.selection orelse return false;
+        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const cell = self.body_cell(lay, mouse) orelse return false;
+        active.dragTo(cell);
+        self.selection = active;
+        self.needs_render = true;
+        return true;
+    }
+
+    /// A drag copies what it covered; a click opens the link under it.
+    fn finish_selection(self: *Session, mouse: input.Mouse) bool {
+        var active = self.selection orelse return false;
+        self.selection = null;
+
+        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        if (self.body_cell(lay, mouse)) |cell| active.dragTo(cell);
+
+        if (!active.isDrag()) {
+            self.needs_render = true;
+            return self.click_link(lay, mouse);
+        }
+
+        const text = selection_mod.extract(
+            active,
+            &self.wrapped,
+            self.reader_text(),
+            &self.clip_text,
+        );
+        const copied = clipboard_mod.copy(self.deps.system, text, &self.clip_encoded);
+        self.state.set_status("Copied {d} characters", .{copied});
         self.needs_render = true;
         return true;
     }
@@ -1238,6 +1300,7 @@ pub const Session = struct {
             .body = self.reader_text(),
             .wrapped = if (self.body_loaded) &self.wrapped else null,
             .links = self.reader_links(),
+            .selection = self.selection,
             .now_unix = self.now_unix,
             .columns = self.size.columns,
             .rows = self.size.rows,
@@ -3089,11 +3152,13 @@ test "clicking a link in the body opens it" {
     const lay = layout_mod.Layout.compute(100, 24, 0);
     // Column 4 is the 'h' of "https": inside the link.
     _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .press, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .release, .button = .left });
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/a", sink.last[0..sink.last_len]);
 
     // A click on the words around it opens nothing.
     _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .press, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .release, .button = .left });
     try testing.expectEqual(@as(u8, 1), sink.opened);
 }
 
@@ -3231,6 +3296,69 @@ test "a link split by the wrap is still one link, and clicks anywhere on it" {
         .kind = .press,
         .button = .left,
     });
+    _ = rig.session.handle_mouse(.{
+        .x = 2,
+        .y = lay.reader_body_y + continuation.?,
+        .kind = .release,
+        .button = .left,
+    });
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/a/really/long/path", sink.last[0..sink.last_len]);
+}
+
+test "a drag in the reader copies the text to the clipboard" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    const body = "alpha beta\ngamma delta";
+    rig.session.set_raw(body);
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    rig.fake_system.output_len = 0;
+
+    // Press at the start of the first line, drag over the first word, release.
+    _ = rig.session.handle_mouse(.{ .x = 1, .y = lay.reader_body_y, .kind = .press, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .motion, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .release, .button = .left });
+
+    const written = rig.fake_system.output_text();
+    try testing.expect(std.mem.indexOf(u8, written, "\x1b]52;c;") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\x1b]52;p;") != null);
+    // "alpha" is "YWxwaGE=".
+    try testing.expect(std.mem.indexOf(u8, written, "YWxwaGE=") != null);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Copied 5 characters") != null);
+    try testing.expect(rig.session.selection == null);
+}
+
+test "a click without dragging still opens the link" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: LinkSink = .{};
+    rig.session.deps.open_url = LinkSink.open;
+    rig.session.deps.open_url_context = &sink;
+
+    const body = "see https://example.com/a";
+    rig.session.set_raw(body);
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    const y = lay.reader_body_y;
+    // Column 6 is inside the address: press and release on the same cell.
+    _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .press, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .release, .button = .left });
+    try testing.expectEqual(@as(u8, 1), sink.opened);
 }

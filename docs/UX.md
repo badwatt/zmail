@@ -264,6 +264,11 @@ paragraphs, lists, quotes and headings keep their shape, and every link is
 written out after its text, underlined. Nothing is fetched or executed to draw
 it: no browser, no images, no scripts — the HTML is read, not run.
 
+Dragging over the body selects text and copies it: the selection is highlighted
+while you drag, and on release the text goes to the clipboard and the primary
+selection through OSC 52, so no `xclip` or `wl-copy` is needed. A click without a
+drag still opens the link under the pointer.
+
 Links are clickable in either view. A click on a URL hands it to the browser
 (`xdg-open`, `gio open`, `sensible-browser`, `open`, or `wslview`, whichever
 exists); a click on the words around it does nothing.
