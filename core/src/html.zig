@@ -10,17 +10,23 @@ const std = @import("std");
 const assert = std.debug.assert;
 const links = @import("links.zig");
 
+/// What a line of the rendering is, so the reader can style it like a mail
+/// client would: headings stand out, quotes recede, bullets get a marker.
+pub const Kind = enum { body, heading, quote, bullet };
+
 pub const Render = struct {
     text: []const u8 = "",
     links: []const links.Link = &.{},
+    kinds: []const Kind = &.{},
 };
 
 /// Renders `html` into `out`, recording the link ranges in `link_buffer`.
-pub fn render(html: []const u8, out: []u8, link_buffer: []links.Link) Render {
+pub fn render(html: []const u8, out: []u8, link_buffer: []links.Link, kind_buffer: []Kind) Render {
     var state = State{
         .input = html,
         .writer = std.Io.Writer.fixed(out),
         .link_buffer = link_buffer,
+        .kinds = kind_buffer,
     };
 
     while (state.index < state.input.len) {
@@ -31,9 +37,11 @@ pub fn render(html: []const u8, out: []u8, link_buffer: []links.Link) Render {
         state.prose();
     }
     state.finish();
+    const lines = state.line + @intFromBool(state.writer.buffered().len > 0);
     return .{
         .text = state.writer.buffered(),
         .links = link_buffer[0..state.link_count],
+        .kinds = kind_buffer[0..@min(lines, kind_buffer.len)],
     };
 }
 
@@ -46,6 +54,10 @@ const State = struct {
     anchor_text_start: usize = 0,
     link_buffer: []links.Link,
     link_count: usize = 0,
+    kinds: []Kind = &.{},
+    /// Line being written, and what kind of line it is.
+    line: usize = 0,
+    kind: Kind = .body,
     /// Quotes indent two spaces per level, capped so a mad message cannot eat
     /// the whole line width.
     quote_depth: u8 = 0,
@@ -70,6 +82,17 @@ const State = struct {
         self.pending_space = false;
     }
 
+    fn newline(self: *State) void {
+        self.write("\n");
+        self.line += 1;
+        self.at_line_start = true;
+    }
+
+    /// Remembers what this line is, once, when it starts.
+    fn note_kind(self: *State) void {
+        if (self.line < self.kinds.len) self.kinds[self.line] = self.kind;
+    }
+
     fn flush_breaks(self: *State) void {
         if (self.pending_breaks == 0) return;
         if (self.written() == 0) {
@@ -81,7 +104,7 @@ const State = struct {
             return;
         }
         var count: u8 = 0;
-        while (count < self.pending_breaks) : (count += 1) self.write("\n");
+        while (count < self.pending_breaks) : (count += 1) self.newline();
         self.pending_breaks = 0;
         self.at_line_start = true;
         self.pending_space = false;
@@ -118,8 +141,7 @@ const State = struct {
             }
             if (self.in_pre) {
                 if (byte == '\n') {
-                    self.write("\n");
-                    self.at_line_start = true;
+                    self.newline();
                     self.pending_space = false;
                     continue;
                 }
@@ -143,6 +165,7 @@ const State = struct {
             return;
         };
         self.flush_breaks();
+        if (self.at_line_start) self.note_kind();
         if (self.pending_space and !self.at_line_start) self.write(" ");
         self.pending_space = false;
         self.at_line_start = false;
@@ -159,6 +182,7 @@ const State = struct {
     fn writeByte(self: *State, byte: u8) void {
         self.flush_breaks();
         if (self.at_line_start) {
+            self.note_kind();
             self.indent();
             // A list marker was written before the break: do not indent twice.
             self.at_line_start = false;
@@ -218,6 +242,8 @@ const State = struct {
             }
             self.break_lines(1);
             self.flush_breaks();
+            self.kind = .bullet;
+            self.note_kind();
             self.write("• ");
             self.at_line_start = false;
             self.pending_space = false;
@@ -230,6 +256,7 @@ const State = struct {
         if (std.ascii.eqlIgnoreCase(name, "blockquote")) {
             self.quote_depth = if (closing) self.quote_depth -| 1 else @min(2, self.quote_depth + 1);
             self.break_lines(1);
+            self.kind = if (self.quote_depth > 0) .quote else .body;
             return;
         }
         if (std.ascii.eqlIgnoreCase(name, "pre")) {
@@ -245,6 +272,9 @@ const State = struct {
             } else {
                 self.break_lines(1);
             }
+            // A heading styles its own line; leaving it returns to body text,
+            // which also ends a list item.
+            self.kind = if (is_heading(name) and !closing) .heading else .body;
             return;
         }
         // Everything else (span, b, i, font, td…) only carries style.
@@ -412,7 +442,7 @@ test "paragraphs, lists and headings become readable text" {
         \\<pre>  keep
         \\   this</pre></body></html>
     ;
-    const rendered = render(html, &out, &link_buffer);
+    const rendered = render(html, &out, &link_buffer, &.{});
     try testing.expectEqualStrings(
         "Hello\n\nFirst line\nsecond line\n\n• one\n• two\n\n  keep\n   this",
         rendered.text,
@@ -424,7 +454,7 @@ test "a link keeps its address, visible and recorded" {
     var out: [256]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     const html = "<p>Read <a href=\"https://example.com/a\">the docs</a> today.</p>";
-    const rendered = render(html, &out, &link_buffer);
+    const rendered = render(html, &out, &link_buffer, &.{});
     try testing.expectEqualStrings("Read the docs (https://example.com/a) today.", rendered.text);
     try testing.expectEqual(@as(usize, 1), rendered.links.len);
     try testing.expectEqualStrings(
@@ -437,7 +467,7 @@ test "an anchor whose text is the address is not written twice" {
     var out: [256]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     const html = "<a href='https://example.com/'>https://example.com/</a>";
-    const rendered = render(html, &out, &link_buffer);
+    const rendered = render(html, &out, &link_buffer, &.{});
     try testing.expectEqualStrings("https://example.com/", rendered.text);
     try testing.expectEqualStrings("https://example.com/", rendered.links[0].text(rendered.text));
 }
@@ -445,7 +475,7 @@ test "an anchor whose text is the address is not written twice" {
 test "entities become their characters, and nbsp is a space" {
     var out: [128]u8 = undefined;
     var link_buffer: [2]links.Link = undefined;
-    const rendered = render("<p>Hello&nbsp;<b>world</b> &amp; friends &lt;3 &#233;</p>", &out, &link_buffer);
+    const rendered = render("<p>Hello&nbsp;<b>world</b> &amp; friends &lt;3 &#233;</p>", &out, &link_buffer, &.{});
     try testing.expectEqualStrings("Hello world & friends <3 é", rendered.text);
 }
 
@@ -453,7 +483,7 @@ test "script content is dropped, not shown" {
     var out: [256]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     const html = "<p>before</p><script>alert('boom')</script><p>after</p>";
-    const rendered = render(html, &out, &link_buffer);
+    const rendered = render(html, &out, &link_buffer, &.{});
     try testing.expectEqualStrings("before\n\nafter", rendered.text);
 }
 
@@ -470,7 +500,30 @@ test "a huge message is bounded by the output buffer" {
     html[205] = 'p';
     html[206] = '>';
     const document = html[0..207];
-    const rendered = render(document, &out, &link_buffer);
+    const rendered = render(document, &out, &link_buffer, &.{});
     try testing.expect(rendered.text.len <= out.len);
     try testing.expectEqualStrings("xxxxxxxxxxxxxxxx", rendered.text);
+}
+
+test "each line carries what it is, so the reader can style it" {
+    var out: [512]u8 = undefined;
+    var link_buffer: [4]links.Link = undefined;
+    var kinds: [16]Kind = undefined;
+    const rendered = render(
+        "<h2>Title</h2><p>body text</p><blockquote>quoted</blockquote><ul><li>item</li></ul>",
+        &out,
+        &link_buffer,
+        &kinds,
+    );
+
+    var lines = std.mem.splitScalar(u8, rendered.text, '\n');
+    var index: usize = 0;
+    while (lines.next()) |line| : (index += 1) {
+        if (line.len == 0) continue;
+        const kind = if (index < rendered.kinds.len) rendered.kinds[index] else .body;
+        if (std.mem.startsWith(u8, line, "Title")) try testing.expectEqual(Kind.heading, kind);
+        if (std.mem.startsWith(u8, line, "body text")) try testing.expectEqual(Kind.body, kind);
+        if (std.mem.startsWith(u8, line, "quoted")) try testing.expectEqual(Kind.quote, kind);
+        if (std.mem.startsWith(u8, line, "• item")) try testing.expectEqual(Kind.bullet, kind);
+    }
 }

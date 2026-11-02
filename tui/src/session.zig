@@ -158,6 +158,8 @@ pub const Session = struct {
     clip_text: [clipboard_mod.max_text]u8 = undefined,
     clip_encoded: [clipboard_mod.max_encoded]u8 = undefined,
     html_links: [core.links.max_links]core.links.Link = undefined,
+    html_kinds: [wrap.max_lines]core.html.Kind = undefined,
+    html_kind_count: usize = 0,
     html_link_count: usize = 0,
     text_links: [core.links.max_links]core.links.Link = undefined,
     text_link_count: usize = 0,
@@ -928,6 +930,7 @@ pub const Session = struct {
         self.html_len = 0;
         self.html_ready = false;
         self.html_link_count = 0;
+        self.html_kind_count = 0;
         self.render_html_view();
         self.prefer_html();
         self.body_loaded = true;
@@ -944,9 +947,10 @@ pub const Session = struct {
         const message = self.raw[0..self.raw_len];
         const part = core.mime.html_body(message, &self.html_part, &self.scratch_bytes) orelse return;
         self.html_part_len = @intCast(part.len);
-        const rendered = core.html.render(part, &self.html_text, &self.html_links);
+        const rendered = core.html.render(part, &self.html_text, &self.html_links, &self.html_kinds);
         self.html_len = @intCast(rendered.text.len);
         self.html_link_count = rendered.links.len;
+        self.html_kind_count = rendered.kinds.len;
     }
 
     /// Opens on the view a mail client would show: HTML when the message has
@@ -1475,6 +1479,7 @@ pub const Session = struct {
             .body = self.reader_text(),
             .wrapped = if (self.body_loaded) &self.wrapped else null,
             .links = self.reader_links(),
+            .kinds = self.html_kinds[0..self.html_kind_count],
             .selection = self.selection,
             .now_unix = self.now_unix,
             .columns = self.size.columns,

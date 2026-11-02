@@ -36,6 +36,8 @@ pub const Inputs = struct {
     selection: ?selection.Selection = null,
     /// Which wrapped line is being drawn, so the selection can be placed.
     line_index: ?u32 = null,
+    /// What kind of line each rendered HTML line is: headings, quotes, bullets.
+    kinds: []const core.html.Kind = &.{},
     now_unix: i64 = 0,
     columns: u16 = 80,
     rows: u16 = 24,
@@ -605,7 +607,7 @@ fn render_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16) void {
     if (draw_line_selection(inputs, out, line, y, width)) return;
     if (inputs.links.len == 0) {
-        _ = out.put_text(1, y, line, width, inputs.theme.text);
+        _ = out.put_text(1, y, line, width, line_style(inputs));
         return;
     }
 
@@ -631,6 +633,19 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
     if (cursor < line_end) {
         draw_segment(out, inputs, line, cursor - line_start, line.len, y, width, false);
     }
+}
+
+/// How a line of the HTML rendering is drawn. A terminal has no fonts, so the
+/// difference between a heading and a paragraph has to be weight and colour.
+fn line_style(inputs: Inputs) Style {
+    const index = inputs.line_index orelse return inputs.theme.text;
+    if (index >= inputs.kinds.len) return inputs.theme.text;
+    return switch (inputs.kinds[index]) {
+        .heading => inputs.theme.accent.with_bold(),
+        .quote => inputs.theme.dim,
+        .bullet => inputs.theme.text,
+        .body => inputs.theme.text,
+    };
 }
 
 /// Paints the selected part of one line, if the drag reaches it. Returns false
@@ -665,7 +680,7 @@ fn draw_segment(
     if (to <= from) return;
     const column: u16 = @intCast(from);
     if (column >= width) return;
-    const style = if (underline) inputs.theme.accent.with_underline() else inputs.theme.text;
+    const style = if (underline) inputs.theme.accent.with_underline() else line_style(inputs);
     _ = out.put_text(1 + column, y, line[from..to], width -| column, style);
 }
 
