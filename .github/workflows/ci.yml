@@ -45,9 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      - name: Install kcov
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y kcov
+      # kcov is not in the runner's repositories. build.zig already falls back to
+      # nix-shell when kcov is not on PATH, so Nix is all that is needed here.
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
       - name: Line coverage
         run: zig build coverage
