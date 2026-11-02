@@ -28,6 +28,9 @@ pub const Inputs = struct {
     body: []const u8 = "",
     /// Body wrapped to the reader width. Null means "not loaded yet".
     wrapped: ?*const wrap.Wrapped = null,
+    /// Links in `body`, as byte ranges: one scan for the whole message, so a
+    /// URL split by the wrapper is still one link.
+    links: []const core.links.Link = &.{},
     now_unix: i64 = 0,
     columns: u16 = 80,
     rows: u16 = 24,
@@ -572,32 +575,50 @@ fn render_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 /// One wrapped line, with its links underlined so they read as links and not
 /// as punctuation soup.
 fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16) void {
-    var buffer: [core.links.max_links]core.links.Link = undefined;
-    const count = core.links.scan(line, &buffer);
-    if (count == 0) {
+    if (inputs.links.len == 0) {
         _ = out.put_text(1, y, line, width, inputs.theme.text);
         return;
     }
 
-    var cursor: u16 = 0;
-    for (buffer[0..count]) |link| {
-        const start: u16 = @intCast(link.start);
-        const end: u16 = @intCast(link.end);
+    // The links are ranges in the whole body; the line is a window onto it.
+    const line_start = @intFromPtr(line.ptr) - @intFromPtr(inputs.body.ptr);
+    const line_end = line_start + line.len;
+
+    var cursor: usize = line_start;
+    for (inputs.links) |link| {
+        if (link.end <= line_start) continue;
+        if (link.start >= line_end) break;
+        const start = @max(link.start, line_start);
+        const end = @min(link.end, line_end);
         if (start > cursor) {
-            _ = out.put_text(1 + cursor, y, line[cursor..start], width -| cursor, inputs.theme.text);
+            draw_segment(out, inputs, line, cursor - line_start, start - line_start, y, width, false);
+            cursor = start;
         }
-        _ = out.put_text(
-            1 + start,
-            y,
-            link.text(line),
-            width -| start,
-            inputs.theme.accent.with_underline(),
-        );
-        cursor = end;
+        if (end > cursor) {
+            draw_segment(out, inputs, line, cursor - line_start, end - line_start, y, width, true);
+            cursor = end;
+        }
     }
-    if (cursor < line.len) {
-        _ = out.put_text(1 + cursor, y, line[cursor..], width -| cursor, inputs.theme.text);
+    if (cursor < line_end) {
+        draw_segment(out, inputs, line, cursor - line_start, line.len, y, width, false);
     }
+}
+
+fn draw_segment(
+    out: *Screen,
+    inputs: Inputs,
+    line: []const u8,
+    from: usize,
+    to: usize,
+    y: u16,
+    width: u16,
+    underline: bool,
+) void {
+    if (to <= from) return;
+    const column: u16 = @intCast(from);
+    if (column >= width) return;
+    const style = if (underline) inputs.theme.accent.with_underline() else inputs.theme.text;
+    _ = out.put_text(1 + column, y, line[from..to], width -| column, style);
 }
 
 const Hint = struct {
@@ -638,7 +659,8 @@ const list_hints = [_]Hint{
 const reader_hints = [_]Hint{
     .{ .keys = "j/k", .action = "scroll" },
     .{ .keys = "Space", .action = "page" },
-    .{ .keys = "H", .action = "html" },
+    .{ .keys = "H", .action = "html in browser" },
+    .{ .keys = "h", .action = "html as text" },
     .{ .keys = "click", .action = "open link" },
     .{ .keys = "r", .action = "reply" },
     .{ .keys = "q", .action = "back" },

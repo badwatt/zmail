@@ -109,7 +109,9 @@ fn run_session(
 ) ?Failure {
     // The session owns megabytes of bounded buffers; keeping it on the stack
     // next to the adapters overflows it.
-    var browser = Browser{ .io = io };
+    var dir_buffer: [512]u8 = undefined;
+    const cache_dir = cli.default_cache_dir(&dir_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
+    var browser = Browser{ .io = io, .cache_dir = cache_dir };
     const session = gpa.create(session_mod.Session) catch
         return .{ .message = "Not enough memory to start" };
     defer gpa.destroy(session);
@@ -126,6 +128,8 @@ fn run_session(
         .now = os.now_unix,
         .open_url = openUrlThunk,
         .open_url_context = &browser,
+        .open_html = openHtmlThunk,
+        .open_html_context = &browser,
     }) catch return .{ .message = "Not enough memory to start" };
     defer session.deinit();
 
@@ -136,11 +140,56 @@ fn run_session(
 /// Clicking a link hands it to whatever opens browsers on this machine.
 const Browser = struct {
     io: std.Io,
+    /// Where the HTML file is written before the browser is handed its path.
+    cache_dir: []const u8 = "",
 };
 
 fn openUrlThunk(context: *anyopaque, url: []const u8) void {
     const self: *Browser = @ptrCast(@alignCast(context));
     net.oauth_flow.open_in_browser(self.io, url);
+}
+
+/// Writes the HTML part where a browser can read it, then opens it. The file
+/// lives in the cache: it is a rendering of mail, not mail worth keeping.
+fn openHtmlThunk(context: *anyopaque, html: []const u8, title: []const u8) void {
+    const self: *Browser = @ptrCast(@alignCast(context));
+    if (self.cache_dir.len == 0) {
+        // Nowhere to write: a data URL, which every browser takes.
+        var buffer: [core.limits.body_max * 2]u8 = undefined;
+        const encoded = percent_encode_all(html, &buffer);
+        var url: [core.limits.body_max * 2 + 32]u8 = undefined;
+        const text = std.fmt.bufPrint(&url, "data:text/html;charset=utf-8,{s}", .{encoded}) catch return;
+        net.oauth_flow.open_in_browser(self.io, text);
+        return;
+    }
+
+    var path_buffer: [512]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buffer, "{s}/amail/open.html", .{self.cache_dir}) catch return;
+    const dir = cli.parent_dir(path);
+    if (dir.len > 0) {
+        _ = std.Io.Dir.cwd().createDirPathStatus(self.io, dir, directory_mode) catch .existing;
+    }
+    const file = std.Io.Dir.cwd().createFile(self.io, path, .{ .permissions = file_mode }) catch return;
+    file.writeStreamingAll(self.io, html) catch {};
+    file.close(self.io);
+
+    var url_buffer: [600]u8 = undefined;
+    const url = std.fmt.bufPrint(&url_buffer, "file://{s}", .{path}) catch return;
+    _ = title;
+    net.oauth_flow.open_in_browser(self.io, url);
+}
+
+fn percent_encode_all(text: []const u8, out: []u8) []const u8 {
+    const digits = "0123456789ABCDEF";
+    var length: usize = 0;
+    for (text) |byte| {
+        if (length + 3 > out.len) break;
+        out[length] = '%';
+        out[length + 1] = digits[byte >> 4];
+        out[length + 2] = digits[byte & 0x0f];
+        length += 3;
+    }
+    return out[0..length];
 }
 
 const max_accounts = core.config.max_accounts;

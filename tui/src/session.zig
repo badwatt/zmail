@@ -94,6 +94,10 @@ pub const Deps = struct {
     /// opener: clicking a link then does nothing rather than lying.
     open_url: ?*const fn (context: *anyopaque, url: []const u8) void = null,
     open_url_context: *anyopaque = undefined,
+    /// Shows a message the way a mail client would: the HTML part written out
+    /// and handed to the browser, images and all.
+    open_html: ?*const fn (context: *anyopaque, html: []const u8, title: []const u8) void = null,
+    open_html_context: *anyopaque = undefined,
 };
 
 pub const Session = struct {
@@ -118,11 +122,15 @@ pub const Session = struct {
     raw_len: u32 = 0,
     /// The HTML part, and the reading view made from it.
     html_part: [core.limits.body_max]u8 = undefined,
+    html_part_len: u32 = 0,
     html_text: [core.limits.body_max]u8 = undefined,
     html_len: u32 = 0,
     /// Which view the reader is showing. HTML only when the message has it.
     html_view: bool = false,
     html_links: [core.links.max_links]core.links.Link = undefined,
+    html_link_count: usize = 0,
+    text_links: [core.links.max_links]core.links.Link = undefined,
+    text_link_count: usize = 0,
     /// MIME decoding scratch, kept here so nothing is allocated per message.
     scratch_bytes: [core.limits.body_max]u8 = undefined,
 
@@ -473,9 +481,10 @@ pub const Session = struct {
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
-        // `H` is a view, not a command: the core has no opinion about it.
-        if (key == .char and key.char == 'H' and self.state.view == .reader) {
-            return self.toggle_html();
+        // Views are not commands: the core has no opinion about them.
+        if (key == .char and self.state.view == .reader) {
+            if (key.char == 'H') return self.open_html();
+            if (key.char == 'h') return self.toggle_html();
         }
         const command = keymap.translate(key, .{ .mode = self.state.mode, .view = self.state.view }) orelse return false;
         return self.apply(command);
@@ -508,7 +517,30 @@ pub const Session = struct {
         return self.click_link(lay, mouse);
     }
 
-    /// Swaps the reader between the text and the HTML reading view.
+    /// The real thing: the HTML part, in the browser, with its white background
+    /// and its images, exactly as another mail client would show it.
+    fn open_html(self: *Session) bool {
+        if (!self.body_loaded) return false;
+        if (self.html_part_len == 0) {
+            self.state.set_status("This message has no HTML version", .{});
+            self.needs_render = true;
+            return true;
+        }
+        const open = self.deps.open_html orelse {
+            self.state.set_status("No browser to open HTML with; try h for the text version", .{});
+            self.needs_render = true;
+            return true;
+        };
+        const account = self.state.opened_account;
+        const message = self.store.get_const(account, self.state.opened);
+        const title = if (message) |found| found.subject.slice() else "";
+        open(self.deps.open_html_context, self.html_part[0..self.html_part_len], title);
+        self.state.set_status("Opened the HTML in the browser", .{});
+        self.needs_render = true;
+        return true;
+    }
+
+    /// The terminal approximation: the HTML part read as text.
     fn toggle_html(self: *Session) bool {
         if (!self.body_loaded) return false;
         if (self.html_len == 0) {
@@ -536,19 +568,15 @@ pub const Session = struct {
         if (index >= self.wrapped.len) return false;
         if (mouse.x < 1) return false;
 
-        const line = self.wrapped.at(index, self.reader_text());
-        const column = mouse.x - 1;
-        var buffer: [core.links.max_links]core.links.Link = undefined;
-        const count = core.links.scan(line, &buffer);
-        for (buffer[0..count]) |link| {
-            if (column < link.start or column >= link.end) continue;
-            const url = link.text(line);
-            if (self.deps.open_url) |open| open(self.deps.open_url_context, url);
-            self.state.set_status("Opened {s}", .{url});
-            self.needs_render = true;
-            return true;
-        }
-        return false;
+        const text = self.reader_text();
+        const line = self.wrapped.at(index, text);
+        const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
+        const offset = line_start + (mouse.x - 1);
+        const url = core.links.at(text, offset) orelse return false;
+        if (self.deps.open_url) |open| open(self.deps.open_url_context, url);
+        self.state.set_status("Opened {s}", .{url});
+        self.needs_render = true;
+        return true;
     }
 
     fn click_row(self: *Session, lay: layout_mod.Layout, y: u16) bool {
@@ -691,10 +719,16 @@ pub const Session = struct {
         const text = core.mime.text_body(message, &self.body, &self.scratch_bytes);
         self.body_len = @intCast(text.len);
 
+        self.text_link_count = core.links.scan(text, &self.text_links);
+
         self.html_len = 0;
+        self.html_part_len = 0;
+        self.html_link_count = 0;
         if (core.mime.html_body(message, &self.html_part, &self.scratch_bytes)) |part| {
+            self.html_part_len = @intCast(part.len);
             const rendered = core.html.render(part, &self.html_text, &self.html_links);
             self.html_len = @intCast(rendered.text.len);
+            self.html_link_count = rendered.links.len;
         }
         self.body_loaded = true;
         self.wrapped = .{};
@@ -705,6 +739,14 @@ pub const Session = struct {
     fn reader_text(self: *const Session) []const u8 {
         if (self.html_view and self.html_len > 0) return self.html_text[0..self.html_len];
         return self.body[0..self.body_len];
+    }
+
+    /// The links of the text the reader is showing, as ranges in that text.
+    fn reader_links(self: *const Session) []const core.links.Link {
+        if (self.html_view and self.html_len > 0) {
+            return self.html_links[0..self.html_link_count];
+        }
+        return self.text_links[0..self.text_link_count];
     }
 
     fn delete_message(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
@@ -1209,6 +1251,7 @@ pub const Session = struct {
             .theme = &self.deps.theme,
             .body = self.reader_text(),
             .wrapped = if (self.body_loaded) &self.wrapped else null,
+            .links = self.reader_links(),
             .now_unix = self.now_unix,
             .columns = self.size.columns,
             .rows = self.size.rows,
@@ -3068,7 +3111,48 @@ test "clicking a link in the body opens it" {
     try testing.expectEqual(@as(u8, 1), sink.opened);
 }
 
-test "H switches to the HTML view only when there is one" {
+const HtmlSink = struct {
+    calls: u8 = 0,
+    length: usize = 0,
+
+    fn open(context: *anyopaque, html: []const u8, title: []const u8) void {
+        const self: *HtmlSink = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.length = html.len;
+        _ = title;
+    }
+};
+
+test "H hands the HTML part to the browser" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.body_loaded = true;
+
+    var sink: HtmlSink = .{};
+    rig.session.deps.open_html = HtmlSink.open;
+    rig.session.deps.open_html_context = &sink;
+
+    // Nothing to render: say so, open nothing.
+    rig.session.html_part_len = 0;
+    rig.send("H");
+    try testing.expectEqual(@as(u8, 0), sink.calls);
+    try testing.expectEqualStrings("This message has no HTML version", rig.session.state.status.slice());
+
+    const part = "<p>Read <a href=\"https://example.com/a\">the docs</a></p>";
+    @memcpy(rig.session.html_part[0..part.len], part);
+    rig.session.html_part_len = part.len;
+    rig.send("H");
+    try testing.expectEqual(@as(u8, 1), sink.calls);
+    try testing.expectEqual(part.len, sink.length);
+    try testing.expectEqualStrings("Opened the HTML in the browser", rig.session.state.status.slice());
+}
+
+test "h switches to the HTML view only when there is one" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -3078,7 +3162,7 @@ test "H switches to the HTML view only when there is one" {
 
     // No HTML part: say so, stay in the text view.
     rig.session.html_len = 0;
-    rig.send("H");
+    rig.send("h");
     try testing.expect(!rig.session.html_view);
     try testing.expectEqualStrings("This message has no HTML version", rig.session.state.status.slice());
 
@@ -3087,11 +3171,11 @@ test "H switches to the HTML view only when there is one" {
     @memcpy(rig.session.html_text[0..rendered.len], rendered);
     rig.session.html_len = rendered.len;
     rig.session.state.reader_scroll = 3;
-    rig.send("H");
+    rig.send("h");
     try testing.expect(rig.session.html_view);
     try testing.expectEqualStrings(rendered, rig.session.reader_text());
     try testing.expectEqual(@as(u32, 0), rig.session.state.reader_scroll);
-    rig.send("H");
+    rig.send("h");
     try testing.expect(!rig.session.html_view);
 }
 
@@ -3121,4 +3205,41 @@ test "a message with an HTML part renders both views from one fetch" {
         "Read the docs (https://example.com/a)",
         rig.session.html_text[0..rig.session.html_len],
     );
+}
+
+test "a link split by the wrap is still one link, and clicks anywhere on it" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: LinkSink = .{};
+    rig.session.deps.open_url = LinkSink.open;
+    rig.session.deps.open_url_context = &sink;
+
+    const body = "see https://example.com/a/really/long/path here";
+    rig.session.set_raw(body);
+    rig.session.state.view = .reader;
+    rig.session.state.opened = MessageId.from_int(1);
+    // A narrow width is what breaks the address across lines.
+    wrap.wrap(rig.session.reader_text(), 18, &rig.session.wrapped);
+    try testing.expect(rig.session.wrapped.len >= 3);
+
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    // Find the line that holds the middle of the address (no scheme in sight):
+    // that is the half the old per-line scan could not see.
+    var continuation: ?u16 = null;
+    for (0..rig.session.wrapped.len) |row| {
+        const line = rig.session.wrapped.at(@intCast(row), rig.session.reader_text());
+        if (std.mem.indexOf(u8, line, "/a/") != null) continuation = @intCast(row);
+    }
+    try testing.expect(continuation != null);
+    _ = rig.session.handle_mouse(.{
+        .x = 2,
+        .y = lay.reader_body_y + continuation.?,
+        .kind = .press,
+        .button = .left,
+    });
+    try testing.expectEqual(@as(u8, 1), sink.opened);
+    try testing.expectEqualStrings("https://example.com/a/really/long/path", sink.last[0..sink.last_len]);
 }
