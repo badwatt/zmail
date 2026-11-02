@@ -27,9 +27,9 @@ pub const Link = struct {
         assert(self.end <= source.len);
         var length: usize = 0;
         for (self.text(source)) |byte| {
-            // Line breaks and the spaces a wrap left behind are not part of an
-            // address.
-            if (byte == '\r' or byte == '\n' or byte == ' ') continue;
+            // A line break inside an address is not part of it. (A space never
+            // is: flowed text is unfolded before it gets here.)
+            if (byte == '\r' or byte == '\n') continue;
             if (length == out.len) break;
             out[length] = byte;
             length += 1;
@@ -98,14 +98,6 @@ fn next_link(text: []const u8, from: usize) ?Candidate {
                     while (end < text.len and is_url_byte(text[end])) end += 1;
                     continue;
                 }
-                // Mail also wraps with a space left at the break ("…XYLL  HCfTe"),
-                // and the address carries on. Only a long address is treated this
-                // way: prose must not be swallowed.
-                if (spacedContinuation(text, index, end)) |step| {
-                    end = step;
-                    while (end < text.len and is_url_byte(text[end])) end += 1;
-                    continue;
-                }
                 break;
             }
             return .{ .start = index, .end = end };
@@ -147,26 +139,6 @@ fn continuation(text: []const u8, link_start: usize, end: usize) ?usize {
 
 /// A line this long was wrapped at a margin, not ended by a full stop.
 const wrapped_at: usize = 60;
-
-/// Where the address picks up again after one or two spaces left at a wrap
-/// point, if the address is long enough that this cannot be prose.
-fn spacedContinuation(text: []const u8, link_start: usize, end: usize) ?usize {
-    if (end - link_start < wrapped_at) return null;
-    var index = end;
-    var spaces: u8 = 0;
-    while (index < text.len and text[index] == ' ' and spaces < 2) : (spaces += 1) index += 1;
-    if (spaces == 0) return null;
-    if (index >= text.len or !is_url_byte(text[index])) return null;
-    if (std.mem.startsWith(u8, text[index..], "http://")) return null;
-    if (std.mem.startsWith(u8, text[index..], "https://")) return null;
-    if (std.mem.startsWith(u8, text[index..], "www.")) return null;
-    // A word, then a space: that is prose. A long run without a break is an
-    // address.
-    var run = index;
-    while (run < text.len and is_url_byte(text[run])) run += 1;
-    if (run - index < 8) return null;
-    return index;
-}
 
 fn is_url_byte(byte: u8) bool {
     return switch (byte) {
@@ -272,22 +244,6 @@ test "prose on the next line is not swallowed by the link" {
     const text = "see https://example.com/a\nThanks for reading";
     try testing.expectEqual(@as(usize, 1), scan(text, &buffer));
     try testing.expectEqualStrings("https://example.com/a", buffer[0].text(text));
-}
-
-test "an address wrapped with spaces left behind is still one address" {
-    var buffer: [max_links]Link = undefined;
-    // What the plain part of a marketing mail looks like: a long token, a
-    // newline, and a stray space inside it.
-    const text = "https://unsubscribe.resend.com/?token=eyJhbGciOiJIUzI1NiIsInR5cCI6\n" ++
-        "IkpXVCJ9.eyJjb250YWluZXJfdHlwZSI6Ik1haWxTZW5kZXIiLCJ 5Jhc2U2NA\n" ++
-        "J9.OMhLWsKF3hmlXYLL  HCfTeCMkde0KpicLd\n";
-    const count = scan(text, &buffer);
-    try testing.expectEqual(@as(usize, 1), count);
-
-    var url_buffer: [512]u8 = undefined;
-    const url = buffer[0].url(text, &url_buffer);
-    try testing.expect(std.mem.startsWith(u8, url, "https://unsubscribe.resend.com/?token="));
-    try testing.expect(std.mem.indexOf(u8, url, "J9.OMhLWsKF3hmlXYLLHCfTeCMkde0KpicLd") != null);
 }
 
 test "a new address on the next line is a new link, not a continuation" {

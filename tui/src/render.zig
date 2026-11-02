@@ -1526,3 +1526,40 @@ test "size_text covers bytes, kibibytes, and mebibytes" {
     try testing.expectEqualStrings("4.0 KiB", size_text(&buffer, 4096));
     try testing.expectEqualStrings("1.4 MiB", size_text(&buffer, 1_500_000));
 }
+
+test "a link that wraps is drawn without gaps or doubled spaces" {
+    const body = "https://unsubscribe.example.com/?token=abcdefghijklmnopqrstuvwxyz0123456789";
+    var wrapped: wrap.Wrapped = .{};
+    wrap.wrap(body, 20, &wrapped);
+    try testing.expect(wrapped.len > 2);
+
+    var buffer: [core.links.max_links]core.links.Link = undefined;
+    const count = core.links.scan(body, &buffer);
+
+    var canvas: Screen = .{};
+    canvas.resize(40, 10);
+    const state = State{};
+    const theme = Theme.dark();
+    var row: u16 = 0;
+    while (row < wrapped.len) : (row += 1) {
+        var inputs = Inputs{
+            .state = &state,
+            .store = undefined,
+            .theme = &theme,
+            .body = body,
+            .links = buffer[0..count],
+            .line_index = row,
+        };
+        _ = &inputs;
+        draw_line_with_links(inputs, &canvas, wrapped.at(row, body), row, 20);
+    }
+
+    // The body starts in column 1, so the row carries a leading cell and then
+    // the wrapped line, byte for byte: no gaps, no doubled spaces.
+    var text_buffer: [64]u8 = undefined;
+    const first = std.mem.trimEnd(u8, canvas.row_text(0, &text_buffer), " ");
+    try testing.expectEqualStrings(wrapped.at(0, body), std.mem.trimStart(u8, first, " "));
+    var second: [64]u8 = undefined;
+    const next = std.mem.trimEnd(u8, canvas.row_text(1, &second), " ");
+    try testing.expectEqualStrings(wrapped.at(1, body), std.mem.trimStart(u8, next, " "));
+}

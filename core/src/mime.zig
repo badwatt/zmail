@@ -209,6 +209,10 @@ const Type = struct {
     media: Media = .plain,
     charset: Charset = .utf8,
     boundary: []const u8 = "",
+    /// RFC 3676: a line ending in a space continues on the next one, and the
+    /// space is not part of the text. Mailing lists use it to wrap long
+    /// addresses without breaking them.
+    flowed: bool = false,
 };
 
 fn content_type(value: ?[]const u8) Type {
@@ -256,6 +260,8 @@ fn content_type(value: ?[]const u8) Type {
             result.charset = charset_of(param);
         } else if (std.ascii.eqlIgnoreCase(name, "boundary")) {
             result.boundary = param;
+        } else if (std.ascii.eqlIgnoreCase(name, "format")) {
+            result.flowed = std.ascii.eqlIgnoreCase(std.mem.trim(u8, param, " \t\"'"), "flowed");
         }
     }
     return result;
@@ -385,8 +391,43 @@ fn write_part(part: Part, as_html: bool, scratch: []u8, writer: *std.Io.Writer) 
     if (as_html) {
         const converted = convert_charset(decoded, kind.charset, scratch[half..]);
         strip_html(converted, writer);
+    } else if (kind.flowed) {
+        // Flowed text has to be unfolded before it means anything: the line
+        // breaks inside it are the sender's, not the writer's.
+        const converted = convert_charset(decoded, kind.charset, scratch[half..]);
+        unflow(converted, writer);
     } else {
         stream_text(decoded, kind.charset, writer) catch {};
+    }
+}
+
+/// RFC 3676: a line ending in a space continues the next one, and that space
+/// is not part of the text. A line starting with a space was space-stuffed, so
+/// one space comes off. Nothing after the "-- " signature delimiter is flowed.
+fn unflow(input: []const u8, writer: *std.Io.Writer) void {
+    var rest = input;
+    var first = true;
+    var soft_before = false;
+    var at_signature = false;
+
+    while (rest.len > 0) {
+        const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
+        const raw = std.mem.trimEnd(u8, rest[0..end], "\r");
+        rest = if (end < rest.len) rest[end + 1 ..] else rest[rest.len..];
+
+        const line = if (raw.len > 0 and raw[0] == ' ') raw[1..] else raw;
+        const signature = std.mem.eql(u8, line, "-- ");
+        // The delimiter always starts a line, whatever the line before said.
+        if (!first and (!soft_before or signature)) writer.writeByte('\n') catch return;
+        first = false;
+
+        // Nothing after the delimiter is flowed, so its lines keep their spaces.
+        const soft = !signature and !at_signature and line.len > 0 and
+            line[line.len - 1] == ' ' and rest.len > 0;
+        writer.writeAll(if (soft) line[0 .. line.len - 1] else line) catch return;
+
+        if (signature) at_signature = true;
+        soft_before = soft and !at_signature;
     }
 }
 
@@ -972,6 +1013,37 @@ test "content_type: parses media, charset, and quoted boundary" {
     try testing.expectEqual(Charset.latin1, kind.charset);
     try testing.expectEqual(Media.plain, content_type(null).media);
     try testing.expectEqual(Media.other, content_type("image/png").media);
+}
+
+test "flowed text is unfolded: the wrap inside a link disappears" {
+    const raw = "Content-Type: text/plain; charset=utf-8; format=flowed\n" ++
+        "\n" ++
+        "Unsubscribe: https://unsubscribe.example.com/?token=eyJhbGciOiJI \n" ++
+        "UzI1NiIsInR5cCI6IkpXVCJ9.eyJjb250YWluZXJfdHlwZSI6I \n" ++
+        "k1haWxTZW5kZXIifQ\n" ++
+        "\n" ++
+        "A separate paragraph.\n";
+    var out: [512]u8 = undefined;
+    var scratch: [512]u8 = undefined;
+    const text = text_body(raw, &out, &scratch);
+    try testing.expectEqualStrings(
+        "Unsubscribe: https://unsubscribe.example.com/?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjb250YWluZXJfdHlwZSI6Ik1haWxTZW5kZXIifQ\n" ++
+            "\nA separate paragraph.",
+        text,
+    );
+}
+
+test "a signature block is not unfolded" {
+    const raw = "Content-Type: text/plain; format=flowed\n" ++
+        "\n" ++
+        "body line \n" ++
+        "-- \n" ++
+        "Alice \n" ++
+        "alice@example.com\n";
+    var out: [256]u8 = undefined;
+    var scratch: [256]u8 = undefined;
+    const text = text_body(raw, &out, &scratch);
+    try testing.expectEqualStrings("body line\n-- \nAlice \nalice@example.com", text);
 }
 
 test "html_body keeps the HTML part instead of flattening it" {
