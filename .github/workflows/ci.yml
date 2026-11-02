@@ -18,7 +18,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # setup-zig reads .minimum_zig_version from build.zig.zon.
       - uses: mlugg/setup-zig@v2
       - name: Formatting
@@ -43,7 +43,7 @@ jobs:
     # false once `zig build coverage` is green.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
       - name: Install kcov
         run: |
