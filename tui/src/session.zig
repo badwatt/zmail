@@ -221,6 +221,8 @@ pub const Session = struct {
     /// in the laid-out text.
     html_marked: [core.limits.body_max * 2]u8 = undefined,
     html_marked_len: u32 = 0,
+    /// Signature of the layer on screen, so an unchanged one is left alone.
+    image_painted: u64 = 0,
     /// Room for one decoded image, and the pixels-per-cell arithmetic that
     /// turns it into a place on screen.
     image_buffer: [core.limits.body_max]u8 = undefined,
@@ -1616,6 +1618,18 @@ pub const Session = struct {
         return @intCast(@min(image_cells(size).rows, 255));
     }
 
+    /// What the picture layer depends on: the message, the scroll, the size.
+    fn image_signature(self: *Session) u64 {
+        var hash = std.hash.Wyhash.init(0x9e3779b9);
+        hash.update(std.mem.asBytes(&self.state.opened));
+        hash.update(std.mem.asBytes(&self.state.opened_account));
+        hash.update(std.mem.asBytes(&self.state.reader_scroll));
+        hash.update(std.mem.asBytes(&self.size.columns));
+        hash.update(std.mem.asBytes(&self.size.rows));
+        if (self.state.view != .reader) hash.update("out");
+        return hash.final();
+    }
+
     /// Measures the pictures on the visible lines before the frame is drawn, so
     /// the text underneath them is not printed only to be covered.
     fn prepare_cover(self: *Session) void {
@@ -1660,6 +1674,12 @@ pub const Session = struct {
     fn paint_images(self: *Session, lay: layout_mod.Layout) void {
         if (self.state.view != .reader) return;
         const draw = self.deps.draw_image orelse return;
+
+        // Repainting an unchanged layer is the difference between a reader that
+        // keeps up with the keyboard and one that does not.
+        const signature = self.image_signature();
+        if (self.image_painted == signature) return;
+        self.image_painted = signature;
         // Clearing is a nicety; painting is the point.
         if (self.deps.clear_images) |clear| clear(self.deps.clear_images_context);
         if (self.html_view == false or self.html_len == 0) return;
