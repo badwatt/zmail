@@ -1,6 +1,6 @@
 .{
     .name = .amail,
-    .version = "0.2.0",
+    .version = "0.3.0",
     .fingerprint = 0x1212dab46abcd052,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},
