@@ -204,7 +204,7 @@ fn openExternalThunk(context: *anyopaque, html: []const u8, link: []const u8) vo
     const self: *Browser = @ptrCast(@alignCast(context));
     if (html.len > 0) {
         var path_buffer: [512]u8 = undefined;
-        const path = writeHtmlFile(self, html, &path_buffer) orelse return;
+        const path = writeHtmlFile(self, html, &path_buffer, 0) orelse return;
         var url_buffer: [600]u8 = undefined;
         const url = std.fmt.bufPrint(&url_buffer, "file://{s}", .{path}) catch return;
         net.oauth_flow.open_in_browser(self.io, url);
@@ -214,7 +214,12 @@ fn openExternalThunk(context: *anyopaque, html: []const u8, link: []const u8) vo
 }
 
 /// The HTML part on disk, wrapped enough to look like paper in a browser.
-fn writeHtmlFile(self: *Browser, html: []const u8, path_buffer: []u8) ?[]const u8 {
+fn writeHtmlFile(
+    self: *Browser,
+    html: []const u8,
+    path_buffer: []u8,
+    offset_px: u32,
+) ?[]const u8 {
     if (self.cache_dir.len == 0) return null;
     const path = std.fmt.bufPrint(path_buffer, "{s}/amail/message.html", .{self.cache_dir}) catch
         return null;
@@ -225,10 +230,16 @@ fn writeHtmlFile(self: *Browser, html: []const u8, path_buffer: []u8) ?[]const u
     }
     const file = std.Io.Dir.cwd().createFile(self.io, path, .{ .permissions = file_mode }) catch
         return null;
-    file.writeStreamingAll(self.io, "<!doctype html><meta charset=utf-8>" ++
-        "<style>body{background:#fff;color:#111;font-family:sans-serif;margin:16px}" ++
-        "img{max-width:100%}</style>") catch {};
+    // The page is shifted up by the scroll, because a screenshot can only be
+    // taken from the top: the offset is what makes the picture scrollable.
+    var style_buffer: [256]u8 = undefined;
+    const style = std.fmt.bufPrint(&style_buffer, "<!doctype html><meta charset=utf-8>" ++
+        "<style>body{{background:#fff;color:#111;font-family:sans-serif;margin:16px}}" ++
+        "img{{max-width:100%}}#amail{{position:relative;top:-{d}px}}</style><div id=\"amail\">", .{offset_px}) catch
+        return null;
+    file.writeStreamingAll(self.io, style) catch {};
     file.writeStreamingAll(self.io, html) catch {};
+    file.writeStreamingAll(self.io, "</div>") catch {};
     file.close(self.io);
     return path;
 }
@@ -241,12 +252,13 @@ fn renderHtmlThunk(
     html: []const u8,
     columns: u16,
     rows: u16,
+    offset_px: u32,
 ) bool {
     const self: *Browser = @ptrCast(@alignCast(context));
     if (self.cache_dir.len == 0 or !graphics.supported()) return false;
 
     var page_buffer: [512]u8 = undefined;
-    const html_path = writeHtmlFile(self, html, &page_buffer) orelse return false;
+    const html_path = writeHtmlFile(self, html, &page_buffer, offset_px) orelse return false;
     var png_buffer: [512]u8 = undefined;
     const png_path = std.fmt.bufPrint(&png_buffer, "{s}/amail/message.png", .{self.cache_dir}) catch
         return false;

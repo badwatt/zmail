@@ -109,6 +109,7 @@ pub const Deps = struct {
         html: []const u8,
         columns: u16,
         rows: u16,
+        offset_px: u32,
     ) bool = null,
     render_html_context: *anyopaque = undefined,
     clear_html: ?*const fn (context: *anyopaque) void = null,
@@ -117,6 +118,10 @@ pub const Deps = struct {
     /// which of the two things is missing.
     can_draw: ?*const fn () bool = null,
 };
+
+/// How many pixels one terminal cell is worth when a page is drawn.
+const cell_height: u32 = 18;
+const cell_width: u32 = 9;
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -151,8 +156,11 @@ pub const Session = struct {
     html_view: bool = false,
     /// Whether the HTML part has already been rendered to text.
     html_ready: bool = false,
-    /// Set when a picture of the mail is on screen: any key takes it away.
+    /// Set when a picture of the mail is on screen: scrolling redraws it,
+    /// anything else takes it away.
     image_shown: bool = false,
+    /// How far into the page the picture starts, in rows.
+    image_scroll: u32 = 0,
     /// Set by the picture key: paint the frame, then the picture over it.
     want_image: bool = false,
     /// Where a mouse drag started and where it is now. A drag copies; a click
@@ -554,11 +562,8 @@ pub const Session = struct {
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
-        // A picture is not the screen: the first key takes it away.
-        if (self.image_shown) {
-            self.dismiss_image();
-            return true;
-        }
+        // A picture is not the screen: it scrolls, and the rest takes it away.
+        if (self.image_shown) return self.picture_key(key);
         // Views are not commands: the core has no opinion about them.
         if (key == .char and self.state.view == .reader) {
             switch (key.char) {
@@ -648,9 +653,50 @@ pub const Session = struct {
             return true;
         }
         self.want_image = true;
-        self.state.set_status("HTML · any key goes back", .{});
+        self.image_scroll = 0;
+        self.state.set_status("HTML · j/k scroll · q goes back", .{});
         self.needs_render = true;
         return true;
+    }
+
+    /// Keys while the picture is up: scroll it, or leave.
+    fn picture_key(self: *Session, key: input.Key) bool {
+        const page = @max(1, self.size.rows -| 2);
+        switch (key) {
+            .char => |codepoint| switch (codepoint) {
+                'j' => self.scroll_image(1),
+                'k' => self.scroll_image(-1),
+                ' ' => self.scroll_image(page),
+                'q', 'V' => self.dismiss_image(),
+                else => {},
+            },
+            .down => self.scroll_image(1),
+            .up => self.scroll_image(-1),
+            .page_down => self.scroll_image(page),
+            .page_up => self.scroll_image(-@as(i32, page)),
+            .escape => self.dismiss_image(),
+            .mouse => |mouse| switch (mouse.button) {
+                .wheel_down => self.scroll_image(3),
+                .wheel_up => self.scroll_image(-3),
+                else => {},
+            },
+            else => {},
+        }
+        return true;
+    }
+
+    fn scroll_image(self: *Session, rows: i32) void {
+        const next = @as(i64, self.image_scroll) + rows;
+        self.image_scroll = @intCast(@max(0, next));
+        // The frame under the picture is unchanged; only the page moves.
+        self.want_image = true;
+        self.paint_image(layout_mod.Layout.compute(
+            self.size.columns,
+            self.size.rows,
+            self.state.accounts.max_label(),
+        ));
+        // No frame after the picture: repainting the text would erase it.
+        self.needs_render = false;
     }
 
     /// Paints the picture over the frame that is already on screen.
@@ -662,6 +708,7 @@ pub const Session = struct {
             self.html_part[0..self.html_part_len],
             lay.columns,
             lay.rows,
+            self.image_scroll * cell_height,
         );
         if (drawn) {
             self.image_shown = true;
@@ -674,6 +721,7 @@ pub const Session = struct {
 
     fn dismiss_image(self: *Session) void {
         self.image_shown = false;
+        self.image_scroll = 0;
         if (self.deps.clear_html) |clear| clear(self.deps.clear_html_context);
         self.invalidate_screen();
         self.state.set_status("", .{});
