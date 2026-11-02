@@ -1712,13 +1712,11 @@ pub const Session = struct {
     /// left for them. Images from the network are not fetched: the reader says
     /// what they are and o shows the mail in a browser.
     fn paint_images(self: *Session, lay: layout_mod.Layout) void {
+        // Whatever is on screen now, the pictures of the last frame go: a list,
+        // a help page or a compose window must not have a logo over it.
+        if (self.deps.clear_images) |clear| clear(self.deps.clear_images_context);
         if (self.state.view != .reader) return;
         const draw = self.deps.draw_image orelse return;
-
-        // The picture is made of cells, so it is drawn right after the frame
-        // that would otherwise paint over it.
-        // Clearing is a nicety; painting is the point.
-        if (self.deps.clear_images) |clear| clear(self.deps.clear_images_context);
         if (self.html_view == false or self.html_len == 0) return;
 
         const text = self.reader_text();
