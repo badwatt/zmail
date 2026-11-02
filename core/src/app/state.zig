@@ -105,9 +105,42 @@ pub const Accounts = struct {
         }
     }
 
+    /// Accounts in the order the overlay shows them: by name, so a list that
+    /// grows with the config never reshuffles under the cursor. "All accounts"
+    /// is the caller's row zero, not an account.
     pub fn at(self: *const Accounts, index: u8) ?AccountInfo {
-        if (index >= self.len) return null;
-        return self.items[index];
+        var order: [accounts_max]u8 = undefined;
+        const sorted = self.sorted_order(&order);
+        if (index >= sorted.len) return null;
+        return self.items[sorted[index]];
+    }
+
+    /// Indexes into `items`, ordered by label (case-insensitive), stable.
+    pub fn sorted_order(self: *const Accounts, out: *[accounts_max]u8) []const u8 {
+        var count: u8 = 0;
+        var candidate: u8 = 0;
+        while (candidate < self.len) : (candidate += 1) {
+            var position: u8 = count;
+            while (position > 0) : (position -= 1) {
+                const previous = self.items[out[position - 1]].label.slice();
+                const current = self.items[candidate].label.slice();
+                if (!label_less(current, previous)) break;
+                out[position] = out[position - 1];
+            }
+            out[position] = candidate;
+            count += 1;
+        }
+        return out[0..count];
+    }
+
+    fn label_less(a: []const u8, b: []const u8) bool {
+        const length = @min(a.len, b.len);
+        for (0..length) |index| {
+            const left = std.ascii.toLower(a[index]);
+            const right = std.ascii.toLower(b[index]);
+            if (left != right) return left < right;
+        }
+        return a.len < b.len;
     }
 
     pub fn max_label(self: *const Accounts) u8 {
@@ -301,14 +334,15 @@ test "Accounts.remove drops one account, and at() reports the rest" {
     accounts.add(AccountId.from_int(2), "work", .{}, .{});
     accounts.add(AccountId.from_int(3), "club", .{}, .{});
 
-    try testing.expectEqualStrings("work", accounts.at(1).?.label.slice());
+    // Listed by name: club, home, work.
+    try testing.expectEqualStrings("home", accounts.at(1).?.label.slice());
     try testing.expect(accounts.at(9) == null);
 
-    // Removing the middle one shifts the rest down.
+    // Removing the middle one leaves the rest, still by name.
     accounts.remove(AccountId.from_int(2));
     try testing.expectEqual(@as(u8, 2), accounts.len);
-    try testing.expectEqualStrings("home", accounts.at(0).?.label.slice());
-    try testing.expectEqualStrings("club", accounts.at(1).?.label.slice());
+    try testing.expectEqualStrings("club", accounts.at(0).?.label.slice());
+    try testing.expectEqualStrings("home", accounts.at(1).?.label.slice());
     try testing.expectEqualStrings("", accounts.label_for(AccountId.from_int(2)));
 
     // Removing something that is not there is a no-op.
