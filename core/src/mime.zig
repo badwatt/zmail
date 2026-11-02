@@ -226,9 +226,81 @@ fn write_html_part(part: Part, scratch: []u8, writer: *std.Io.Writer) void {
     writer.writeAll(converted) catch {};
 }
 
+/// The bytes of an image that travels inside the message, found by the
+/// `Content-ID` its `<img src="cid:...">` names. Null when the message has no
+/// such part. Only what a terminal can actually paint is worth returning, so
+/// anything that is not a PNG is refused here.
+pub fn image_body(raw: []const u8, content_id: []const u8, out: []u8) ?[]const u8 {
+    if (content_id.len == 0 or out.len == 0) return null;
+    const root = split_part(raw);
+    const root_type = content_type(header(root.headers, "content-type"));
+    if (root_type.media != .multipart) return null;
+
+    var found = Found{};
+    scan_multipart(root.body, root_type.boundary, 0, &found);
+    var parts: [max_image_parts]Part = undefined;
+    const count = collect_parts(root.body, root_type.boundary, 0, &parts);
+
+    for (parts[0..count]) |part| {
+        const id = header(part.headers, "content-id") orelse continue;
+        // "Content-ID: <logo@x>" is written with angle brackets.
+        const trimmed = std.mem.trim(u8, id, " \t<>>");
+        if (!std.mem.eql(u8, trimmed, content_id)) continue;
+
+        const kind = content_type(header(part.headers, "content-type"));
+        if (!std.mem.eql(u8, kind.media_name, "image/png")) return null;
+        const encoding = transfer_encoding(header(part.headers, "content-transfer-encoding"));
+        const decoded = transfer_decode(part.body, encoding, out);
+        if (decoded.len == 0) return null;
+        return decoded;
+    }
+    return null;
+}
+
+/// Every leaf part of a multipart message, in order. Bounded: a mail with more
+/// parts than this is not one a terminal is going to show.
+const max_image_parts = 32;
+
+fn collect_parts(body: []const u8, boundary: []const u8, depth: u8, out: []Part) usize {
+    if (depth >= max_depth or boundary.len == 0) return 0;
+    var count: usize = 0;
+    var index: usize = 0;
+    var part_start: ?usize = null;
+
+    while (index < body.len and count < out.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, body, index, '\n') orelse body.len;
+        const line = std.mem.trimEnd(u8, body[index..line_end], "\r");
+
+        if (std.mem.startsWith(u8, line, "--") and std.mem.eql(u8, line[2..], boundary)) {
+            if (part_start) |start| count += collect_part(trim_part_end(body[start..index]), depth, out[count..]);
+            part_start = @min(line_end + 1, body.len);
+        } else if (is_closing_delimiter(line, boundary)) {
+            if (part_start) |start| count += collect_part(trim_part_end(body[start..index]), depth, out[count..]);
+            return count;
+        }
+        if (line_end == body.len) break;
+        index = line_end + 1;
+    }
+    if (part_start) |start| {
+        if (start < body.len) count += collect_part(trim_part_end(body[start..]), depth, out[count..]);
+    }
+    return count;
+}
+
+fn collect_part(region: []const u8, depth: u8, out: []Part) usize {
+    if (out.len == 0) return 0;
+    const part = split_part(region);
+    const kind = content_type(header(part.headers, "content-type"));
+    if (kind.media == .multipart) return collect_parts(part.body, kind.boundary, depth + 1, out);
+    out[0] = part;
+    return 1;
+}
+
 const Media = enum { plain, html, multipart, other };
 
 const Type = struct {
+    /// The media type as written ("image/png"), for the parts that are not text.
+    media_name: []const u8 = "",
     media: Media = .plain,
     charset: Charset = .utf8,
     boundary: []const u8 = "",
@@ -246,6 +318,7 @@ fn content_type(value: ?[]const u8) Type {
 
     const media_end = std.mem.indexOfScalar(u8, text, ';') orelse text.len;
     const media = std.mem.trim(u8, text[0..media_end], " \t");
+    result.media_name = media;
     if (std.ascii.eqlIgnoreCase(media, "text/html")) {
         result.media = .html;
     } else if (std.ascii.startsWithIgnoreCase(media, "text/")) {
@@ -1003,4 +1076,31 @@ test "html_body keeps the HTML part instead of flattening it" {
     const html = html_body(raw, &out, &scratch);
     try testing.expect(html != null);
     try testing.expectEqualStrings("<p>hi</p>", std.mem.trim(u8, html.?, "\n"));
+}
+
+test "an image inside the message is found by its Content-ID" {
+    // A one-pixel PNG, base64.
+    const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const raw = "Content-Type: multipart/related; boundary=\"b\"\r\n" ++
+        "\r\n" ++
+        "--b\r\n" ++
+        "Content-Type: text/html\r\n" ++
+        "\r\n" ++
+        "<p><img src=\"cid:logo@x\"></p>\r\n" ++
+        "--b\r\n" ++
+        "Content-Type: image/png\r\n" ++
+        "Content-Transfer-Encoding: base64\r\n" ++
+        "Content-ID: <logo@x>\r\n" ++
+        "\r\n" ++ png_base64 ++ "\r\n" ++
+        "--b--\r\n";
+
+    var out: [1024]u8 = undefined;
+    const image = image_body(raw, "logo@x", &out).?;
+    try testing.expectEqual(@as(u8, 0x89), image[0]);
+    try testing.expectEqualStrings("PNG", image[1..4]);
+    try testing.expect(image.len > 50);
+
+    // Nothing by that name, and nothing that is not a PNG.
+    try testing.expect(image_body(raw, "other@x", &out) == null);
+    try testing.expect(image_body(raw, "", &out) == null);
 }

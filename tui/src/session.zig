@@ -102,6 +102,20 @@ pub const Deps = struct {
     /// first link when there is no HTML.
     open_external: ?*const fn (context: *anyopaque, html: []const u8, link: []const u8) void = null,
     open_external_context: *anyopaque = undefined,
+    /// Paints one image of the message at a cell, from its PNG bytes. False
+    /// when the terminal cannot draw it.
+    draw_image: ?*const fn (
+        context: *anyopaque,
+        png: []const u8,
+        x: u16,
+        y: u16,
+        columns: u16,
+        rows: u16,
+    ) bool = null,
+    draw_image_context: *anyopaque = undefined,
+    /// Takes every painted image away before the next frame is drawn.
+    clear_images: ?*const fn (context: *anyopaque) void = null,
+    clear_images_context: *anyopaque = undefined,
     /// Renders the HTML part to text with a text browser (w3m, lynx): that is
     /// what aerc and neomutt do, and it is why their mail looks laid out.
     render_html_text: ?*const fn (
@@ -112,6 +126,52 @@ pub const Deps = struct {
     ) ?[]const u8 = null,
     render_html_text_context: *anyopaque = undefined,
 };
+
+/// How many images one frame will paint: past a handful the mail is a gallery,
+/// not a message.
+const max_images_drawn: u8 = 8;
+const cell_width: u32 = 9;
+const cell_height: u32 = 18;
+/// An image taller than this is scaled down: a reader scrolls, it does not zoom.
+const max_image_rows: u32 = 12;
+
+const ImageSize = struct { width: u32, height: u32 };
+const ImageCells = struct { columns: u16, rows: u16 };
+
+/// An image that came with the message can be painted; one with an address
+/// cannot, without fetching it.
+fn is_local_image(key: []const u8) bool {
+    if (key.len == 0) return false;
+    return std.mem.indexOf(u8, key, "://") == null and
+        std.mem.indexOfScalar(u8, key, '/') == null and
+        std.mem.indexOfScalar(u8, key, '.') == null;
+}
+
+/// Width and height from a PNG's IHDR chunk. Anything else is refused: the
+/// terminal paints PNG, and a terminal cannot transcode a JPEG.
+fn png_size(bytes: []const u8) ?ImageSize {
+    if (bytes.len < 24) return null;
+    if (bytes[0] != 0x89 or bytes[1] != 'P' or bytes[2] != 'N' or bytes[3] != 'G') return null;
+    const width = std.mem.readInt(u32, bytes[16..20], .big);
+    const height = std.mem.readInt(u32, bytes[20..24], .big);
+    if (width == 0 or height == 0) return null;
+    return .{ .width = width, .height = height };
+}
+
+fn image_cells(size: ImageSize) ImageCells {
+    const wanted_rows = (size.height + cell_height - 1) / cell_height;
+    const scale = if (wanted_rows > max_image_rows)
+        @as(f64, @floatFromInt(max_image_rows)) / @as(f64, @floatFromInt(wanted_rows))
+    else
+        1.0;
+
+    const columns_f = @as(f64, @floatFromInt(size.width)) / @as(f64, @floatFromInt(cell_width)) * scale;
+    const rows_f = @as(f64, @floatFromInt(wanted_rows)) * scale;
+    return .{
+        .columns = @intFromFloat(@max(1.0, @min(columns_f, 255.0))),
+        .rows = @intFromFloat(@max(1.0, @min(rows_f, 255.0))),
+    };
+}
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -139,6 +199,13 @@ pub const Session = struct {
     raw_len: u32 = 0,
     /// The HTML part, and the reading view made from it.
     html_part: [core.limits.body_max]u8 = undefined,
+    /// The same HTML with each image replaced by a marker the reader can find
+    /// in the laid-out text.
+    html_marked: [core.limits.body_max * 2]u8 = undefined,
+    html_marked_len: u32 = 0,
+    /// Room for one decoded image, and the pixels-per-cell arithmetic that
+    /// turns it into a place on screen.
+    image_buffer: [core.limits.body_max]u8 = undefined,
     html_part_len: u32 = 0,
     /// Set when a text browser has to lay the HTML out before it can be shown.
     html_needs_browser: bool = false,
@@ -896,6 +963,8 @@ pub const Session = struct {
         const message = self.raw[0..self.raw_len];
         const part = core.mime.html_body(message, &self.html_part, &self.scratch_bytes) orelse return;
         self.html_part_len = @intCast(part.len);
+        const marked = core.html.mark_images(part, &self.html_marked);
+        self.html_marked_len = @intCast(marked.len);
 
         // A text browser lays mail out the way aerc and neomutt do: tables,
         // columns, lists. It needs the width of the reader, so it runs when the
@@ -905,7 +974,7 @@ pub const Session = struct {
             return;
         }
 
-        const rendered = core.html.render(part, &self.html_text, &self.html_links, &self.html_kinds);
+        const rendered = core.html.render(self.html_marked[0..self.html_marked_len], &self.html_text, &self.html_links, &self.html_kinds);
         self.html_len = @intCast(rendered.text.len);
         self.html_link_count = rendered.links.len;
         self.html_kind_count = rendered.kinds.len;
@@ -920,13 +989,13 @@ pub const Session = struct {
 
         const laid_out = browser(
             self.deps.render_html_text_context,
-            self.html_part[0..self.html_part_len],
+            self.html_marked[0..self.html_marked_len],
             width,
             &self.html_text,
         ) orelse {
             // No engine: fall back to our own fold rather than showing nothing.
             const rendered = core.html.render(
-                self.html_part[0..self.html_part_len],
+                self.html_marked[0..self.html_marked_len],
                 &self.html_text,
                 &self.html_links,
                 &self.html_kinds,
@@ -1482,6 +1551,56 @@ pub const Session = struct {
 
         self.flush();
         self.needs_render = false;
+        self.paint_images(lay);
+    }
+
+    /// Paints the images of the message over the text, at the markers the layout
+    /// left for them. Images from the network are not fetched: the reader says
+    /// what they are and o shows the mail in a browser.
+    fn paint_images(self: *Session, lay: layout_mod.Layout) void {
+        const clear = self.deps.clear_images orelse return;
+        if (self.state.view != .reader) return;
+        clear(self.deps.clear_images_context);
+
+        const draw = self.deps.draw_image orelse return;
+        if (self.html_view == false or self.html_len == 0) return;
+
+        const text = self.reader_text();
+        var row: u16 = 0;
+        var painted: u8 = 0;
+        while (row < lay.reader_rows and painted < max_images_drawn) : (row += 1) {
+            const index = self.state.reader_scroll + row;
+            if (index >= self.wrapped.len) break;
+            const line = self.wrapped.at(index, text);
+
+            const marker = std.mem.indexOf(u8, line, "[IMG:") orelse continue;
+            const rest = line[marker + 5 ..];
+            const close = std.mem.indexOfScalar(u8, rest, ']') orelse continue;
+            const key = rest[0..close];
+            if (!is_local_image(key)) continue;
+
+            const png = core.mime.image_body(
+                self.raw[0..self.raw_len],
+                key,
+                &self.image_buffer,
+            ) orelse continue;
+            const size = png_size(png) orelse continue;
+            const cells = image_cells(size);
+            if (cells.columns == 0 or cells.rows == 0) continue;
+            const height: u16 = @min(cells.rows, lay.reader_rows -| row);
+            const width: u16 = @min(cells.columns, lay.columns -| 1);
+            if (height == 0 or width == 0) continue;
+
+            _ = draw(
+                self.deps.draw_image_context,
+                png,
+                0,
+                lay.reader_body_y + row,
+                width,
+                height,
+            );
+            painted += 1;
+        }
     }
 
     fn flush(self: *Session) void {
@@ -3670,4 +3789,140 @@ test "an account out of scope is never connected" {
     rig.session.boot();
     _ = rig.session.state.mailbox;
     try testing.expectEqual(@as(u32, 1), rig.fake_mail.fetch_calls);
+}
+
+test "an image marker is only painted when it came with the message" {
+    try testing.expect(is_local_image("logo@x"));
+    try testing.expect(!is_local_image("https://example.com/logo.png"));
+    try testing.expect(!is_local_image(""));
+}
+
+test "a PNG knows how big it is, and how many cells that is" {
+    var png: [33]u8 = @splat(0);
+    png[0] = 0x89;
+    png[1] = 'P';
+    png[2] = 'N';
+    png[3] = 'G';
+    std.mem.writeInt(u32, png[16..20], 90, .big);
+    std.mem.writeInt(u32, png[20..24], 36, .big);
+
+    const size = png_size(&png).?;
+    try testing.expectEqual(@as(u32, 90), size.width);
+    try testing.expectEqual(@as(u32, 36), size.height);
+    const cells = image_cells(size);
+    try testing.expectEqual(@as(u16, 10), cells.columns);
+    try testing.expectEqual(@as(u16, 2), cells.rows);
+
+    // Not a PNG: refused rather than painted as garbage.
+    try testing.expect(png_size("GIF89a") == null);
+    const tiny: [4]u8 = @splat(0);
+    try testing.expect(png_size(&tiny) == null);
+}
+
+test "a tall image is scaled down to the reader, not to the page" {
+    var png: [33]u8 = @splat(0);
+    png[0] = 0x89;
+    png[1] = 'P';
+    png[2] = 'N';
+    png[3] = 'G';
+    std.mem.writeInt(u32, png[16..20], 900, .big);
+    std.mem.writeInt(u32, png[20..24], 1800, .big);
+
+    const cells = image_cells(png_size(&png).?);
+    try testing.expectEqual(@as(u16, 12), cells.rows);
+    try testing.expect(cells.columns > 0 and cells.columns < 100);
+}
+
+const ImageSink = struct {
+    calls: u8 = 0,
+    columns: u16 = 0,
+    rows: u16 = 0,
+    bytes: usize = 0,
+    cleared: u8 = 0,
+
+    fn draw(
+        context: *anyopaque,
+        png: []const u8,
+        x: u16,
+        y: u16,
+        columns: u16,
+        rows: u16,
+    ) bool {
+        const self: *ImageSink = @ptrCast(@alignCast(context));
+        _ = .{ x, y };
+        self.calls += 1;
+        self.bytes = png.len;
+        self.columns = columns;
+        self.rows = rows;
+        return true;
+    }
+
+    fn clear(context: *anyopaque) void {
+        const self: *ImageSink = @ptrCast(@alignCast(context));
+        self.cleared += 1;
+    }
+};
+
+test "an image that came with the message is painted where its marker landed" {
+    // A 90x36 PNG, one pixel per byte of IHDR plus a body.
+    const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const raw = "Content-Type: multipart/related; boundary=\"b\"\n" ++
+        "\n" ++
+        "--b\n" ++
+        "Content-Type: text/html\n" ++
+        "\n" ++
+        "<p>Antes</p><img src=\"cid:logo@x\" alt=\"Logo\">\n" ++
+        "--b\n" ++
+        "Content-Type: image/png\n" ++
+        "Content-Transfer-Encoding: base64\n" ++
+        "Content-ID: <logo@x>\n" ++
+        "\n" ++ png_base64 ++ "\n" ++
+        "--b--\n";
+
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: ImageSink = .{};
+    rig.session.deps.draw_image = ImageSink.draw;
+    rig.session.deps.draw_image_context = &sink;
+    rig.session.deps.clear_images = ImageSink.clear;
+    rig.session.deps.clear_images_context = &sink;
+
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw(raw);
+
+    // The marker is in the laid-out text, so the reader has somewhere to paint.
+    try testing.expect(std.mem.indexOf(u8, rig.session.html_text[0..rig.session.html_len], "[IMG:logo@x]") != null);
+
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    try testing.expectEqual(@as(u8, 1), sink.calls);
+    try testing.expect(sink.bytes > 50);
+    try testing.expect(sink.columns > 0 and sink.rows > 0);
+    try testing.expect(sink.cleared >= 1);
+}
+
+test "an image with an address is not fetched, so it is not painted" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: ImageSink = .{};
+    rig.session.deps.draw_image = ImageSink.draw;
+    rig.session.deps.draw_image_context = &sink;
+
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw("Content-Type: text/html\n\n<p><img src=\"https://example.com/x.png\" alt=\"Foto\"></p>");
+
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+    try testing.expectEqual(@as(u8, 0), sink.calls);
 }

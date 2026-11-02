@@ -8,6 +8,7 @@ const core = @import("core");
 const net = @import("net");
 
 const cli = @import("cli.zig");
+const graphics = @import("graphics.zig");
 const os = @import("os.zig");
 const session_mod = @import("session.zig");
 const setup_session = @import("setup_session.zig");
@@ -134,6 +135,10 @@ fn run_session(
         .open_external_context = &browser,
         .render_html_text = renderHtmlTextThunk,
         .render_html_text_context = &browser,
+        .draw_image = drawImageThunk,
+        .draw_image_context = &browser,
+        .clear_images = clearImagesThunk,
+        .clear_images_context = &browser,
     }) catch return .{ .message = "Not enough memory to start" };
     defer session.deinit();
 
@@ -149,6 +154,25 @@ const Browser = struct {
     gpa: std.mem.Allocator = undefined,
     system: SessionSystem = undefined,
 };
+
+/// One image of the message, painted where the layout left its marker.
+fn drawImageThunk(
+    context: *anyopaque,
+    png: []const u8,
+    x: u16,
+    y: u16,
+    columns: u16,
+    rows: u16,
+) bool {
+    const self: *Browser = @ptrCast(@alignCast(context));
+    if (!graphics.supported()) return false;
+    return graphics.draw(self.system, png, x, y, columns, rows);
+}
+
+fn clearImagesThunk(context: *anyopaque) void {
+    const self: *Browser = @ptrCast(@alignCast(context));
+    graphics.clear(self.system);
+}
 
 fn openUrlThunk(context: *anyopaque, url: []const u8) void {
     const self: *Browser = @ptrCast(@alignCast(context));
@@ -251,13 +275,8 @@ fn renderHtmlTextThunk(
     const self: *Browser = @ptrCast(@alignCast(context));
     if (html.len == 0 or out.len == 0) return null;
 
-    // An image becomes its alt text: a text browser has no pixels to give it.
-    const labelled = self.gpa.alloc(u8, core.limits.body_max * 2) catch return null;
-    defer self.gpa.free(labelled);
-    const document = core.html.label_images(html, labelled);
-
     var page_buffer: [512]u8 = undefined;
-    const path = writeHtmlFile(self, document, &page_buffer, 0) orelse return null;
+    const path = writeHtmlFile(self, html, &page_buffer, 0) orelse return null;
 
     var width_buffer: [16]u8 = undefined;
     const width = std.fmt.bufPrint(&width_buffer, "{d}", .{columns}) catch return null;

@@ -22,6 +22,10 @@ pub const Render = struct {
 
 /// Renders `html` into `out`, recording the link ranges in `link_buffer`.
 pub fn render(html: []const u8, out: []u8, link_buffer: []links.Link, kind_buffer: []Kind) Render {
+    // Blank lines never start with content, so every entry is filled in first:
+    // an uninitialised kind would be read as a corrupt enum.
+    if (kind_buffer.len > 0) @memset(kind_buffer, .body);
+
     var state = State{
         .input = html,
         .writer = std.Io.Writer.fixed(out),
@@ -383,10 +387,11 @@ fn entity(text: []const u8, index: usize) ?Decoded {
     return null;
 }
 
-/// Replaces every `<img>` with the text a terminal can show: its alt text when
-/// it has one, `[imagen]` when it does not. A text browser draws words, not
-/// pictures, and an image nobody mentions is worse than a placeholder.
-pub fn label_images(html: []const u8, out: []u8) []const u8 {
+/// Replaces every `<img>` with a marker the reader can find after the layout:
+/// `[IMG:cid]` for an image that came inside the message, `[IMG:url]` for one
+/// fetched from the network. The reader paints the first kind in the terminal
+/// and prints what it knows about the second.
+pub fn mark_images(html: []const u8, out: []u8) []const u8 {
     var writer = std.Io.Writer.fixed(out);
     var index: usize = 0;
 
@@ -409,9 +414,16 @@ pub fn label_images(html: []const u8, out: []u8) []const u8 {
             continue;
         }
 
+        const source = attribute(tag, "src");
         const alt = attribute(tag, "alt");
-        if (alt.len > 0) {
-            writer.print("[{s}]", .{alt}) catch {};
+
+        // An image inside the message gets a marker the reader can paint over.
+        // One from the network cannot be drawn here; it is named, not fetched.
+        if (std.ascii.startsWithIgnoreCase(source, "cid:")) {
+            writer.print("[IMG:{s}]", .{source["cid:".len..]}) catch {};
+            if (alt.len > 0) writer.print(" {s}", .{alt}) catch {};
+        } else if (alt.len > 0) {
+            writer.print("[imagen: {s}]", .{alt}) catch {};
         } else {
             writer.writeAll("[imagen]") catch {};
         }
@@ -531,10 +543,10 @@ test "an anchor whose text is the address is not written twice" {
     try testing.expectEqualStrings("https://example.com/", rendered.links[0].text(rendered.text));
 }
 
-test "an image becomes words: its alt text, or a placeholder" {
+test "an image becomes a marker the reader can find" {
     var out: [256]u8 = undefined;
-    const html = "<p>a<img src=\"x.png\" alt=\"Foto\">b<img src=\"y.png\">c</p>";
-    try testing.expectEqualStrings("<p>a[Foto]b[imagen]c</p>", label_images(html, &out));
+    const html = "<p>a<img src=\"cid:logo@x\" alt=\"Logo\">b<img src=\"https://x/y.png\">c</p>";
+    try testing.expectEqualStrings("<p>a[IMG:logo@x] Logob[imagen]c</p>", mark_images(html, &out));
 }
 
 test "entities become their characters, and nbsp is a space" {
