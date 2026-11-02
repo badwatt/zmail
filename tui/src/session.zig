@@ -234,6 +234,8 @@ pub const Session = struct {
     /// in the laid-out text.
     html_marked: [core.limits.body_max * 2]u8 = undefined,
     html_marked_len: u32 = 0,
+    /// Whether the reader already explained why no picture appeared.
+    image_hint_shown: bool = false,
     /// Signature of the layer on screen, so an unchanged one is left alone.
     image_painted: u64 = 0,
     /// Room for one decoded image, and the pixels-per-cell arithmetic that

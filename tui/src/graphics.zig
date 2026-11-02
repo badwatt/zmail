@@ -19,6 +19,14 @@ const raw_chunk_max: usize = chunk_max / 4 * 3;
 
 /// Whether this terminal speaks the kitty graphics protocol.
 pub fn supported() bool {
+    // The escape hatch, for setups that know what they are doing.
+    if (Env.get("AMAIL_IMAGES")) |value| {
+        if (std.mem.eql(u8, value, "blocks")) return false;
+        if (std.mem.eql(u8, value, "kitty")) return true;
+    }
+    // Inside a multiplexer the sequences belong to the multiplexer, and what it
+    // makes of them is its business: half blocks never break there.
+    if (Env.get("TMUX") != null or Env.get("STY") != null) return false;
     if (Env.get("KITTY_WINDOW_ID")) |_| return true;
     const term = Env.get("TERM") orelse "";
     if (std.mem.indexOf(u8, term, "kitty") != null) return true;
@@ -142,8 +150,12 @@ const testing = std.testing;
 var fake_kitty: bool = false;
 var fake_term: []const u8 = "xterm-256color";
 var fake_program: []const u8 = "";
+var fake_tmux: bool = false;
+var fake_images: []const u8 = "";
 
 fn fakeGet(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "AMAIL_IMAGES")) return if (fake_images.len > 0) fake_images else null;
+    if (std.mem.eql(u8, name, "TMUX")) return if (fake_tmux) "/tmp/tmux-1000/default,1,0" else null;
     if (std.mem.eql(u8, name, "KITTY_WINDOW_ID")) return if (fake_kitty) "1" else null;
     if (std.mem.eql(u8, name, "TERM")) return fake_term;
     if (std.mem.eql(u8, name, "TERM_PROGRAM")) return if (fake_program.len > 0) fake_program else null;
@@ -158,7 +170,20 @@ test "supported: the terminals that know the protocol, and the rest" {
     fake_kitty = false;
     fake_term = "xterm-256color";
     fake_program = "";
+    fake_tmux = false;
     try testing.expect(!supported());
+
+    // Inside tmux the protocol is the multiplexer's problem.
+    fake_tmux = true;
+    try testing.expect(!supported());
+    fake_tmux = false;
+
+    // And the override settles it either way.
+    fake_kitty = true;
+    fake_images = "blocks";
+    try testing.expect(!supported());
+    fake_images = "";
+    fake_kitty = false;
 
     fake_kitty = true;
     try testing.expect(supported());
