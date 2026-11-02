@@ -85,7 +85,9 @@ pub fn place(system: System, id: u32, x: u16, y: u16, columns: u16, rows: u16) b
 pub fn clear_all(system: System) void {
     // q=2: the terminal must not answer. Its answers arrive on stdin, and a
     // reply that reads like "1" switches mailbox.
-    system.write("\x1b_Ga=d,q=2\x1b\\") catch {};
+    // d=a is spelled out: without it some terminals keep the placements, and a
+    // picture from the last mail stays on screen.
+    system.write("\x1b_Ga=d,d=a,q=2\x1b\\") catch {};
 }
 
 /// Paints `png` with its top-left corner at (x, y), `columns` by `rows` cells.

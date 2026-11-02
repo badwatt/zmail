@@ -205,9 +205,19 @@ pub const Screen = struct {
                 index += 1;
                 continue;
             };
+            const cells = cell_width(ch);
+            if (cells == 0) {
+                // A combining mark belongs to the character before it.
+                index += span;
+                continue;
+            }
+            if (written + cells > width) break;
             self.put(cell_x, y, ch, style);
-            cell_x += 1;
-            written += 1;
+            // A wide glyph covers the cell after it: leave a blank there so the
+            // row's later columns do not shift by one.
+            if (cells == 2) self.put(cell_x + 1, y, ' ', style);
+            cell_x += cells;
+            written += cells;
             index += span;
         }
         return written;
@@ -333,12 +343,44 @@ fn write_glyph(writer: *std.Io.Writer, ch: u21) std.Io.Writer.Error!void {
 }
 
 /// Number of cells `text` occupies, counting codepoints, bounded by its length.
+/// Cells a codepoint occupies. A terminal lays out an emoji or a CJK glyph in
+/// two, and a combining mark in none: counting every codepoint as one is what
+/// pushes a column out of line and lets a row spill into the next one.
+pub fn cell_width(codepoint: u21) u16 {
+    if (codepoint == 0) return 0;
+    // Zero width: combining marks, joiners, variation selectors.
+    if (codepoint < 0x20) return 0;
+    if (codepoint >= 0x0300 and codepoint <= 0x036f) return 0;
+    if (codepoint >= 0x200b and codepoint <= 0x200f) return 0;
+    if (codepoint >= 0xfe00 and codepoint <= 0xfe0f) return 0;
+    if (codepoint == 0xfeff) return 0;
+
+    // Wide: the East Asian blocks, and emoji, which terminals double.
+    if (codepoint >= 0x1100 and codepoint <= 0x115f) return 2;
+    if (codepoint >= 0x2e80 and codepoint <= 0xa4cf) return 2;
+    if (codepoint >= 0xac00 and codepoint <= 0xd7a3) return 2;
+    if (codepoint >= 0xf900 and codepoint <= 0xfaff) return 2;
+    if (codepoint >= 0xfe30 and codepoint <= 0xfe6f) return 2;
+    if (codepoint >= 0xff00 and codepoint <= 0xff60) return 2;
+    if (codepoint >= 0xffe0 and codepoint <= 0xffe6) return 2;
+    if (codepoint >= 0x1f300 and codepoint <= 0x1f64f) return 2;
+    if (codepoint >= 0x1f900 and codepoint <= 0x1f9ff) return 2;
+    if (codepoint >= 0x1f680 and codepoint <= 0x1f6ff) return 2;
+    if (codepoint >= 0x1f000 and codepoint <= 0x1f02f) return 2;
+    if (codepoint >= 0x1fa70 and codepoint <= 0x1faff) return 2;
+    if (codepoint >= 0x20000 and codepoint <= 0x3fffd) return 2;
+    return 1;
+}
+
 pub fn text_columns(text: []const u8) u16 {
     var count: u16 = 0;
     var index: usize = 0;
-    while (index < text.len) : (count += 1) {
+    while (index < text.len) {
         const sequence_len = std.unicode.utf8ByteSequenceLength(text[index]) catch 1;
-        index += @min(@as(usize, sequence_len), text.len - index);
+        const span = @min(@as(usize, sequence_len), text.len - index);
+        const codepoint = std.unicode.utf8Decode(text[index..][0..span]) catch '?';
+        count += cell_width(codepoint);
+        index += span;
     }
     return count;
 }
@@ -570,4 +612,28 @@ test "text_columns counts codepoints, not bytes" {
     try testing.expectEqual(@as(u16, 3), text_columns("olá"));
     try testing.expectEqual(@as(u16, 0), text_columns(""));
     try testing.expectEqual(@as(u16, 2), text_columns("a\xff"));
+}
+
+test "an emoji takes two cells and a combining mark none" {
+    try testing.expectEqual(@as(u16, 1), cell_width('a'));
+    try testing.expectEqual(@as(u16, 2), cell_width(0x1f389)); // 🎉
+    try testing.expectEqual(@as(u16, 0), cell_width(0x0301)); // combining acute
+    try testing.expectEqual(@as(u16, 2), cell_width(0x4e00)); // 一
+}
+
+test "a row with an emoji occupies the same columns as one without" {
+    var screen: Screen = .{};
+    screen.resize(20, 2);
+    const plain = Style{};
+
+    // "🎉[11.11" is seven codepoints but eight cells.
+    _ = screen.put_text(0, 0, "🎉[11.11", 20, plain);
+    _ = screen.put_text(0, 1, "ab", 20, plain);
+
+    try testing.expectEqual(@as(u16, 8), text_columns("🎉[11.11"));
+    // Whatever is written after the emoji starts one cell later than the naive
+    // count would say, and nothing spills into the next row.
+    _ = screen.put_text(0, 1, "1234567", 20, plain);
+    var buffer: [32]u8 = undefined;
+    try testing.expectEqualStrings("1234567", std.mem.trimEnd(u8, screen.row_text(1, &buffer), " "));
 }
