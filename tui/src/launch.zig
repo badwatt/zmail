@@ -8,7 +8,6 @@ const core = @import("core");
 const net = @import("net");
 
 const cli = @import("cli.zig");
-const graphics = @import("graphics.zig");
 const halfblocks = @import("halfblocks.zig");
 const os = @import("os.zig");
 const session_mod = @import("session.zig");
@@ -200,23 +199,10 @@ fn drawImageThunk(
 ) bool {
     const self: *Browser = @ptrCast(@alignCast(context));
 
-    // The picture at full resolution when the terminal speaks kitty. The layer
-    // is wiped before every frame (there is no way to move a placement), so the
-    // bytes come from the message cache and go out again: kilobytes, no decode,
-    // no network.
-    if (graphics.supported()) {
-        if (graphics.transmit(self.system, png_bytes, id)) {
-            if (graphics.place(self.system, id, x, y, columns, rows)) return true;
-        }
-    }
-
-    // The picture at full resolution when the terminal speaks kitty: it scales
-    // it itself, with a real resampler, which is why it does not look blocky.
-    // Half blocks are the fallback, and they are what any terminal can do.
-    if (graphics.supported()) {
-        if (graphics.draw(self.system, png_bytes, x, y, columns, rows)) return true;
-    }
-
+    _ = id;
+    // Half blocks: two pixels per cell with 24-bit colour. Every terminal can
+    // do it, and a picture made of cells cannot be left behind, moved by the
+    // terminal, or painted over the wrong screen.
     const work = self.gpa.alloc(u8, png_bytes.len + core.limits.body_max * 2) catch return false;
     defer self.gpa.free(work);
     const rgba = self.gpa.alloc(u8, core.limits.body_max) catch return false;
@@ -227,8 +213,8 @@ fn drawImageThunk(
 }
 
 fn clearImagesThunk(context: *anyopaque) void {
-    const self: *Browser = @ptrCast(@alignCast(context));
-    if (graphics.supported()) graphics.clear_all(self.system);
+    // Blocks are cells: the next frame paints over them, nothing to clean.
+    _ = context;
 }
 
 fn openUrlThunk(context: *anyopaque, url: []const u8) void {
