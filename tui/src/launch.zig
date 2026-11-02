@@ -8,7 +8,6 @@ const core = @import("core");
 const net = @import("net");
 
 const cli = @import("cli.zig");
-const graphics = @import("graphics.zig");
 const os = @import("os.zig");
 const session_mod = @import("session.zig");
 const setup_session = @import("setup_session.zig");
@@ -133,11 +132,8 @@ fn run_session(
         .open_url_context = &browser,
         .open_external = openExternalThunk,
         .open_external_context = &browser,
-        .render_html = renderHtmlThunk,
-        .render_html_context = &browser,
-        .clear_html = clearHtmlThunk,
-        .clear_html_context = &browser,
-        .can_draw = canDrawThunk,
+        .render_html_text = renderHtmlTextThunk,
+        .render_html_text_context = &browser,
     }) catch return .{ .message = "Not enough memory to start" };
     defer session.deinit();
 
@@ -244,89 +240,78 @@ fn writeHtmlFile(
     return path;
 }
 
-/// Renders the HTML part into the terminal: chromium turns it into a PNG of the
-/// window size and the kitty graphics protocol paints it. No window opens; the
-/// picture is of the page.
-fn renderHtmlThunk(
+/// Lays the HTML out with a text browser, the way aerc and neomutt do. w3m and
+/// lynx both print tables as tables and links as text plus their address.
+fn renderHtmlTextThunk(
     context: *anyopaque,
     html: []const u8,
     columns: u16,
-    rows: u16,
-    offset_px: u32,
-) bool {
+    out: []u8,
+) ?[]const u8 {
     const self: *Browser = @ptrCast(@alignCast(context));
-    if (self.cache_dir.len == 0 or !graphics.supported()) return false;
+    if (html.len == 0 or out.len == 0) return null;
 
     var page_buffer: [512]u8 = undefined;
-    const html_path = writeHtmlFile(self, html, &page_buffer, offset_px) orelse return false;
-    var png_buffer: [512]u8 = undefined;
-    const png_path = std.fmt.bufPrint(&png_buffer, "{s}/amail/message.png", .{self.cache_dir}) catch
-        return false;
+    const path = writeHtmlFile(self, html, &page_buffer, 0) orelse return null;
 
-    var size_buffer: [64]u8 = undefined;
-    const size = std.fmt.bufPrint(&size_buffer, "--window-size={d},{d}", .{
-        @as(u32, columns) * 9,
-        @as(u32, rows) * 18,
-    }) catch return false;
-    var shot_buffer: [600]u8 = undefined;
-    const shot = std.fmt.bufPrint(&shot_buffer, "--screenshot={s}", .{png_path}) catch return false;
-    var url_buffer: [600]u8 = undefined;
-    const url = std.fmt.bufPrint(&url_buffer, "file://{s}", .{html_path}) catch return false;
+    var width_buffer: [16]u8 = undefined;
+    const width = std.fmt.bufPrint(&width_buffer, "{d}", .{columns}) catch return null;
 
-    // Whichever Chromium this machine calls Chromium. A missing engine is a
-    // refusal, not a crash: the caller says so and offers the browser instead.
-    const engines = [_][]const u8{ "chromium", "chromium-browser", "google-chrome", "chrome" };
-    var ran = false;
-    for (engines) |engine| {
-        var child = std.process.spawn(self.io, .{
-            .argv = &.{
-                engine,              "--headless",
-                "--disable-gpu",     "--no-sandbox",
-                "--hide-scrollbars", size,
-                shot,                url,
-            },
-            .stdin = .ignore,
-            .stdout = .ignore,
-            .stderr = .ignore,
-        }) catch continue;
+    const attempts = [_]struct { engine: []const u8, argv: []const []const u8 }{
+        // w3m prints the address after its text, which is what keeps links
+        // clickable in the reader.
+        // The width is its own argument: w3m prints its usage for "-cols=80".
+        // Numbered references: the body stays clean and the addresses are
+        // listed at the end, which is what w3m looks like under aerc.
+        .{ .engine = "w3m", .argv = &.{
+            "w3m", "-dump", "-T", "text/html", "-cols", width, "-o", "display_link_number=1", path,
+        } },
+        .{ .engine = "lynx", .argv = &.{ "lynx", "-dump", "-nolist", "-width", width, path } },
+    };
+
+    for (attempts) |attempt| {
+        var child = spawn_engine(self, attempt.engine, attempt.argv) orelse continue;
+        const stdout = child.stdout orelse continue;
+        var total: usize = 0;
+        while (total < out.len) {
+            const read = stdout.readPositionalAll(self.io, out[total..], @intCast(total)) catch break;
+            if (read == 0) break;
+            total += read;
+        }
         _ = child.wait(self.io) catch {};
-        ran = true;
-        break;
+        if (total == 0) continue;
+        return trim_lines(out[0..total]);
     }
-    if (!ran) {
-        // Nix keeps Chromium in the store as a dependency but not on the path:
-        // the engine is there, it just is not installed.
-        var found_buffer: [512]u8 = undefined;
-        const engine = find_engine_in_store(self, &found_buffer) orelse return false;
-        var child = std.process.spawn(self.io, .{
-            .argv = &.{
-                engine,              "--headless",
-                "--disable-gpu",     "--no-sandbox",
-                "--hide-scrollbars", size,
-                shot,                url,
-            },
-            .stdin = .ignore,
-            .stdout = .ignore,
-            .stderr = .ignore,
-        }) catch return false;
-        _ = child.wait(self.io) catch {};
-    }
-
-    const file = std.Io.Dir.cwd().openFile(self.io, png_path, .{}) catch return false;
-    defer file.close(self.io);
-    const stat = file.stat(self.io) catch return false;
-    if (stat.size == 0 or stat.size > max_screenshot) return false;
-
-    const bytes = self.gpa.alloc(u8, @intCast(stat.size)) catch return false;
-    defer self.gpa.free(bytes);
-    const read = file.readPositionalAll(self.io, bytes, 0) catch return false;
-    if (read == 0) return false;
-    return graphics.draw(self.system, bytes[0..read], 0, 0, columns, rows);
+    return null;
 }
 
-/// A Chromium that is in the Nix store but not on the path. Bounded: a few
-/// dozen candidates at most, and the first that has a binary wins.
-fn find_engine_in_store(self: *Browser, buffer: []u8) ?[]const u8 {
+/// Spawns an engine from the path, or from the Nix store where these live as
+/// dependencies rather than installed programs.
+fn spawn_engine(self: *Browser, name: []const u8, argv: []const []const u8) ?std.process.Child {
+    var child = std.process.spawn(self.io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch null;
+    if (child) |*process| return process.*;
+
+    var found_buffer: [512]u8 = undefined;
+    const engine = find_in_store(self, name, &found_buffer) orelse return null;
+    var argv_buffer: [8][]const u8 = undefined;
+    if (argv.len > argv_buffer.len) return null;
+    @memcpy(argv_buffer[0..argv.len], argv);
+    argv_buffer[0] = engine;
+    const second = std.process.spawn(self.io, .{
+        .argv = argv_buffer[0..argv.len],
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .ignore,
+    }) catch return null;
+    return second;
+}
+
+fn find_in_store(self: *Browser, name: []const u8, buffer: []u8) ?[]const u8 {
     var dir = std.Io.Dir.cwd().openDir(self.io, "/nix/store", .{ .iterate = true }) catch
         return null;
     defer dir.close(self.io);
@@ -335,12 +320,14 @@ fn find_engine_in_store(self: *Browser, buffer: []u8) ?[]const u8 {
     var seen: u32 = 0;
     while (iterator.next(self.io) catch null) |entry| {
         if (entry.kind != .directory) continue;
-        if (std.mem.indexOf(u8, entry.name, "chromium-") == null) continue;
+        var prefix: [16]u8 = undefined;
+        const wanted = std.fmt.bufPrint(&prefix, "{s}-", .{name}) catch return null;
+        if (!std.mem.startsWith(u8, entry.name, wanted)) continue;
         if (std.mem.indexOf(u8, entry.name, ".drv") != null) continue;
         seen += 1;
         if (seen > 64) break;
 
-        const path = std.fmt.bufPrint(buffer, "/nix/store/{s}/bin/chromium", .{entry.name}) catch
+        const path = std.fmt.bufPrint(buffer, "/nix/store/{s}/bin/{s}", .{ entry.name, name }) catch
             return null;
         const file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch continue;
         file.close(self.io);
@@ -349,19 +336,13 @@ fn find_engine_in_store(self: *Browser, buffer: []u8) ?[]const u8 {
     return null;
 }
 
-/// Whether this terminal can show a picture at all: the reader says which of
-/// the two things is missing instead of blaming the engine for both.
-fn canDrawThunk() bool {
-    return graphics.supported();
+/// A text browser pads its output with blank lines; a reader does not want them
+/// at the end.
+fn trim_lines(text: []u8) []const u8 {
+    var end = text.len;
+    while (end > 0 and (text[end - 1] == '\n' or text[end - 1] == ' ' or text[end - 1] == '\r')) end -= 1;
+    return text[0..end];
 }
-
-fn clearHtmlThunk(context: *anyopaque) void {
-    const self: *Browser = @ptrCast(@alignCast(context));
-    graphics.clear(self.system);
-}
-
-/// Pictures of mail, not archives.
-const max_screenshot: u64 = 16 * 1024 * 1024;
 
 const max_accounts = core.config.max_accounts;
 

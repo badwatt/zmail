@@ -102,26 +102,16 @@ pub const Deps = struct {
     /// first link when there is no HTML.
     open_external: ?*const fn (context: *anyopaque, html: []const u8, link: []const u8) void = null,
     open_external_context: *anyopaque = undefined,
-    /// Draws the HTML part as a picture in the terminal (kitty graphics).
-    /// False when this terminal or this machine cannot.
-    render_html: ?*const fn (
+    /// Renders the HTML part to text with a text browser (w3m, lynx): that is
+    /// what aerc and neomutt do, and it is why their mail looks laid out.
+    render_html_text: ?*const fn (
         context: *anyopaque,
         html: []const u8,
         columns: u16,
-        rows: u16,
-        offset_px: u32,
-    ) bool = null,
-    render_html_context: *anyopaque = undefined,
-    clear_html: ?*const fn (context: *anyopaque) void = null,
-    clear_html_context: *anyopaque = undefined,
-    /// Whether this terminal can show pictures at all, so the reader can say
-    /// which of the two things is missing.
-    can_draw: ?*const fn () bool = null,
+        out: []u8,
+    ) ?[]const u8 = null,
+    render_html_text_context: *anyopaque = undefined,
 };
-
-/// How many pixels one terminal cell is worth when a page is drawn.
-const cell_height: u32 = 18;
-const cell_width: u32 = 9;
 
 pub const Session = struct {
     gpa: std.mem.Allocator,
@@ -150,19 +140,15 @@ pub const Session = struct {
     /// The HTML part, and the reading view made from it.
     html_part: [core.limits.body_max]u8 = undefined,
     html_part_len: u32 = 0,
+    /// Set when a text browser has to lay the HTML out before it can be shown.
+    html_needs_browser: bool = false,
     html_text: [core.limits.body_max]u8 = undefined,
     html_len: u32 = 0,
     /// Which view the reader is showing. HTML only when the message has it.
     html_view: bool = false,
     /// Whether the HTML part has already been rendered to text.
     html_ready: bool = false,
-    /// Set when a picture of the mail is on screen: scrolling redraws it,
-    /// anything else takes it away.
-    image_shown: bool = false,
-    /// How far into the page the picture starts, in rows.
-    image_scroll: u32 = 0,
-    /// Set by the picture key: paint the frame, then the picture over it.
-    want_image: bool = false,
+
     /// Where a mouse drag started and where it is now. A drag copies; a click
     /// still opens a link.
     selection: ?selection_mod.Selection = null,
@@ -562,13 +548,10 @@ pub const Session = struct {
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
-        // A picture is not the screen: it scrolls, and the rest takes it away.
-        if (self.image_shown) return self.picture_key(key);
         // Views are not commands: the core has no opinion about them.
         if (key == .char and self.state.view == .reader) {
             switch (key.char) {
                 'H' => return self.toggle_html(),
-                'V' => return self.open_picture(),
                 'o' => return self.open_external_message(),
                 else => {},
             }
@@ -634,99 +617,8 @@ pub const Session = struct {
 
     /// A picture of the mail, drawn in the terminal: what a mail client shows,
     /// as near as a terminal can get.
-    fn open_picture(self: *Session) bool {
-        if (!self.body_loaded) return false;
-        if (self.html_part_len == 0) {
-            self.state.set_status("This message has no HTML version", .{});
-            self.needs_render = true;
-            return true;
-        }
-        if (self.deps.can_draw) |can| {
-            if (!can()) {
-                self.state.set_status("This terminal cannot show pictures (ghostty or kitty can)", .{});
-                self.needs_render = true;
-                return true;
-            }
-        } else if (self.deps.render_html == null) {
-            self.state.set_status("This terminal cannot show pictures; o opens it elsewhere", .{});
-            self.needs_render = true;
-            return true;
-        }
-        self.want_image = true;
-        self.image_scroll = 0;
-        self.state.set_status("HTML · j/k scroll · q goes back", .{});
-        self.needs_render = true;
-        return true;
-    }
-
     /// Keys while the picture is up: scroll it, or leave.
-    fn picture_key(self: *Session, key: input.Key) bool {
-        const page = @max(1, self.size.rows -| 2);
-        switch (key) {
-            .char => |codepoint| switch (codepoint) {
-                'j' => self.scroll_image(1),
-                'k' => self.scroll_image(-1),
-                ' ' => self.scroll_image(page),
-                'q', 'V' => self.dismiss_image(),
-                else => {},
-            },
-            .down => self.scroll_image(1),
-            .up => self.scroll_image(-1),
-            .page_down => self.scroll_image(page),
-            .page_up => self.scroll_image(-@as(i32, page)),
-            .escape => self.dismiss_image(),
-            .mouse => |mouse| switch (mouse.button) {
-                .wheel_down => self.scroll_image(3),
-                .wheel_up => self.scroll_image(-3),
-                else => {},
-            },
-            else => {},
-        }
-        return true;
-    }
-
-    fn scroll_image(self: *Session, rows: i32) void {
-        const next = @as(i64, self.image_scroll) + rows;
-        self.image_scroll = @intCast(@max(0, next));
-        // The frame under the picture is unchanged; only the page moves.
-        self.want_image = true;
-        self.paint_image(layout_mod.Layout.compute(
-            self.size.columns,
-            self.size.rows,
-            self.state.accounts.max_label(),
-        ));
-        // No frame after the picture: repainting the text would erase it.
-        self.needs_render = false;
-    }
-
     /// Paints the picture over the frame that is already on screen.
-    fn paint_image(self: *Session, lay: layout_mod.Layout) void {
-        const draw = self.deps.render_html orelse return;
-        self.want_image = false;
-        const drawn = draw(
-            self.deps.render_html_context,
-            self.html_part[0..self.html_part_len],
-            lay.columns,
-            lay.rows,
-            self.image_scroll * cell_height,
-        );
-        if (drawn) {
-            self.image_shown = true;
-        } else {
-            // The frame is already on screen: the message needs its own frame.
-            self.state.set_status("No engine to draw the mail; o opens it elsewhere", .{});
-            self.needs_render = true;
-        }
-    }
-
-    fn dismiss_image(self: *Session) void {
-        self.image_shown = false;
-        self.image_scroll = 0;
-        if (self.deps.clear_html) |clear| clear(self.deps.clear_html_context);
-        self.invalidate_screen();
-        self.state.set_status("", .{});
-    }
-
     /// The HTML part, read as text: structure kept, nothing fetched, nothing
     /// executed. Rendered on first use and kept for this message.
     fn toggle_html(self: *Session) bool {
@@ -1004,10 +896,54 @@ pub const Session = struct {
         const message = self.raw[0..self.raw_len];
         const part = core.mime.html_body(message, &self.html_part, &self.scratch_bytes) orelse return;
         self.html_part_len = @intCast(part.len);
+
+        // A text browser lays mail out the way aerc and neomutt do: tables,
+        // columns, lists. It needs the width of the reader, so it runs when the
+        // reader is drawn, not here.
+        if (self.deps.render_html_text != null) {
+            self.html_needs_browser = true;
+            return;
+        }
+
         const rendered = core.html.render(part, &self.html_text, &self.html_links, &self.html_kinds);
         self.html_len = @intCast(rendered.text.len);
         self.html_link_count = rendered.links.len;
         self.html_kind_count = rendered.kinds.len;
+    }
+
+    /// Lays the HTML part out with a text browser, at the reader's width. The
+    /// result is what aerc shows: real columns, real tables, links inline.
+    fn layout_html_with_browser(self: *Session, width: u16) void {
+        self.html_needs_browser = false;
+        if (self.html_part_len == 0) return;
+        const browser = self.deps.render_html_text orelse return;
+
+        const laid_out = browser(
+            self.deps.render_html_text_context,
+            self.html_part[0..self.html_part_len],
+            width,
+            &self.html_text,
+        ) orelse {
+            // No engine: fall back to our own fold rather than showing nothing.
+            const rendered = core.html.render(
+                self.html_part[0..self.html_part_len],
+                &self.html_text,
+                &self.html_links,
+                &self.html_kinds,
+            );
+            self.html_len = @intCast(rendered.text.len);
+            self.html_link_count = rendered.links.len;
+            self.html_kind_count = rendered.kinds.len;
+            self.html_view = self.html_len > 0;
+            return;
+        };
+
+        self.html_len = @intCast(laid_out.len);
+        self.html_kind_count = 0;
+        // The browser wrote the addresses into the text: they are the links.
+        self.html_link_count = core.links.scan(laid_out, &self.html_links);
+        self.html_view = self.html_len > 0;
+        if (self.html_view) self.prefer_html();
     }
 
     /// Opens on the view a mail client would show: HTML when the message has
@@ -1519,6 +1455,7 @@ pub const Session = struct {
             return;
         }
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        if (self.html_needs_browser) self.layout_html_with_browser(lay.reader_text_width);
         if (self.body_loaded) {
             wrap.wrap(self.reader_text(), lay.reader_text_width, &self.wrapped);
         }
@@ -1545,7 +1482,6 @@ pub const Session = struct {
 
         self.flush();
         self.needs_render = false;
-        if (self.want_image) self.paint_image(lay);
     }
 
     fn flush(self: *Session) void {
