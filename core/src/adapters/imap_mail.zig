@@ -31,7 +31,7 @@ pub const ImapMail = struct {
     /// Full raw message, its displayable text, and the MIME decoding scratch.
     /// Three buffers, no allocation, all bounded: a mail server cannot make us
     /// allocate, and a huge message is truncated, not fatal.
-    raw: [limits.body_max * 2]u8 = undefined,
+    raw: [limits.body_max]u8 = undefined,
     scratch: [limits.body_max]u8 = undefined,
     selected: ?Mailbox = null,
     exists: u32 = 0,

@@ -660,7 +660,8 @@ test "responses for another tag are ignored, continuations are skipped" {
 }
 
 test "a response larger than the framer is refused" {
-    const big = try testing.allocator.alloc(u8, 200 * 1024);
+    // Larger than the framer holds, whatever the limit happens to be.
+    const big = try testing.allocator.alloc(u8, @as(usize, framing.max_response) + 64);
     defer testing.allocator.free(big);
     @memset(big, 'x');
 

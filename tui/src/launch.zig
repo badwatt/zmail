@@ -13,8 +13,8 @@ const session_mod = @import("session.zig");
 const setup_session = @import("setup_session.zig");
 const theme_mod = @import("theme.zig");
 
-const enter_screen = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h";
-const leave_screen = "\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l";
+const enter_screen = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const leave_screen = "\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l";
 
 const Failure = struct {
     message: []const u8,
@@ -317,13 +317,20 @@ const Live = struct {
     mail_count: u8 = 0,
     outbox_count: u8 = 0,
 
-    fn add(self: *Live, account: LiveAccount) void {
+    /// Room for one more account, already cleared. The struct holds the IMAP
+    /// client and its buffers, so it is built where it lives and never passed
+    /// by value: copying it is what a stack overflow looks like.
+    fn reserve(self: *Live, gpa: std.mem.Allocator, io: std.Io) ?*LiveAccount {
+        if (self.len >= self.accounts.len) return null;
+        const slot = &self.accounts[self.len];
+        slot.* = .{ .gpa = gpa, .io = io };
+        return slot;
+    }
+
+    fn add(self: *Live, account: *LiveAccount) void {
         const index = self.len;
-        self.accounts[index] = account;
         self.len += 1;
-        // Slices must point at the stored account, not at the parameter: the
-        // parameter dies when this returns, and the form would show garbage.
-        const stored = &self.accounts[index];
+        const stored = account;
 
         self.lazy_mail[index] = .{
             .context = &self.accounts[index],
@@ -331,9 +338,9 @@ const Live = struct {
             .close_fn = LiveAccount.closeMail,
         };
         self.sources[self.mail_count] = .{
-            .id = account.id,
+            .id = stored.id,
             .label = stored.label.slice(),
-            .from = account.from,
+            .from = stored.from,
             .mail = self.lazy_mail[index].mail(),
             .imap_host = stored.host.slice(),
             .imap_port = stored.port,
@@ -346,14 +353,14 @@ const Live = struct {
         };
         self.mail_count += 1;
 
-        if (account.smtp_enabled) {
+        if (stored.smtp_enabled) {
             self.lazy_outbox[index] = .{
                 .context = &self.accounts[index],
                 .open_fn = LiveAccount.openOutbox,
                 .close_fn = LiveAccount.closeOutbox,
             };
             self.outboxes[self.outbox_count] = .{
-                .id = account.id,
+                .id = stored.id,
                 .outbox = self.lazy_outbox[index].outbox(),
             };
             self.outbox_count += 1;
@@ -432,7 +439,12 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
     };
     if (file.len == 0) return .{ .message = "The config has no accounts" };
 
-    var live: Live = .{};
+    // Four accounts' clients live in here, each with the IMAP framer and the
+    // message being read: it does not belong on the stack.
+    const live_ptr = gpa.create(Live) catch return .{ .message = "Not enough memory to start" };
+    defer gpa.destroy(live_ptr);
+    live_ptr.* = .{};
+    const live = live_ptr;
     defer live.close();
     var missing_password: ?[]const u8 = null;
 
@@ -447,14 +459,15 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
             }
         }
 
-        var account = LiveAccount{
-            .gpa = gpa,
-            .io = io,
-            .id = core.id.AccountId.from_int(index + 1),
-            .from = entry.account.address,
-            .port = entry.account.imap.port,
-            .smtp_enabled = entry.smtp != null,
-        };
+        // Built in place: the struct carries the client and its buffers.
+        const account = live.reserve(gpa, io) orelse
+            return .{ .message = "Too many accounts in one config file" };
+        account.gpa = gpa;
+        account.io = io;
+        account.id = core.id.AccountId.from_int(index + 1);
+        account.from = entry.account.address;
+        account.port = entry.account.imap.port;
+        account.smtp_enabled = entry.smtp != null;
         account.label.set(entry.label.slice());
         account.host.set(entry.account.imap.host.slice());
         account.username.set(entry.account.username.slice());
@@ -502,14 +515,20 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
     var cache_buffer: [512]u8 = undefined;
     const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
 
-    var file_cache: net.cache_file.FileCache = undefined;
+    // These two hold buffers as large as the message limit: they belong on the
+    // heap, or the first big limit increase becomes a stack overflow.
+    const file_cache = gpa.create(net.cache_file.FileCache) catch
+        return .{ .message = "Not enough memory to start" };
+    defer gpa.destroy(file_cache);
     var cache: ?core.cache_port.Cache = null;
-    var file_bodies: net.bodies.FileBodies = undefined;
+    const file_bodies = gpa.create(net.bodies.FileBodies) catch
+        return .{ .message = "Not enough memory to start" };
+    defer gpa.destroy(file_bodies);
     var bodies: ?core.bodies_port.BodyCache = null;
     if (cache_dir.len > 0) {
-        file_cache = net.cache_file.FileCache.init(gpa, io, cache_dir, labels[0..file.len]);
+        file_cache.* = net.cache_file.FileCache.init(gpa, io, cache_dir, labels[0..file.len]);
         cache = file_cache.cache();
-        file_bodies = net.bodies.FileBodies.init(gpa, io, cache_dir, labels[0..file.len]);
+        file_bodies.* = net.bodies.FileBodies.init(gpa, io, cache_dir, labels[0..file.len]);
         bodies = file_bodies.cache();
     }
 
@@ -1402,18 +1421,18 @@ fn theme_for_environment() theme_mod.Theme {
 }
 
 test "Live keeps one label per account, not the last one parsed" {
+    // The real one lives on the heap (four clients' buffers); a test can afford
+    // the stack, and it says what it needs.
     var live: Live = .{};
     defer live.close();
 
-    // Exactly what run_live does: parse into a temporary, add, then reuse it.
+    // Exactly what run_live does: build in place from a temporary label, add,
+    // then let the temporary go.
     for ([_][]const u8{ "work", "home" }, 0..) |wanted, index| {
         var entry_label: core.text.Text(core.limits.label_max) = .{};
         entry_label.set(wanted);
-        var account = LiveAccount{
-            .gpa = testing.allocator,
-            .io = undefined,
-            .id = core.id.AccountId.from_int(@intCast(index + 1)),
-        };
+        const account = live.reserve(testing.allocator, undefined) orelse unreachable;
+        account.id = core.id.AccountId.from_int(@intCast(index + 1));
         account.label.set(entry_label.slice());
         live.add(account);
     }
