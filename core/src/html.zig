@@ -102,7 +102,20 @@ const State = struct {
     fn emit(self: *State, chunk: []const u8) void {
         if (self.skip_until != null) return;
 
-        for (chunk) |byte| {
+        var index: usize = 0;
+        while (index < chunk.len) : (index += 1) {
+            const byte = chunk[index];
+            if (byte == '&') {
+                if (entity(chunk, index)) |decoded| {
+                    index += decoded.consumed - 1;
+                    if (decoded.space) {
+                        self.pending_space = true;
+                    } else {
+                        self.writeCodepoint(decoded.codepoint);
+                    }
+                    continue;
+                }
+            }
             if (self.in_pre) {
                 if (byte == '\n') {
                     self.write("\n");
@@ -121,6 +134,19 @@ const State = struct {
             }
             self.writeByte(byte);
         }
+    }
+
+    fn writeCodepoint(self: *State, codepoint: u21) void {
+        var buffer: [4]u8 = undefined;
+        const length = std.unicode.utf8Encode(codepoint, &buffer) catch {
+            self.writeByte('?');
+            return;
+        };
+        self.flush_breaks();
+        if (self.pending_space and !self.at_line_start) self.write(" ");
+        self.pending_space = false;
+        self.at_line_start = false;
+        self.write(buffer[0..length]);
     }
 
     /// Writes one byte with no spacing rules: used inside <pre>.
@@ -277,6 +303,56 @@ const State = struct {
     }
 };
 
+const Decoded = struct {
+    codepoint: u21 = ' ',
+    /// Set for the kinds of space HTML has: they separate words, they are not
+    /// characters in their own right.
+    space: bool = false,
+    consumed: usize = 0,
+};
+
+/// Reads one entity at `index`, which must point at '&'.
+fn entity(text: []const u8, index: usize) ?Decoded {
+    const semicolon = std.mem.indexOfScalarPos(u8, text, index, ';') orelse return null;
+    if (semicolon - index > 12) return null;
+    const body = text[index + 1 .. semicolon];
+    if (body.len == 0) return null;
+    const consumed = semicolon - index + 1;
+
+    if (body[0] == '#') {
+        const digits = body[1..];
+        const value = if (digits.len > 1 and (digits[0] == 'x' or digits[0] == 'X'))
+            std.fmt.parseInt(u21, digits[1..], 16) catch return null
+        else
+            std.fmt.parseInt(u21, digits, 10) catch return null;
+        if (value == 0 or value > 0x10ffff) return null;
+        if (value >= 0xd800 and value <= 0xdfff) return null;
+        return .{ .codepoint = value, .space = value == 0xa0, .consumed = consumed };
+    }
+
+    const named = [_]struct { name: []const u8, codepoint: u21 }{
+        .{ .name = "amp", .codepoint = '&' },
+        .{ .name = "lt", .codepoint = '<' },
+        .{ .name = "gt", .codepoint = '>' },
+        .{ .name = "quot", .codepoint = '"' },
+        .{ .name = "apos", .codepoint = '\'' },
+        .{ .name = "nbsp", .codepoint = 0xa0 },
+        .{ .name = "ndash", .codepoint = 0x2013 },
+        .{ .name = "mdash", .codepoint = 0x2014 },
+        .{ .name = "hellip", .codepoint = 0x2026 },
+        .{ .name = "euro", .codepoint = 0x20ac },
+    };
+    for (named) |candidate| {
+        if (!std.mem.eql(u8, body, candidate.name)) continue;
+        return .{
+            .codepoint = candidate.codepoint,
+            .space = candidate.codepoint == 0xa0,
+            .consumed = consumed,
+        };
+    }
+    return null;
+}
+
 fn href_of(body: []const u8) []const u8 {
     const marker = indexOfIgnoreCase(body, 0, "href") orelse return "";
     var index = marker + "href".len;
@@ -364,6 +440,13 @@ test "an anchor whose text is the address is not written twice" {
     const rendered = render(html, &out, &link_buffer);
     try testing.expectEqualStrings("https://example.com/", rendered.text);
     try testing.expectEqualStrings("https://example.com/", rendered.links[0].text(rendered.text));
+}
+
+test "entities become their characters, and nbsp is a space" {
+    var out: [128]u8 = undefined;
+    var link_buffer: [2]links.Link = undefined;
+    const rendered = render("<p>Hello&nbsp;<b>world</b> &amp; friends &lt;3 &#233;</p>", &out, &link_buffer);
+    try testing.expectEqualStrings("Hello world & friends <3 é", rendered.text);
 }
 
 test "script content is dropped, not shown" {

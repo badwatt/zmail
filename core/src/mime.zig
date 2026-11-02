@@ -15,6 +15,9 @@
 //! invalid UTF-8 becomes `?`, because the reader is the last line of defence.
 
 const std = @import("std");
+const html_renderer = @import("html.zig");
+const Link = @import("links.zig").Link;
+const html_links_max = @import("links.zig").max_links;
 const assert = std.debug.assert;
 
 pub const max_depth = 8;
@@ -149,7 +152,6 @@ pub fn header(block: []const u8, name: []const u8) ?[]const u8 {
 /// Extracts the displayable text of a full message (headers and body).
 pub fn text_body(raw: []const u8, out: []u8, scratch: []u8) []const u8 {
     if (out.len == 0 or scratch.len < 2) return "";
-    var writer = std.Io.Writer.fixed(out);
 
     const root = split_part(raw);
     const root_type = content_type(header(root.headers, "content-type"));
@@ -159,16 +161,37 @@ pub fn text_body(raw: []const u8, out: []u8, scratch: []u8) []const u8 {
             var found = Found{};
             scan_multipart(root.body, root_type.boundary, 0, &found);
             if (found.plain) |part| {
-                write_part(part, false, scratch, &writer);
-            } else if (found.html) |part| {
-                write_part(part, true, scratch, &writer);
+                var writer = std.Io.Writer.fixed(out);
+                write_text_part(part, scratch, &writer);
+                return writer.buffered();
             }
+            if (found.html) |part| return render_html_part(part, out, scratch);
+            return "";
         },
-        .html => write_part(root, true, scratch, &writer),
-        .plain => write_part(root, false, scratch, &writer),
-        .other => {},
+        // A message with only HTML is read the way a mail client reads it: the
+        // markup is laid out, not merely stripped. Stripping left the source's
+        // indentation and line breaks in place, which broke long links.
+        .html => return render_html_part(root, out, scratch),
+        .plain => {
+            var writer = std.Io.Writer.fixed(out);
+            write_text_part(root, scratch, &writer);
+            return writer.buffered();
+        },
+        .other => return "",
     }
-    return writer.buffered();
+}
+
+/// The HTML part as text: folded by `html.render`, which knows that whitespace
+/// between tags is not content.
+fn render_html_part(part: Part, out: []u8, scratch: []u8) []const u8 {
+    const kind = content_type(header(part.headers, "content-type"));
+    const encoding = transfer_encoding(header(part.headers, "content-transfer-encoding"));
+    const half = scratch.len / 2;
+    const decoded = transfer_decode(part.body, encoding, scratch[0..half]);
+    const converted = convert_charset(decoded, kind.charset, scratch[half..]);
+
+    var link_buffer: [html_links_max]Link = undefined;
+    return html_renderer.render(converted, out, &link_buffer).text;
 }
 
 /// The HTML part, decoded and converted, or null when the message has none.
@@ -382,16 +405,13 @@ fn scan_part(region: []const u8, depth: u8, found: *Found) void {
     }
 }
 
-fn write_part(part: Part, as_html: bool, scratch: []u8, writer: *std.Io.Writer) void {
+fn write_text_part(part: Part, scratch: []u8, writer: *std.Io.Writer) void {
     const kind = content_type(header(part.headers, "content-type"));
     const encoding = transfer_encoding(header(part.headers, "content-transfer-encoding"));
 
     const half = scratch.len / 2;
     const decoded = transfer_decode(part.body, encoding, scratch[0..half]);
-    if (as_html) {
-        const converted = convert_charset(decoded, kind.charset, scratch[half..]);
-        strip_html(converted, writer);
-    } else if (kind.flowed) {
+    if (kind.flowed) {
         // Flowed text has to be unfolded before it means anything: the line
         // breaks inside it are the sender's, not the writer's.
         const converted = convert_charset(decoded, kind.charset, scratch[half..]);
@@ -588,69 +608,6 @@ fn cp1252(byte: u8) u21 {
         0x9F => 0x0178,
         else => byte,
     };
-}
-
-fn strip_html(input: []const u8, writer: *std.Io.Writer) void {
-    var index: usize = 0;
-    var pending_space = false;
-
-    while (index < input.len) {
-        if (input[index] == '<') {
-            const close = std.mem.indexOfScalarPos(u8, input, index, '>') orelse {
-                index = input.len;
-                break;
-            };
-            const tag = input[index + 1 .. close];
-            const name_end = std.mem.indexOfAny(u8, tag, " \t\r\n/") orelse tag.len;
-            const name = tag[0..name_end];
-
-            if (std.ascii.eqlIgnoreCase(name, "style") or std.ascii.eqlIgnoreCase(name, "script")) {
-                // Skip the element and its content: CSS and JS are not prose.
-                const closing = if (std.ascii.eqlIgnoreCase(name, "style")) "</style" else "</script";
-                const found = indexOfIgnoreCase(input, close + 1, closing) orelse input.len;
-                index = if (found < input.len) found + closing.len else input.len;
-                while (index < input.len and input[index] != '>') index += 1;
-                if (index < input.len) index += 1;
-                continue;
-            }
-
-            if (std.ascii.eqlIgnoreCase(name, "br") or
-                std.ascii.eqlIgnoreCase(name, "p") or
-                std.ascii.eqlIgnoreCase(name, "div") or
-                std.ascii.eqlIgnoreCase(name, "tr") or
-                std.ascii.eqlIgnoreCase(name, "li") or
-                std.ascii.eqlIgnoreCase(name, "h1") or
-                std.ascii.eqlIgnoreCase(name, "h2") or
-                std.ascii.eqlIgnoreCase(name, "h3"))
-            {
-                writer.writeByte('\n') catch return;
-                if (std.ascii.eqlIgnoreCase(name, "li")) writer.writeAll("  ") catch return;
-                pending_space = false;
-            }
-            index = close + 1;
-            continue;
-        }
-        if (input[index] == '&') {
-            if (decode_entity(input, index)) |entity| {
-                writer.writeAll(entity.text) catch return;
-                index += entity.consumed;
-                pending_space = false;
-                continue;
-            }
-        }
-        const byte = input[index];
-        if (byte == ' ' or byte == '\t' or byte == '\n' or byte == '\r') {
-            if (!pending_space) {
-                writer.writeByte(' ') catch return;
-                pending_space = true;
-            }
-            index += 1;
-            continue;
-        }
-        writer.writeByte(byte) catch return;
-        pending_space = false;
-        index += 1;
-    }
 }
 
 fn indexOfIgnoreCase(haystack: []const u8, start: usize, needle: []const u8) ?usize {
@@ -964,25 +921,6 @@ test "text_body: a truncated UTF-8 sequence becomes a question mark" {
     var out: [32]u8 = undefined;
     var scratch: [64]u8 = undefined;
     try testing.expectEqualStrings("ok?", text_body(raw, &out, &scratch));
-}
-
-test "strip_html: unterminated tags, unknown entities, and long entities" {
-    var buffer: [128]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    strip_html("a <b>bold</b> &bogus; &verylongentity; <unterminated", &writer);
-    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "bogus") != null);
-    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "bold") != null);
-    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "unterminated") == null);
-
-    var small: [64]u8 = undefined;
-    var writer2 = std.Io.Writer.fixed(&small);
-    strip_html("a & amp &amp", &writer2);
-    try testing.expect(std.mem.indexOf(u8, writer2.buffered(), "&") != null);
-
-    var style: [64]u8 = undefined;
-    var writer3 = std.Io.Writer.fixed(&style);
-    strip_html("<style>never closed", &writer3);
-    try testing.expectEqualStrings("", writer3.buffered());
 }
 
 test "text_body: a style element without a closing tag eats no text" {

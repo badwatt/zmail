@@ -22,6 +22,12 @@ const sealed_max: usize = limits.body_max + sealed.overhead;
 
 pub const Label = @import("cache_file.zig").Label;
 
+/// What is sealed is the message as the server sent it, and only that. Older
+/// builds stored the already-flattened text here, which cannot be told apart
+/// from a message without headers: the marker is what makes the difference
+/// visible, and an entry without it is ignored (and refetched).
+const raw_marker = "AMAIL-RAW-1\n";
+
 pub const FileBodies = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -81,7 +87,15 @@ pub const FileBodies = struct {
         defer file.close(self.io);
 
         const size = file.readPositionalAll(self.io, &self.buffer, 0) catch return error.Unavailable;
-        return sealed.open(key, self.buffer[0..size], out) catch null;
+        var staged: [limits.body_max]u8 = undefined;
+        const opened = sealed.open(key, self.buffer[0..size], &staged) catch return null;
+        if (opened.len < raw_marker.len or !std.mem.eql(u8, opened[0..raw_marker.len], raw_marker)) {
+            return null;
+        }
+        const body = opened[raw_marker.len..];
+        if (body.len > out.len) return error.Unavailable;
+        @memcpy(out[0..body.len], body);
+        return out[0..body.len];
     }
 
     fn saveThunk(
@@ -92,12 +106,17 @@ pub const FileBodies = struct {
         body: []const u8,
     ) port.Error!void {
         const self: *FileBodies = @ptrCast(@alignCast(context));
-        if (body.len == 0 or body.len > limits.body_max) return;
+        if (body.len == 0 or body.len > limits.body_max - raw_marker.len) return;
         const key = self.keys.get() orelse return error.Unavailable;
+
+        var marked: [limits.body_max]u8 = undefined;
+        @memcpy(marked[0..raw_marker.len], raw_marker);
+        @memcpy(marked[raw_marker.len..][0..body.len], body);
 
         var nonce: sealed.Nonce = undefined;
         self.io.random(&nonce);
-        const sealed_body = sealed.seal(key, nonce, body, &self.buffer) catch return;
+        const sealed_body = sealed.seal(key, nonce, marked[0 .. raw_marker.len + body.len], &self.buffer) catch
+            return;
 
         var path_buffer: [512]u8 = undefined;
         const path = self.file_path(account, mailbox, id, &path_buffer) orelse return;
