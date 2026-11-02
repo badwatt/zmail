@@ -391,9 +391,34 @@ fn entity(text: []const u8, index: usize) ?Decoded {
 /// `[IMG:cid]` for an image that came inside the message, `[IMG:url]` for one
 /// fetched from the network. The reader paints the first kind in the terminal
 /// and prints what it knows about the second.
+pub const max_remote_images = 8;
+
+/// The addresses of the images the message does not carry, in the order they
+/// appear. Their markers in the text are `[IMG:r0]`, `[IMG:r1]`, … so the URL
+/// never has to be printed in the body to be found again.
+pub fn remote_images(html: []const u8, out: *[max_remote_images][]const u8) usize {
+    var count: usize = 0;
+    var index: usize = 0;
+    while (index < html.len and count < out.len) {
+        const start = std.mem.indexOfScalarPos(u8, html, index, '<') orelse break;
+        const end = std.mem.indexOfScalarPos(u8, html, start, '>') orelse break;
+        const tag = html[start + 1 .. end];
+        index = end + 1;
+
+        const name_end = std.mem.indexOfAny(u8, tag, " \t\r\n/") orelse tag.len;
+        if (!std.ascii.eqlIgnoreCase(tag[0..name_end], "img")) continue;
+        const source = attribute(tag, "src");
+        if (source.len == 0 or std.ascii.startsWithIgnoreCase(source, "cid:")) continue;
+        out[count] = source;
+        count += 1;
+    }
+    return count;
+}
+
 pub fn mark_images(html: []const u8, out: []u8) []const u8 {
     var writer = std.Io.Writer.fixed(out);
     var index: usize = 0;
+    var remote: usize = 0;
 
     while (index < html.len) {
         const start = std.mem.indexOfScalarPos(u8, html, index, '<') orelse {
@@ -421,6 +446,12 @@ pub fn mark_images(html: []const u8, out: []u8) []const u8 {
         // One from the network cannot be drawn here; it is named, not fetched.
         if (std.ascii.startsWithIgnoreCase(source, "cid:")) {
             writer.print("[IMG:{s}]", .{source["cid:".len..]}) catch {};
+            if (alt.len > 0) writer.print(" {s}", .{alt}) catch {};
+        } else if (remote < max_remote_images) {
+            // Numbered, so the address stays out of the reading and the reader
+            // can still find it.
+            writer.print("[IMG:r{d}]", .{remote}) catch {};
+            remote += 1;
             if (alt.len > 0) writer.print(" {s}", .{alt}) catch {};
         } else if (alt.len > 0) {
             writer.print("[imagen: {s}]", .{alt}) catch {};
@@ -546,7 +577,13 @@ test "an anchor whose text is the address is not written twice" {
 test "an image becomes a marker the reader can find" {
     var out: [256]u8 = undefined;
     const html = "<p>a<img src=\"cid:logo@x\" alt=\"Logo\">b<img src=\"https://x/y.png\">c</p>";
-    try testing.expectEqualStrings("<p>a[IMG:logo@x] Logob[imagen]c</p>", mark_images(html, &out));
+    try testing.expectEqualStrings("<p>a[IMG:logo@x] Logob[IMG:r0]c</p>", mark_images(html, &out));
+
+    // The address is kept, in order, so the reader can fetch it.
+    var sources: [max_remote_images][]const u8 = undefined;
+    const count = remote_images(html, &sources);
+    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expectEqualStrings("https://x/y.png", sources[0]);
 }
 
 test "entities become their characters, and nbsp is a space" {

@@ -113,6 +113,14 @@ pub const Deps = struct {
         rows: u16,
     ) bool = null,
     draw_image_context: *anyopaque = undefined,
+    /// Downloads a picture the message points at. False when it cannot be
+    /// had: a mail reader does not fail because a logo is missing.
+    fetch_image: ?*const fn (
+        context: *anyopaque,
+        url: []const u8,
+        out: []u8,
+    ) ?[]const u8 = null,
+    fetch_image_context: *anyopaque = undefined,
     /// Takes every painted image away before the next frame is drawn.
     clear_images: ?*const fn (context: *anyopaque) void = null,
     clear_images_context: *anyopaque = undefined,
@@ -137,6 +145,13 @@ const max_image_rows: u32 = 12;
 
 const ImageSize = struct { width: u32, height: u32 };
 const ImageCells = struct { columns: u16, rows: u16 };
+
+/// The marker a numbered network image gets: "r0", "r1", …
+fn is_remote_marker(key: []const u8) bool {
+    if (key.len < 2 or key[0] != 'r') return false;
+    for (key[1..]) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return true;
+}
 
 /// An image that came with the message can be painted; one with an address
 /// cannot, without fetching it.
@@ -206,6 +221,14 @@ pub const Session = struct {
     /// Room for one decoded image, and the pixels-per-cell arithmetic that
     /// turns it into a place on screen.
     image_buffer: [core.limits.body_max]u8 = undefined,
+    /// The addresses of the pictures the message points at, in the order the
+    /// markers number them.
+    remote_sources: [core.html.max_remote_images]core.text.Text(core.limits.url_max) = @splat(.{}),
+    remote_sources_count: usize = 0,
+    /// The one picture downloaded from the network, and where it came from.
+    remote_url: core.text.Text(core.limits.url_max) = .{},
+    remote_bytes: [core.limits.body_max]u8 = undefined,
+    remote_len: u32 = 0,
     html_part_len: u32 = 0,
     /// Set when a text browser has to lay the HTML out before it can be shown.
     html_needs_browser: bool = false,
@@ -966,6 +989,12 @@ pub const Session = struct {
         const marked = core.html.mark_images(part, &self.html_marked);
         self.html_marked_len = @intCast(marked.len);
 
+        var sources: [core.html.max_remote_images][]const u8 = undefined;
+        self.remote_sources_count = core.html.remote_images(part, &sources);
+        for (sources[0..self.remote_sources_count], 0..) |source, index| {
+            self.remote_sources[index].set(source);
+        }
+
         // A text browser lays mail out the way aerc and neomutt do: tables,
         // columns, lists. It needs the width of the reader, so it runs when the
         // reader is drawn, not here.
@@ -1554,15 +1583,34 @@ pub const Session = struct {
         self.paint_images(lay);
     }
 
+    /// The address behind `[IMG:rN]`.
+    fn remote_source(self: *const Session, digits: []const u8) ?[]const u8 {
+        const index = std.fmt.parseInt(usize, digits, 10) catch return null;
+        if (index >= self.remote_sources_count) return null;
+        return self.remote_sources[index].slice();
+    }
+
+    /// One downloaded picture, kept until another is needed: a page shows a
+    /// handful, and fetching one twice is worse than keeping one in memory.
+    fn remote_image(self: *Session, url: []const u8) ?[]const u8 {
+        if (self.remote_len > 0 and std.mem.eql(u8, self.remote_url.slice(), url)) {
+            return self.remote_bytes[0..self.remote_len];
+        }
+        const fetch = self.deps.fetch_image orelse return null;
+        const bytes = fetch(self.deps.fetch_image_context, url, &self.remote_bytes) orelse return null;
+        self.remote_url.set(url);
+        self.remote_len = @intCast(bytes.len);
+        return bytes;
+    }
+
     /// Paints the images of the message over the text, at the markers the layout
     /// left for them. Images from the network are not fetched: the reader says
     /// what they are and o shows the mail in a browser.
     fn paint_images(self: *Session, lay: layout_mod.Layout) void {
-        const clear = self.deps.clear_images orelse return;
         if (self.state.view != .reader) return;
-        clear(self.deps.clear_images_context);
-
         const draw = self.deps.draw_image orelse return;
+        // Clearing is a nicety; painting is the point.
+        if (self.deps.clear_images) |clear| clear(self.deps.clear_images_context);
         if (self.html_view == false or self.html_len == 0) return;
 
         const text = self.reader_text();
@@ -1577,13 +1625,14 @@ pub const Session = struct {
             const rest = line[marker + 5 ..];
             const close = std.mem.indexOfScalar(u8, rest, ']') orelse continue;
             const key = rest[0..close];
-            if (!is_local_image(key)) continue;
-
-            const png = core.mime.image_body(
-                self.raw[0..self.raw_len],
-                key,
-                &self.image_buffer,
-            ) orelse continue;
+            // "[IMG:r3]" is a picture with an address; anything else names a
+            // part of the message itself.
+            const png = if (is_remote_marker(key))
+                self.remote_image(self.remote_source(key[1..]) orelse continue) orelse continue
+            else if (is_local_image(key))
+                core.mime.image_body(self.raw[0..self.raw_len], key, &self.image_buffer) orelse continue
+            else
+                continue;
             const size = png_size(png) orelse continue;
             const cells = image_cells(size);
             if (cells.columns == 0 or cells.rows == 0) continue;
@@ -3925,4 +3974,70 @@ test "an image with an address is not fetched, so it is not painted" {
     rig.session.needs_render = true;
     _ = rig.session.step();
     try testing.expectEqual(@as(u8, 0), sink.calls);
+}
+
+const RemoteSink = struct {
+    fetches: u8 = 0,
+    png: [128]u8 = undefined,
+    png_len: usize = 0,
+    calls: u8 = 0,
+
+    fn fetch(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 {
+        const self: *RemoteSink = @ptrCast(@alignCast(context));
+        self.fetches += 1;
+        _ = url;
+        // A 90x36 PNG header is enough for the reader to place it.
+        @memset(out[0..33], 0);
+        out[0] = 0x89;
+        out[1] = 'P';
+        out[2] = 'N';
+        out[3] = 'G';
+        std.mem.writeInt(u32, out[16..20], 90, .big);
+        std.mem.writeInt(u32, out[20..24], 36, .big);
+        self.png_len = 33;
+        @memcpy(self.png[0..33], out[0..33]);
+        return out[0..33];
+    }
+
+    fn draw(
+        context: *anyopaque,
+        png: []const u8,
+        x: u16,
+        y: u16,
+        columns: u16,
+        rows: u16,
+    ) bool {
+        const self: *RemoteSink = @ptrCast(@alignCast(context));
+        _ = .{ png, x, y, columns, rows };
+        self.calls += 1;
+        return true;
+    }
+};
+
+test "a picture with an address is downloaded once and painted" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: RemoteSink = .{};
+    rig.session.deps.fetch_image = RemoteSink.fetch;
+    rig.session.deps.fetch_image_context = &sink;
+    rig.session.deps.draw_image = RemoteSink.draw;
+    rig.session.deps.draw_image_context = &sink;
+
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw("Content-Type: text/html\n\n<p><img src=\"https://example.com/logo.png\"></p>");
+
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+    try testing.expectEqual(@as(u8, 1), sink.fetches);
+    try testing.expectEqual(@as(u8, 1), sink.calls);
+
+    // The same picture in the next frame is not downloaded again.
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+    try testing.expectEqual(@as(u8, 1), sink.fetches);
 }

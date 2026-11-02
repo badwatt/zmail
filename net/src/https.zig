@@ -62,6 +62,45 @@ pub fn post(
     return parse(out[0..total]);
 }
 
+/// GETs `host`/`path` into `out`. Used for the pictures a message points at.
+pub fn get(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    host: []const u8,
+    path: []const u8,
+    out: []u8,
+) Error!Response {
+    var tls = TlsTransport{};
+    defer tls.deinit();
+    tls.open(gpa, io, host, 443) catch return error.Unavailable;
+    const transport = tls.transport();
+
+    var header_buffer: [1024]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buffer, "GET {s} HTTP/1.1\r\n" ++
+        "Host: {s}\r\n" ++
+        "Accept: image/png, image/*;q=0.8\r\n" ++
+        "User-Agent: amail\r\n" ++
+        "Connection: close\r\n\r\n", .{ path, host }) catch return error.Malformed;
+
+    transport.write(header) catch return error.Unavailable;
+
+    var total: usize = 0;
+    var idle: u32 = 0;
+    while (total < out.len) {
+        if (transport.read(out[total..], 100)) |count| {
+            if (count == 0) {
+                idle += 1;
+                if (idle > 100) break;
+                continue;
+            }
+            idle = 0;
+            total += count;
+        } else |_| break;
+    }
+    if (total == out.len) return error.TooLarge;
+    return parse(out[0..total]);
+}
+
 /// Splits "HTTP/1.1 200 OK\r\n...\r\n\r\nbody".
 pub fn parse(raw: []const u8) Error!Response {
     const split = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.Malformed;
