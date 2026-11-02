@@ -711,7 +711,9 @@ fn draw_segment_kind(
 fn segment_style(inputs: Inputs, kind: Segment) Style {
     return switch (kind) {
         .text => line_style(inputs),
-        .link => inputs.theme.accent.with_underline(),
+        // Underlining every link turns the body into a sea of lines; the one
+        // under the pointer is the one that has to stand out.
+        .link => inputs.theme.accent,
         .hovered => inputs.theme.accent.with_bold().with_underline(),
     };
 }

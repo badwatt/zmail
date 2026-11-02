@@ -18,10 +18,27 @@ pub const Render = struct {
     text: []const u8 = "",
     links: []const links.Link = &.{},
     kinds: []const Kind = &.{},
+    /// Anchor text and the address it points at. The address is also written
+    /// into the text, but a reader clicks the words, so the words need the
+    /// target too.
+    anchors: []const Anchor = &.{},
 };
 
+pub const Anchor = struct {
+    span: links.Link,
+    target: []const u8,
+};
+
+pub const max_anchors: usize = 256;
+
 /// Renders `html` into `out`, recording the link ranges in `link_buffer`.
-pub fn render(html: []const u8, out: []u8, link_buffer: []links.Link, kind_buffer: []Kind) Render {
+pub fn render(
+    html: []const u8,
+    out: []u8,
+    link_buffer: []links.Link,
+    kind_buffer: []Kind,
+    anchor_buffer: []Anchor,
+) Render {
     // Blank lines never start with content, so every entry is filled in first:
     // an uninitialised kind would be read as a corrupt enum.
     if (kind_buffer.len > 0) @memset(kind_buffer, .body);
@@ -31,6 +48,7 @@ pub fn render(html: []const u8, out: []u8, link_buffer: []links.Link, kind_buffe
         .writer = std.Io.Writer.fixed(out),
         .link_buffer = link_buffer,
         .kinds = kind_buffer,
+        .anchor_buffer = anchor_buffer,
     };
 
     while (state.index < state.input.len) {
@@ -45,6 +63,7 @@ pub fn render(html: []const u8, out: []u8, link_buffer: []links.Link, kind_buffe
     return .{
         .text = state.writer.buffered(),
         .links = link_buffer[0..state.link_count],
+        .anchors = anchor_buffer[0..state.anchor_count],
         .kinds = kind_buffer[0..@min(lines, kind_buffer.len)],
     };
 }
@@ -57,6 +76,8 @@ const State = struct {
     anchor: ?[]const u8 = null,
     anchor_text_start: usize = 0,
     link_buffer: []links.Link,
+    anchor_buffer: []Anchor,
+    anchor_count: usize = 0,
     link_count: usize = 0,
     kinds: []Kind = &.{},
     /// Line being written, and what kind of line it is.
@@ -298,6 +319,16 @@ const State = struct {
         // when the anchor text says "click here".
         const text_start = self.anchor_text_start;
         const anchor_text = self.writer.buffered()[text_start..self.written()];
+
+        // The words are a link in their own right: clicking "read more" has to
+        // go where "read more" goes.
+        if (self.written() > text_start and self.anchor_count < self.anchor_buffer.len) {
+            self.anchor_buffer[self.anchor_count] = .{
+                .span = .{ .start = @intCast(text_start), .end = @intCast(self.written()) },
+                .target = target,
+            };
+            self.anchor_count += 1;
+        }
         // The text is already the address: writing it again would be noise.
         if (std.mem.eql(u8, std.mem.trim(u8, anchor_text, " "), target)) {
             if (self.link_count < self.link_buffer.len) {
@@ -632,7 +663,8 @@ test "paragraphs, lists and headings become readable text" {
         \\<pre>  keep
         \\   this</pre></body></html>
     ;
-    const rendered = render(html, &out, &link_buffer, &.{});
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render(html, &out, &link_buffer, &.{}, &anchor_buffer);
     try testing.expectEqualStrings(
         "Hello\n\nFirst line\nsecond line\n\n• one\n• two\n\n  keep\n   this",
         rendered.text,
@@ -644,7 +676,8 @@ test "a link keeps its address, visible and recorded" {
     var out: [256]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     const html = "<p>Read <a href=\"https://example.com/a\">the docs</a> today.</p>";
-    const rendered = render(html, &out, &link_buffer, &.{});
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render(html, &out, &link_buffer, &.{}, &anchor_buffer);
     try testing.expectEqualStrings("Read the docs (https://example.com/a) today.", rendered.text);
     try testing.expectEqual(@as(usize, 1), rendered.links.len);
     try testing.expectEqualStrings(
@@ -657,7 +690,8 @@ test "an anchor whose text is the address is not written twice" {
     var out: [256]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     const html = "<a href='https://example.com/'>https://example.com/</a>";
-    const rendered = render(html, &out, &link_buffer, &.{});
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render(html, &out, &link_buffer, &.{}, &anchor_buffer);
     try testing.expectEqualStrings("https://example.com/", rendered.text);
     try testing.expectEqualStrings("https://example.com/", rendered.links[0].text(rendered.text));
 }
@@ -695,7 +729,8 @@ test "an image becomes a marker the reader can find" {
 test "entities become their characters, and nbsp is a space" {
     var out: [128]u8 = undefined;
     var link_buffer: [2]links.Link = undefined;
-    const rendered = render("<p>Hello&nbsp;<b>world</b> &amp; friends &lt;3 &#233;</p>", &out, &link_buffer, &.{});
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render("<p>Hello&nbsp;<b>world</b> &amp; friends &lt;3 &#233;</p>", &out, &link_buffer, &.{}, &anchor_buffer);
     try testing.expectEqualStrings("Hello world & friends <3 é", rendered.text);
 }
 
@@ -703,7 +738,8 @@ test "script content is dropped, not shown" {
     var out: [256]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     const html = "<p>before</p><script>alert('boom')</script><p>after</p>";
-    const rendered = render(html, &out, &link_buffer, &.{});
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render(html, &out, &link_buffer, &.{}, &anchor_buffer);
     try testing.expectEqualStrings("before\n\nafter", rendered.text);
 }
 
@@ -720,7 +756,8 @@ test "a huge message is bounded by the output buffer" {
     html[205] = 'p';
     html[206] = '>';
     const document = html[0..207];
-    const rendered = render(document, &out, &link_buffer, &.{});
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render(document, &out, &link_buffer, &.{}, &anchor_buffer);
     try testing.expect(rendered.text.len <= out.len);
     try testing.expectEqualStrings("xxxxxxxxxxxxxxxx", rendered.text);
 }
@@ -729,11 +766,13 @@ test "each line carries what it is, so the reader can style it" {
     var out: [512]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     var kinds: [16]Kind = undefined;
+    var anchor_buffer: [max_anchors]Anchor = undefined;
     const rendered = render(
         "<h2>Title</h2><p>body text</p><blockquote>quoted</blockquote><ul><li>item</li></ul>",
         &out,
         &link_buffer,
         &kinds,
+        &anchor_buffer,
     );
 
     var lines = std.mem.splitScalar(u8, rendered.text, '\n');
@@ -746,4 +785,40 @@ test "each line carries what it is, so the reader can style it" {
         if (std.mem.startsWith(u8, line, "quoted")) try testing.expectEqual(Kind.quote, kind);
         if (std.mem.startsWith(u8, line, "• item")) try testing.expectEqual(Kind.bullet, kind);
     }
+}
+
+test "the words of an anchor are a link, with the address it points at" {
+    var out: [512]u8 = undefined;
+    var links_buffer: [4]links.Link = undefined;
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render(
+        "<p>See <a href=\"https://example.com/x\">the notes</a> for more</p>",
+        &out,
+        &links_buffer,
+        &.{},
+        &anchor_buffer,
+    );
+
+    try testing.expectEqual(@as(usize, 1), rendered.anchors.len);
+    const anchor = rendered.anchors[0];
+    try testing.expectEqualStrings("the notes", std.mem.trim(u8, rendered.text[anchor.span.start..anchor.span.end], " "));
+    try testing.expectEqualStrings("https://example.com/x", anchor.target);
+    // The address is written after the words too, so it can be read and copied.
+    try testing.expect(std.mem.indexOf(u8, rendered.text, "(https://example.com/x)") != null);
+}
+
+test "an anchor whose text is the address is one link, not two" {
+    var out: [512]u8 = undefined;
+    var links_buffer: [4]links.Link = undefined;
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render(
+        "<a href=\"https://example.com/x\">https://example.com/x</a>",
+        &out,
+        &links_buffer,
+        &.{},
+        &anchor_buffer,
+    );
+
+    try testing.expectEqual(@as(usize, 1), rendered.anchors.len);
+    try testing.expect(!std.mem.endsWith(u8, rendered.text, ")"));
 }

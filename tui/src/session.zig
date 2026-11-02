@@ -283,6 +283,9 @@ pub const Session = struct {
     html_kinds: [wrap.max_lines]core.html.Kind = undefined,
     html_kind_count: usize = 0,
     html_link_count: usize = 0,
+    /// Anchor words and the addresses they point at, in the HTML view.
+    html_anchors: [core.html.max_anchors]core.html.Anchor = undefined,
+    html_anchor_count: usize = 0,
     text_links: [core.links.max_links]core.links.Link = undefined,
     text_link_count: usize = 0,
     /// MIME decoding scratch, kept here so nothing is allocated per message.
@@ -783,7 +786,11 @@ pub const Session = struct {
         const text = self.reader_text();
         const line = self.wrapped.at(index, text);
         const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
-        return line_start + (mouse.x - 1);
+        // Clicking past the end of a line is clicking nothing, not clicking the
+        // text that happens to follow it in the buffer.
+        const column = mouse.x - 1;
+        if (column >= line.len) return null;
+        return line_start + column;
     }
 
     /// Ctrl held and the pointer over a link: it lights up, so the click is not
@@ -791,9 +798,9 @@ pub const Session = struct {
     fn hover_link(self: *Session, mouse: input.Mouse) bool {
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
         var found: ?core.links.Link = null;
-        if (mouse.ctrl) {
-            if (self.cell_offset(lay, mouse)) |offset| found = core.links.at(self.reader_text(), offset);
-        }
+        // No modifier: a terminal may keep ctrl to itself, and knowing what is
+        // clickable is the whole point of hovering.
+        if (self.cell_offset(lay, mouse)) |offset| found = core.links.at(self.reader_text(), offset);
         if (found == null and self.hovered == null) return false;
         if (found != null and self.hovered != null and found.?.start == self.hovered.?.start) return false;
         self.hovered = found;
@@ -801,17 +808,28 @@ pub const Session = struct {
         return true;
     }
 
+    /// The address under a cell of the body: the anchor whose words it is, the
+    /// address written after those words, or a numbered reference.
+    fn target_at(self: *Session, offset: u32, out: *[core.limits.url_max]u8) ?[]const u8 {
+        if (self.html_view) {
+            const anchors = self.html_anchors[0..self.html_anchor_count];
+            for (anchors) |anchor| {
+                if (offset < anchor.span.start or offset >= anchor.span.end) continue;
+                if (anchor.target.len == 0) continue;
+                return anchor.target;
+            }
+        }
+        const text = self.reader_text();
+        if (core.links.at(text, offset)) |link| return link.url(text, out);
+        if (core.links.reference_at(text, offset)) |number|
+            return core.links.reference_url(text, number, out);
+        return null;
+    }
+
     fn click_link(self: *Session, lay: layout_mod.Layout, mouse: input.Mouse) bool {
         const offset = self.cell_offset(lay, mouse) orelse return false;
-        const text = self.reader_text();
-        // A click lands either on an address or on a numbered reference.
         var url_buffer: [core.limits.url_max]u8 = undefined;
-        const url = if (core.links.at(text, offset)) |link|
-            link.url(text, &url_buffer)
-        else if (core.links.reference_at(text, offset)) |number|
-            core.links.reference_url(text, number, &url_buffer) orelse return false
-        else
-            return false;
+        const url = self.target_at(offset, &url_buffer) orelse return false;
 
         // Say it before the browser starts: opening one takes a moment, and a
         // click with no answer feels broken. The frame goes out first.
@@ -1052,6 +1070,7 @@ pub const Session = struct {
         self.html_ready = false;
         self.html_link_count = 0;
         self.html_kind_count = 0;
+        self.html_anchor_count = 0;
         self.render_html_view();
         self.prefer_html();
         self.body_loaded = true;
@@ -1065,6 +1084,7 @@ pub const Session = struct {
         self.html_len = 0;
         self.html_part_len = 0;
         self.html_link_count = 0;
+        self.html_anchor_count = 0;
         const message = self.raw[0..self.raw_len];
         const part = core.mime.html_body(message, &self.html_part, &self.scratch_bytes) orelse return;
         self.html_part_len = @intCast(part.len);
@@ -1087,10 +1107,17 @@ pub const Session = struct {
             return;
         }
 
-        const rendered = core.html.render(self.html_marked[0..self.html_marked_len], &self.html_text, &self.html_links, &self.html_kinds);
+        const rendered = core.html.render(
+            self.html_marked[0..self.html_marked_len],
+            &self.html_text,
+            &self.html_links,
+            &self.html_kinds,
+            &self.html_anchors,
+        );
         self.html_len = @intCast(rendered.text.len);
         self.html_link_count = rendered.links.len;
         self.html_kind_count = rendered.kinds.len;
+        self.html_anchor_count = rendered.anchors.len;
     }
 
     /// Lays the HTML part out with a text browser, at the reader's width. The
@@ -1112,10 +1139,12 @@ pub const Session = struct {
                 &self.html_text,
                 &self.html_links,
                 &self.html_kinds,
+                &self.html_anchors,
             );
             self.html_len = @intCast(rendered.text.len);
             self.html_link_count = rendered.links.len;
             self.html_kind_count = rendered.kinds.len;
+            self.html_anchor_count = rendered.anchors.len;
             self.html_view = self.html_len > 0;
             return;
         };
@@ -4292,7 +4321,7 @@ test "a marker with the same name in another message is another picture" {
     try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
 }
 
-test "ctrl and the pointer light a link up, and let go of it" {
+test "the pointer lights a link up, and the light goes when it leaves" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -4306,16 +4335,16 @@ test "ctrl and the pointer light a link up, and let go of it" {
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     // Column 6 sits inside the address.
-    try testing.expect(rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
+    try testing.expect(rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
     try testing.expect(rig.session.hovered != null);
 
-    // Leaving it, or letting go of ctrl, puts the light out.
-    try testing.expect(rig.session.hover_link(.{ .x = 1, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
+    // Leaving the link, or hovering plain text, puts the light out.
+    try testing.expect(rig.session.hover_link(.{ .x = 1, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
     try testing.expect(rig.session.hovered == null);
-    _ = rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true });
-    try testing.expect(rig.session.hovered != null);
-    try testing.expect(rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
-    try testing.expect(rig.session.hovered == null);
+
+    // Moving between cells of the same link does not repaint.
+    _ = rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none });
+    try testing.expect(!rig.session.hover_link(.{ .x = 9, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
 }
 
 test "a ctrl click reported by the terminal reaches the link" {
@@ -4340,4 +4369,47 @@ test "a ctrl click reported by the terminal reaches the link" {
     const bytes = std.fmt.bufPrint(&report, "\x1b[<16;7;{d}M", .{lay.reader_body_y + 1}) catch unreachable;
     rig.session.handle_bytes(bytes);
     try testing.expectEqual(@as(u8, 1), sink.opened);
+}
+
+test "in the HTML view, clicking the words of a link opens its address" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: LinkSink = .{};
+    rig.session.deps.open_url = LinkSink.open;
+    rig.session.deps.open_url_context = &sink;
+
+    rig.session.set_raw(
+        "Content-Type: text/html\r\n\r\n<p>See <a href=\"https://example.com/x\">the notes</a> now</p>",
+    );
+    rig.session.state.view = .reader;
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+    try testing.expect(rig.session.html_view);
+    try testing.expectEqual(@as(usize, 1), rig.session.html_anchor_count);
+
+    // The click lands on the words, not on the address in parentheses.
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    const text = rig.session.reader_text();
+    const anchor = rig.session.html_anchors[0];
+
+    // Find the wrapped line the anchor starts on.
+    var row: u16 = 0;
+    var column: u16 = 0;
+    while (row < rig.session.wrapped.len) : (row += 1) {
+        const line = rig.session.wrapped.at(row, text);
+        const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
+        if (anchor.span.start < line_start or anchor.span.start >= line_start + line.len) continue;
+        column = @intCast(anchor.span.start - line_start);
+        break;
+    }
+    const y = lay.reader_body_y + row;
+    _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .press, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .release, .button = .left });
+
+    try testing.expectEqual(@as(u8, 1), sink.opened);
+    try testing.expectEqualStrings("https://example.com/x", sink.last[0..sink.last_len]);
 }

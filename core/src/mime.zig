@@ -191,7 +191,8 @@ fn render_html_part(part: Part, out: []u8, scratch: []u8) []const u8 {
     const converted = convert_charset(decoded, kind.charset, scratch[half..]);
 
     var link_buffer: [html_links_max]Link = undefined;
-    return html_renderer.render(converted, out, &link_buffer, &.{}).text;
+    var anchor_buffer: [html_renderer.max_anchors]html_renderer.Anchor = undefined;
+    return html_renderer.render(converted, out, &link_buffer, &.{}, &anchor_buffer).text;
 }
 
 /// The HTML part, decoded and converted, or null when the message has none.
