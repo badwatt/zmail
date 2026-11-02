@@ -214,6 +214,9 @@ pub const Session = struct {
     raw_len: u32 = 0,
     /// The HTML part, and the reading view made from it.
     html_part: [core.limits.body_max]u8 = undefined,
+    /// The HTML with the entities a text browser cannot print taken out.
+    html_cleaned: [core.limits.body_max]u8 = undefined,
+    html_cleaned_len: u32 = 0,
     /// The same HTML with each image replaced by a marker the reader can find
     /// in the laid-out text.
     html_marked: [core.limits.body_max * 2]u8 = undefined,
@@ -994,7 +997,9 @@ pub const Session = struct {
         const message = self.raw[0..self.raw_len];
         const part = core.mime.html_body(message, &self.html_part, &self.scratch_bytes) orelse return;
         self.html_part_len = @intCast(part.len);
-        const marked = core.html.mark_images(part, &self.html_marked);
+        const cleaned = core.html.clean_entities(part, &self.html_cleaned);
+        self.html_cleaned_len = @intCast(cleaned.len);
+        const marked = core.html.mark_images(cleaned, &self.html_marked);
         self.html_marked_len = @intCast(marked.len);
 
         var sources: [core.html.max_remote_images][]const u8 = undefined;
@@ -1678,12 +1683,15 @@ pub const Session = struct {
             const width: u16 = @min(cells.columns, lay.columns -| 1);
             if (height == 0 or width == 0) continue;
 
+            // Where the marker sits is where the picture starts: a logo on the
+            // left stays on the left, one in a column stays in its column.
+            const column: u16 = @intCast(@min(marker, lay.columns -| 1));
             _ = draw(
                 self.deps.draw_image_context,
                 png,
-                0,
+                column,
                 lay.reader_body_y + row,
-                width,
+                @min(width, lay.columns -| column),
                 height,
             );
             painted += 1;

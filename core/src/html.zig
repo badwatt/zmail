@@ -415,6 +415,53 @@ pub fn remote_images(html: []const u8, out: *[max_remote_images][]const u8) usiz
     return count;
 }
 
+/// Drops the entities a text browser does not know, which it would otherwise
+/// print as `&zwj;` in the middle of a sentence. The zero-width ones go away;
+/// the rest become the character they stand for.
+pub fn clean_entities(html: []const u8, out: []u8) []const u8 {
+    const replacements = [_]struct { from: []const u8, to: []const u8 }{
+        .{ .from = "&zwj;", .to = "" },
+        .{ .from = "&zwnj;", .to = "" },
+        .{ .from = "&shy;", .to = "" },
+        .{ .from = "&lrm;", .to = "" },
+        .{ .from = "&rlm;", .to = "" },
+        .{ .from = "&rsquo;", .to = "\'" },
+        .{ .from = "&lsquo;", .to = "\'" },
+        .{ .from = "&rdquo;", .to = "\"" },
+        .{ .from = "&ldquo;", .to = "\"" },
+        .{ .from = "&nbsp;", .to = " " },
+        .{ .from = "&mdash;", .to = "-" },
+        .{ .from = "&ndash;", .to = "-" },
+        .{ .from = "&hellip;", .to = "..." },
+        .{ .from = "&trade;", .to = "(TM)" },
+        .{ .from = "&reg;", .to = "(R)" },
+        .{ .from = "&copy;", .to = "(C)" },
+        .{ .from = "&amp;", .to = "&" },
+        .{ .from = "&lt;", .to = "<" },
+        .{ .from = "&gt;", .to = ">" },
+        .{ .from = "&quot;", .to = "\"" },
+    };
+
+    var writer = std.Io.Writer.fixed(out);
+    var index: usize = 0;
+    while (index < html.len) {
+        var replaced = false;
+        if (html[index] == '&') {
+            for (replacements) |replacement| {
+                if (!std.mem.startsWith(u8, html[index..], replacement.from)) continue;
+                writer.writeAll(replacement.to) catch {};
+                index += replacement.from.len;
+                replaced = true;
+                break;
+            }
+        }
+        if (replaced) continue;
+        writer.writeByte(html[index]) catch {};
+        index += 1;
+    }
+    return writer.buffered();
+}
+
 pub fn mark_images(html: []const u8, out: []u8) []const u8 {
     var writer = std.Io.Writer.fixed(out);
     var index: usize = 0;
@@ -572,6 +619,15 @@ test "an anchor whose text is the address is not written twice" {
     const rendered = render(html, &out, &link_buffer, &.{});
     try testing.expectEqualStrings("https://example.com/", rendered.text);
     try testing.expectEqualStrings("https://example.com/", rendered.links[0].text(rendered.text));
+}
+
+test "entities a text browser would print raw are cleaned first" {
+    var out: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "Brave logo & more - \"quoted\"",
+        clean_entities("Brave&zwj; logo &amp; more &mdash; &ldquo;quoted&rdquo;", &out),
+    );
+    try testing.expectEqualStrings("a b", clean_entities("a&nbsp;b", &out));
 }
 
 test "an image becomes a marker the reader can find" {

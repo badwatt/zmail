@@ -612,7 +612,9 @@ fn render_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         const line = wrapped.at(line_index, inputs.body);
         var line_inputs = inputs;
         line_inputs.line_index = line_index;
-        draw_line_with_links(line_inputs, out, line, lay.reader_body_y + row, lay.columns - 2);
+        // "[IMG:…]" is a place to paint, not words to read.
+        const visible = if (std.mem.indexOf(u8, line, "[IMG:")) |marker| line[0..marker] else line;
+        draw_line_with_links(line_inputs, out, visible, lay.reader_body_y + row, lay.columns - 2);
     }
 }
 
