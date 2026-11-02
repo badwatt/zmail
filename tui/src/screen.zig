@@ -175,6 +175,15 @@ pub const Screen = struct {
         self.cells[y][x] = .{ .ch = safeCodepoint(ch), .style = style };
     }
 
+    /// Marks a cell as the second half of a wide glyph: it holds no codepoint of
+    /// its own and is never written out, because the terminal already advanced
+    /// past it.
+    fn put_covered(self: *Screen, x: u16, y: u16, style: Style) void {
+        if (x >= self.columns) return;
+        if (y >= self.rows) return;
+        self.cells[y][x] = .{ .ch = 0, .style = style };
+    }
+
     /// Writes `text` and returns how many cells it used. Stops at `width`.
     ///
     /// Invalid UTF-8 becomes '?' one byte at a time, so a corrupt body can
@@ -213,9 +222,9 @@ pub const Screen = struct {
             }
             if (written + cells > width) break;
             self.put(cell_x, y, ch, style);
-            // A wide glyph covers the cell after it: leave a blank there so the
-            // row's later columns do not shift by one.
-            if (cells == 2) self.put(cell_x + 1, y, ' ', style);
+            // A wide glyph covers the cell after it. It is marked, not written:
+            // sending a space there would push the terminal one column further.
+            if (cells == 2) self.put_covered(cell_x + 1, y, style);
             cell_x += cells;
             written += cells;
             index += span;
@@ -285,6 +294,7 @@ pub const Screen = struct {
         var column: u16 = 0;
         while (column < self.columns) : (column += 1) {
             const cell = self.cells[row][column];
+            if (cell.ch == 0) continue; // the right half of a wide glyph
             if (current == null or !cell.style.eql(current.?)) {
                 try write_sgr(writer, cell.style, colored);
                 current = cell.style;
@@ -328,6 +338,7 @@ pub const Screen = struct {
 };
 
 fn safeCodepoint(ch: u21) u21 {
+    if (ch == 0) return ' ';
     if (ch < 0x20) return ' ';
     if (ch == 0x7f) return ' ';
     return ch;
@@ -636,4 +647,26 @@ test "a row with an emoji occupies the same columns as one without" {
     _ = screen.put_text(0, 1, "1234567", 20, plain);
     var buffer: [32]u8 = undefined;
     try testing.expectEqualStrings("1234567", std.mem.trimEnd(u8, screen.row_text(1, &buffer), " "));
+}
+
+test "a wide glyph is sent once, without an extra cell after it" {
+    var screen: Screen = .{};
+    screen.resize(20, 1);
+
+    // "🎉ab" is four cells: the emoji, its covered half, then a and b.
+    _ = screen.put_text(0, 0, "🎉ab", 20, .{});
+
+    var buffer: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try screen.encode_row(0, &writer, false);
+    const encoded = writer.buffered();
+
+    // The emoji appears once and the covered cell sends nothing at all: the
+    // text after it follows immediately, and the row is padded to its width.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, encoded, "🎉"));
+    const body = std.mem.trimStart(u8, encoded, "\x1b[0m");
+    const glyphs = std.mem.trimEnd(u8, body, " ");
+    try testing.expect(std.mem.endsWith(u8, glyphs, "🎉ab"));
+    // Emoji (two cells) + a and b is four, so sixteen spaces pad the rest.
+    try testing.expectEqual(@as(usize, 16), body.len - glyphs.len);
 }
