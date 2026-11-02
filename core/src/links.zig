@@ -237,6 +237,42 @@ pub fn unwrap_urls(text: []const u8, out: []u8) []const u8 {
     return writer.buffered();
 }
 
+/// The address behind a numbered reference, as a text browser writes them at
+/// the end of a page: "[3] https://example.com/x".
+pub fn reference_url(text: []const u8, number: u32, out: []u8) ?[]const u8 {
+    var marker_buffer: [16]u8 = undefined;
+    const marker = std.fmt.bufPrint(&marker_buffer, "[{d}]", .{number}) catch return null;
+
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimStart(u8, raw_line, " ");
+        if (!std.mem.startsWith(u8, line, marker)) continue;
+        const rest = std.mem.trimStart(u8, line[marker.len..], " ");
+        if (!std.mem.startsWith(u8, rest, "http")) continue;
+        const end = std.mem.indexOfAny(u8, rest, " \t\r") orelse rest.len;
+        if (end > out.len) return null;
+        @memcpy(out[0..end], rest[0..end]);
+        return out[0..end];
+    }
+    return null;
+}
+
+/// The reference number under `offset`, when the click landed on one.
+pub fn reference_at(text: []const u8, offset: u32) ?u32 {
+    if (offset >= text.len) return null;
+    var start = offset;
+    while (start > 0 and offset - start < 5 and text[start] != '[') start -= 1;
+    if (text[start] != '[') return null;
+    var end = offset;
+    while (end < text.len and end - start < 6 and text[end] != ']') end += 1;
+    if (end >= text.len or text[end] != ']') return null;
+
+    const digits = text[start + 1 .. end];
+    if (digits.len == 0) return null;
+    for (digits) |byte| if (!std.ascii.isDigit(byte)) return null;
+    return std.fmt.parseInt(u32, digits, 10) catch null;
+}
+
 /// The link under `offset`, if any.
 pub fn at(text: []const u8, offset: u32) ?Link {
     var buffer: [max_links]Link = undefined;
@@ -399,6 +435,19 @@ test "unwrap_urls joins a wrapped address and leaves the prose alone" {
     // The address is now one link in the text the reader is given.
     var buffer: [max_links]Link = undefined;
     try testing.expectEqual(@as(usize, 1), scan(shown, &buffer));
+}
+
+test "a numbered reference finds its address" {
+    const text = "Hello [1]the docs\n\nReferences:\n\n[1] https://example.com/a\n[2] https://b.example\n";
+    var out: [128]u8 = undefined;
+    try testing.expectEqualStrings("https://example.com/a", reference_url(text, 1, &out).?);
+    try testing.expectEqualStrings("https://b.example", reference_url(text, 2, &out).?);
+    try testing.expect(reference_url(text, 3, &out) == null);
+
+    // A click on the number is a click on the reference.
+    const at_number = std.mem.indexOf(u8, text, "[1]").? + 1;
+    try testing.expectEqual(@as(u32, 1), reference_at(text, @intCast(at_number)).?);
+    try testing.expect(reference_at(text, 0) == null);
 }
 
 test "unwrap_urls copies text with no links unchanged" {

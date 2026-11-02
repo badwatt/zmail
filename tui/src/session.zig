@@ -221,6 +221,9 @@ pub const Session = struct {
     /// Room for one decoded image, and the pixels-per-cell arithmetic that
     /// turns it into a place on screen.
     image_buffer: [core.limits.body_max]u8 = undefined,
+    /// How many rows each wrapped line hides behind a picture.
+    cover_rows: [wrap.max_lines]u8 = @splat(0),
+    cover_len: u32 = 0,
     /// The addresses of the pictures the message points at, in the order the
     /// markers number them.
     remote_sources: [core.html.max_remote_images]core.text.Text(core.limits.url_max) = @splat(.{}),
@@ -743,9 +746,14 @@ pub const Session = struct {
         const line = self.wrapped.at(index, text);
         const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
         const offset = line_start + (mouse.x - 1);
-        const link = core.links.at(text, offset) orelse return false;
+        // A click lands either on an address or on a numbered reference.
         var url_buffer: [core.limits.url_max]u8 = undefined;
-        const url = link.url(text, &url_buffer);
+        const url = if (core.links.at(text, offset)) |link|
+            link.url(text, &url_buffer)
+        else if (core.links.reference_at(text, offset)) |number|
+            core.links.reference_url(text, number, &url_buffer) orelse return false
+        else
+            return false;
         if (self.deps.open_url) |open| open(self.deps.open_url_context, url);
         self.state.set_status("Opened {s}", .{url});
         self.needs_render = true;
@@ -1557,6 +1565,7 @@ pub const Session = struct {
         if (self.body_loaded) {
             wrap.wrap(self.reader_text(), lay.reader_text_width, &self.wrapped);
         }
+        self.prepare_cover();
 
         _ = core.update.apply(&self.state, &self.store, .{ .set_viewport = .{
             .list_rows = lay.list_rows,
@@ -1572,6 +1581,7 @@ pub const Session = struct {
             .wrapped = if (self.body_loaded) &self.wrapped else null,
             .links = self.reader_links(),
             .kinds = self.html_kinds[0..self.html_kind_count],
+            .cover = self.cover_rows[0..self.cover_len],
             .selection = self.selection,
             .now_unix = self.now_unix,
             .columns = self.size.columns,
@@ -1581,6 +1591,42 @@ pub const Session = struct {
         self.flush();
         self.needs_render = false;
         self.paint_images(lay);
+    }
+
+    /// The bytes of the picture behind a marker: a part of the message, or one
+    /// downloaded from its address.
+    fn image_png(self: *Session, key: []const u8) ?[]const u8 {
+        if (is_remote_marker(key)) {
+            const url = self.remote_source(key[1..]) orelse return null;
+            return self.remote_image(url);
+        }
+        if (!is_local_image(key)) return null;
+        return core.mime.image_body(self.raw[0..self.raw_len], key, &self.image_buffer);
+    }
+
+    /// How many rows a picture needs, which is how many rows of text it hides.
+    fn image_rows(self: *Session, key: []const u8) u8 {
+        const png = self.image_png(key) orelse return 0;
+        const size = png_size(png) orelse return 0;
+        return @intCast(@min(image_cells(size).rows, 255));
+    }
+
+    /// Measures the pictures on the visible lines before the frame is drawn, so
+    /// the text underneath them is not printed only to be covered.
+    fn prepare_cover(self: *Session) void {
+        self.cover_len = 0;
+        if (!self.html_view or self.deps.draw_image == null) return;
+        const text = self.reader_text();
+
+        var line: u32 = 0;
+        while (line < self.wrapped.len and line < self.cover_rows.len) : (line += 1) {
+            const content = self.wrapped.at(line, text);
+            const marker = std.mem.indexOf(u8, content, "[IMG:") orelse continue;
+            const rest = content[marker + 5 ..];
+            const close = std.mem.indexOfScalar(u8, rest, ']') orelse continue;
+            self.cover_rows[line] = self.image_rows(rest[0..close]);
+            self.cover_len = line + 1;
+        }
     }
 
     /// The address behind `[IMG:rN]`.
@@ -1624,15 +1670,7 @@ pub const Session = struct {
             const marker = std.mem.indexOf(u8, line, "[IMG:") orelse continue;
             const rest = line[marker + 5 ..];
             const close = std.mem.indexOfScalar(u8, rest, ']') orelse continue;
-            const key = rest[0..close];
-            // "[IMG:r3]" is a picture with an address; anything else names a
-            // part of the message itself.
-            const png = if (is_remote_marker(key))
-                self.remote_image(self.remote_source(key[1..]) orelse continue) orelse continue
-            else if (is_local_image(key))
-                core.mime.image_body(self.raw[0..self.raw_len], key, &self.image_buffer) orelse continue
-            else
-                continue;
+            const png = self.image_png(rest[0..close]) orelse continue;
             const size = png_size(png) orelse continue;
             const cells = image_cells(size);
             if (cells.columns == 0 or cells.rows == 0) continue;
@@ -4040,4 +4078,45 @@ test "a picture with an address is downloaded once and painted" {
     rig.session.needs_render = true;
     _ = rig.session.step();
     try testing.expectEqual(@as(u8, 1), sink.fetches);
+}
+
+test "clicking a reference number opens the address it points at" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: LinkSink = .{};
+    rig.session.deps.open_url = LinkSink.open;
+    rig.session.deps.open_url_context = &sink;
+
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw("Content-Type: text/plain\n\nRead [1]the docs\n\nReferences:\n\n[1] https://example.com/a\n");
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // Find the "[1]" in the body and click on its digit.
+    const text = rig.session.reader_text();
+    const row = std.mem.indexOf(u8, text, "[1]").?;
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    const line_text = rig.session.wrapped.at(0, text);
+    const column = row - (@intFromPtr(line_text.ptr) - @intFromPtr(text.ptr));
+
+    _ = rig.session.handle_mouse(.{
+        .x = @intCast(1 + column + 1),
+        .y = lay.reader_body_y,
+        .kind = .press,
+        .button = .left,
+    });
+    _ = rig.session.handle_mouse(.{
+        .x = @intCast(1 + column + 1),
+        .y = lay.reader_body_y,
+        .kind = .release,
+        .button = .left,
+    });
+
+    try testing.expectEqual(@as(u8, 1), sink.opened);
+    try testing.expectEqualStrings("https://example.com/a", sink.last[0..sink.last_len]);
 }
