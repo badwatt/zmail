@@ -98,6 +98,21 @@ pub const Deps = struct {
     /// opener: clicking a link then does nothing rather than lying.
     open_url: ?*const fn (context: *anyopaque, url: []const u8) void = null,
     open_url_context: *anyopaque = undefined,
+    /// Opens the whole message elsewhere: the HTML part in the browser, or its
+    /// first link when there is no HTML.
+    open_external: ?*const fn (context: *anyopaque, html: []const u8, link: []const u8) void = null,
+    open_external_context: *anyopaque = undefined,
+    /// Draws the HTML part as a picture in the terminal (kitty graphics).
+    /// False when this terminal or this machine cannot.
+    render_html: ?*const fn (
+        context: *anyopaque,
+        html: []const u8,
+        columns: u16,
+        rows: u16,
+    ) bool = null,
+    render_html_context: *anyopaque = undefined,
+    clear_html: ?*const fn (context: *anyopaque) void = null,
+    clear_html_context: *anyopaque = undefined,
 };
 
 pub const Session = struct {
@@ -126,13 +141,17 @@ pub const Session = struct {
     raw_len: u32 = 0,
     /// The HTML part, and the reading view made from it.
     html_part: [core.limits.body_max]u8 = undefined,
+    html_part_len: u32 = 0,
     html_text: [core.limits.body_max]u8 = undefined,
     html_len: u32 = 0,
     /// Which view the reader is showing. HTML only when the message has it.
     html_view: bool = false,
-    /// Whether the HTML part has already been rendered to text. Only `H` asks
-    /// for it: a message nobody opens as HTML costs nothing.
+    /// Whether the HTML part has already been rendered to text.
     html_ready: bool = false,
+    /// Set when a picture of the mail is on screen: any key takes it away.
+    image_shown: bool = false,
+    /// Set by the picture key: paint the frame, then the picture over it.
+    want_image: bool = false,
     /// Where a mouse drag started and where it is now. A drag copies; a click
     /// still opens a link.
     selection: ?selection_mod.Selection = null,
@@ -530,9 +549,19 @@ pub const Session = struct {
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
+        // A picture is not the screen: the first key takes it away.
+        if (self.image_shown) {
+            self.dismiss_image();
+            return true;
+        }
         // Views are not commands: the core has no opinion about them.
-        if (key == .char and key.char == 'H' and self.state.view == .reader) {
-            return self.toggle_html();
+        if (key == .char and self.state.view == .reader) {
+            switch (key.char) {
+                'H' => return self.toggle_html(),
+                'V' => return self.open_picture(),
+                'o' => return self.open_external_message(),
+                else => {},
+            }
         }
         const command = keymap.translate(key, .{ .mode = self.state.mode, .view = self.state.view }) orelse return false;
         return self.apply(command);
@@ -567,6 +596,76 @@ pub const Session = struct {
         // was a click (open a link) or a drag (copy).
         if (self.start_selection(lay, mouse)) return true;
         return self.click_link(lay, mouse);
+    }
+
+    /// The whole message as another program would show it: the browser for the
+    /// HTML part, or the first link for a text-only mail.
+    fn open_external_message(self: *Session) bool {
+        if (!self.body_loaded) return false;
+        const open = self.deps.open_external orelse {
+            self.state.set_status("No way to open it from here", .{});
+            self.needs_render = true;
+            return true;
+        };
+        if (self.html_len > 0) {
+            open(self.deps.open_external_context, self.html_text[0..self.html_len], "");
+            self.state.set_status("Opened in the browser", .{});
+        } else if (self.text_link_count > 0) {
+            var url_buffer: [core.limits.url_max]u8 = undefined;
+            const link = self.text_links[0];
+            open(self.deps.open_external_context, "", link.url(self.reader_text(), &url_buffer));
+            self.state.set_status("Opened the first link", .{});
+        } else {
+            self.state.set_status("This message has nothing to open", .{});
+        }
+        self.needs_render = true;
+        return true;
+    }
+
+    /// A picture of the mail, drawn in the terminal: what a mail client shows,
+    /// as near as a terminal can get.
+    fn open_picture(self: *Session) bool {
+        if (!self.body_loaded) return false;
+        if (self.html_part_len == 0) {
+            self.state.set_status("This message has no HTML version", .{});
+            self.needs_render = true;
+            return true;
+        }
+        if (self.deps.render_html == null) {
+            self.state.set_status("This terminal cannot draw the mail; o opens it elsewhere", .{});
+            self.needs_render = true;
+            return true;
+        }
+        self.want_image = true;
+        self.state.set_status("HTML · any key goes back", .{});
+        self.needs_render = true;
+        return true;
+    }
+
+    /// Paints the picture over the frame that is already on screen.
+    fn paint_image(self: *Session, lay: layout_mod.Layout) void {
+        const draw = self.deps.render_html orelse return;
+        self.want_image = false;
+        const drawn = draw(
+            self.deps.render_html_context,
+            self.html_part[0..self.html_part_len],
+            lay.columns,
+            lay.rows,
+        );
+        if (drawn) {
+            self.image_shown = true;
+        } else {
+            // The frame is already on screen: the message needs its own frame.
+            self.state.set_status("No engine to draw the mail; o opens it elsewhere", .{});
+            self.needs_render = true;
+        }
+    }
+
+    fn dismiss_image(self: *Session) void {
+        self.image_shown = false;
+        if (self.deps.clear_html) |clear| clear(self.deps.clear_html_context);
+        self.invalidate_screen();
+        self.state.set_status("", .{});
     }
 
     /// The HTML part, read as text: structure kept, nothing fetched, nothing
@@ -840,9 +939,11 @@ pub const Session = struct {
     fn render_html_view(self: *Session) void {
         self.html_ready = true;
         self.html_len = 0;
+        self.html_part_len = 0;
         self.html_link_count = 0;
         const message = self.raw[0..self.raw_len];
         const part = core.mime.html_body(message, &self.html_part, &self.scratch_bytes) orelse return;
+        self.html_part_len = @intCast(part.len);
         const rendered = core.html.render(part, &self.html_text, &self.html_links);
         self.html_len = @intCast(rendered.text.len);
         self.html_link_count = rendered.links.len;
@@ -1382,6 +1483,7 @@ pub const Session = struct {
 
         self.flush();
         self.needs_render = false;
+        if (self.want_image) self.paint_image(lay);
     }
 
     fn flush(self: *Session) void {
