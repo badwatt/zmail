@@ -768,8 +768,9 @@ const search_hints = [_]Hint{
 };
 
 const help_hints = [_]Hint{
-    .{ .keys = "any key", .action = "dismiss" },
+    .{ .keys = "j/k", .action = "scroll" },
     .{ .keys = "/", .action = "filter" },
+    .{ .keys = "any key", .action = "closes" },
 };
 
 const compose_hints = [_]Hint{
@@ -865,30 +866,74 @@ fn render_hints(hints: []const Hint, y: u16, limit: u16, theme: *const Theme, ou
     }
 }
 
+/// Every key amail answers to, grouped by where it works. An entry with no
+/// `keys` is a heading.
 const help_rows = [_]Hint{
-    .{ .keys = "j / Down", .action = "move down" },
-    .{ .keys = "k / Up", .action = "move up" },
+    .{ .keys = "", .action = "-- anywhere" },
+    .{ .keys = "?", .action = "this card (j/k scrolls, / filters)" },
+    .{ .keys = "Ctrl+Q / C", .action = "quit" },
+    .{ .keys = "Ctrl+R", .action = "refresh" },
+    .{ .keys = "Tab / [ ]", .action = "next / previous mailbox" },
+    .{ .keys = "1 - 6", .action = "Inbox, Sent, Drafts, Archive, Trash, Junk" },
+    .{ .keys = "a", .action = "next account scope" },
+    .{ .keys = "A", .action = "accounts: pick, add, edit, rename, sign in" },
+    .{ .keys = "/", .action = "search the list" },
+    .{ .keys = "", .action = "-- moving" },
+    .{ .keys = "j / Down", .action = "down a line" },
+    .{ .keys = "k / Up", .action = "up a line" },
     .{ .keys = "g / Home", .action = "first row" },
     .{ .keys = "G / End", .action = "last row" },
-    .{ .keys = "Ctrl+D / U", .action = "half page" },
-    .{ .keys = "PageDown / Up", .action = "page" },
-    .{ .keys = "Enter / l / o", .action = "open message" },
-    .{ .keys = "c", .action = "compose new" },
+    .{ .keys = "Ctrl+D / U", .action = "half a page" },
+    .{ .keys = "Ctrl+F / B", .action = "a whole page" },
+    .{ .keys = "Ctrl+N / P", .action = "down / up a line" },
+    .{ .keys = "PageDown / PageUp", .action = "a whole page" },
+    .{ .keys = "Space", .action = "a whole page" },
+    .{ .keys = "", .action = "-- the list" },
+    .{ .keys = "Enter / l / Right", .action = "open the message" },
+    .{ .keys = "o", .action = "open the message" },
+    .{ .keys = "c", .action = "compose a new one" },
     .{ .keys = "r", .action = "reply" },
-    .{ .keys = "h / q / Esc", .action = "back, close" },
     .{ .keys = "u", .action = "read / unread" },
-    .{ .keys = "s / *", .action = "star" },
+    .{ .keys = "s / *", .action = "star / unstar" },
     .{ .keys = "d", .action = "archive" },
-    .{ .keys = "#", .action = "move to trash" },
-    .{ .keys = "X", .action = "delete for good (Trash)" },
+    .{ .keys = "# / Delete", .action = "move to Trash" },
+    .{ .keys = "X", .action = "delete for good (Trash only)" },
     .{ .keys = "E", .action = "empty Trash" },
-    .{ .keys = "A", .action = "accounts: pick, add, edit, rename, sign in" },
-    .{ .keys = "a", .action = "next account scope" },
-    .{ .keys = "/", .action = "search" },
-    .{ .keys = "Tab / [ ]", .action = "next mailbox" },
-    .{ .keys = "1 - 6", .action = "jump to mailbox" },
-    .{ .keys = "Ctrl+R", .action = "refresh" },
-    .{ .keys = "Ctrl+Q / C", .action = "quit" },
+    .{ .keys = "click", .action = "select a row; again to open it" },
+    .{ .keys = "wheel", .action = "scroll the list" },
+    .{ .keys = "", .action = "-- the reader" },
+    .{ .keys = "q / h / Esc / Left", .action = "back to the list" },
+    .{ .keys = "H", .action = "HTML view, or the plain text one" },
+    .{ .keys = "o", .action = "open the mail in a browser" },
+    .{ .keys = "Ctrl+click", .action = "open the link under the pointer" },
+    .{ .keys = "click", .action = "open a link; on plain text, nothing" },
+    .{ .keys = "drag", .action = "select, then copy (and the primary selection)" },
+    .{ .keys = "", .action = "-- writing" },
+    .{ .keys = "Tab / Shift+Tab", .action = "next / previous field" },
+    .{ .keys = "Enter", .action = "next field, or a new line in the body" },
+    .{ .keys = "Ctrl+S", .action = "send (compose), save (forms)" },
+    .{ .keys = "Ctrl+U", .action = "clear the field" },
+    .{ .keys = "Space", .action = "toggle an option" },
+    .{ .keys = "Esc", .action = "cancel, close" },
+    .{ .keys = "", .action = "-- the accounts overlay" },
+    .{ .keys = "n / e / r / d", .action = "add, edit, rename, remove" },
+    .{ .keys = "o", .action = "sign in with the provider" },
+    .{ .keys = "Enter", .action = "use this account" },
+    .{ .keys = "", .action = "-- in this card" },
+    .{ .keys = "/", .action = "filter the keys by word" },
+    .{ .keys = "Enter", .action = "keep the filter" },
+    .{ .keys = "Esc", .action = "drop the filter" },
+};
+
+/// What the card must mention, checked by a test: a key that works and is not
+/// here is a key nobody will find.
+const required_in_help = [_][]const u8{
+    "Ctrl+Q", "Ctrl+R", "Tab",   "1 - 6",  "a",      "A",          "/",        "j",
+    "k",      "g",      "G",     "Ctrl+D", "Ctrl+F", "Ctrl+N",     "PageDown", "Space",
+    "Enter",  "l",      "Right", "o",      "c",      "r",          "u",        "s",
+    "*",      "d",      "#",     "Delete", "X",      "E",          "click",    "wheel",
+    "q",      "h",      "Esc",   "Left",   "H",      "Ctrl+click", "drag",     "Shift+Tab",
+    "Ctrl+S", "Ctrl+U", "n",     "e",      "Up",     "Down",       "Home",     "End",
 };
 
 const account_rows_max = 8;
@@ -967,14 +1012,35 @@ fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     render_help_filter(inputs, rect, out);
 
     const filter = inputs.state.help_filter.slice();
+
+    // Only the rows that match the filter are counted, so scrolling is measured
+    // in what the eye sees, not in the table.
+    var matching: u16 = 0;
+    for (help_rows) |entry| {
+        if (help_matches(filter, entry)) matching += 1;
+    }
+    const visible: u16 = rect.height -| 3;
+    const max_scroll: u16 = matching -| visible;
+    const scroll: u16 = @min(inputs.state.help_scroll, max_scroll);
+
     var row: u16 = 0;
+    var seen: u16 = 0;
     var shown: u16 = 0;
     while (row < help_rows.len) : (row += 1) {
         const entry = help_rows[row];
         if (!help_matches(filter, entry)) continue;
-
+        if (seen < scroll) {
+            seen += 1;
+            continue;
+        }
         const y = rect.y + 2 + shown;
         if (y >= rect.bottom() - 1) break;
+        if (entry.keys.len == 0) {
+            // A heading: the card groups the keys by where they work.
+            _ = out.put_text(rect.x + 2, y, entry.action, card_width -| 4, inputs.theme.accent.with_bold());
+            shown += 1;
+            continue;
+        }
         _ = out.put_text(rect.x + 2, y, entry.keys, help_key_width, inputs.theme.accent);
         _ = out.put_text(
             rect.x + 2 + help_key_width,
@@ -992,12 +1058,14 @@ fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 
     const footer = if (inputs.state.mode == .help_search)
         " Enter apply  ·  Esc cancel "
+    else if (max_scroll > 0)
+        " j/k scroll  ·  / filters  ·  any other key closes "
     else
         " any key closes  ·  / filters ";
     _ = out.put_text(rect.x + 2, rect.bottom() - 1, footer, card_width - 4, inputs.theme.dim);
 }
 
-const help_key_width: u16 = 16;
+const help_key_width: u16 = 18;
 
 fn render_help_filter(inputs: Inputs, rect: Rect, out: *Screen) void {
     const y = rect.y + 1;
@@ -1312,8 +1380,9 @@ test "frame draws the help overlay over the current view" {
     frame(f.inputs(100, 24), &out);
 
     try row_contains(&out, 1, "Keys");
-    try row_contains(&out, 3, "move down");
-    try row_contains(&out, 21, "any key closes");
+    // The card groups the keys by where they work, and scrolls to the rest.
+    try row_contains(&out, 3, "-- anywhere");
+    try row_contains(&out, 21, "closes");
 }
 
 test "frame keeps the reader under the help overlay" {
@@ -1435,7 +1504,7 @@ test "the help overlay advertises its filter and filters rows" {
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
     try row_contains(&out, 2, "/ filter keys");
-    try row_contains(&out, 3, "move down");
+    try row_contains(&out, 3, "-- anywhere");
     // The filter line lives inside the card, borders included.
     try testing.expectEqual(@as(u21, '│'), out.cells[2][18].ch);
     try testing.expectEqual(@as(u21, '│'), out.cells[2][81].ch);
@@ -1759,4 +1828,48 @@ test "the rows a picture covers are left empty, not printed over" {
 
     try testing.expect(!screen_contains(&out, "line under the picture"));
     try testing.expect(!screen_contains(&out, "last line"));
+}
+
+test "the help card names every key that works" {
+    for (required_in_help) |label| {
+        var found = false;
+        for (help_rows) |entry| {
+            if (std.mem.indexOf(u8, entry.keys, label) != null) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            std.debug.print("missing from help: {s}\n", .{label});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "the help card scrolls to its last row" {
+    // More keys than a 24-row terminal can show, so the card must scroll.
+    try testing.expect(help_rows.len > 20);
+
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .help;
+    f.state.help_return = .list;
+
+    // Scrolling past the end stops at the end, and never goes below the top.
+    _ = core.update.apply(&f.state, &f.store, .{ .help_scroll = 400 });
+    const bottom = f.state.help_scroll;
+    try testing.expect(bottom > 0);
+    _ = core.update.apply(&f.state, &f.store, .{ .help_scroll = -1 });
+    try testing.expectEqual(bottom - 1, f.state.help_scroll);
+    _ = core.update.apply(&f.state, &f.store, .{ .help_scroll = -1000 });
+    try testing.expectEqual(@as(u16, 0), f.state.help_scroll);
+
+    // Scrolled to the end, the card still draws inside a 24-row terminal.
+    f.state.help_scroll = 400;
+    var out: Screen = .{};
+    out.resize(80, 24);
+    frame(f.inputs(80, 24), &out);
+    var buffer: [256]u8 = undefined;
+    // The footer is the last row of the card, not the last row of the screen.
+    try testing.expect(std.mem.indexOf(u8, out.row_text(23, &buffer), "filters") == null);
 }

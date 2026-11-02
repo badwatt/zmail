@@ -65,6 +65,8 @@ pub const Command = union(enum) {
     search_cancel,
     begin_help_search,
     help_search_char: u8,
+    /// Scroll the list of keys: one line, or a page of them.
+    help_scroll: i16,
     help_search_backspace,
     help_search_commit,
     help_search_cancel,
@@ -137,6 +139,7 @@ test "every command is classified for status clearing" {
         .{ .command = .search_cancel, .clears = true },
         .{ .command = .begin_help_search, .clears = true },
         .{ .command = .{ .help_search_char = 'a' }, .clears = true },
+        .{ .command = .{ .help_scroll = 1 }, .clears = true },
         .{ .command = .help_search_backspace, .clears = true },
         .{ .command = .help_search_commit, .clears = true },
         .{ .command = .help_search_cancel, .clears = true },
@@ -159,5 +162,5 @@ test "every command is classified for status clearing" {
     for (commands) |case| {
         try testing.expectEqual(case.clears, case.command.clears_status());
     }
-    try testing.expectEqual(@as(usize, 48), commands.len);
+    try testing.expectEqual(@as(usize, 49), commands.len);
 }

@@ -49,7 +49,21 @@ fn compose_key(key: Key) ?Command {
 fn help_key(key: Key) ?Command {
     return switch (key) {
         .ctrl => |letter| if (letter == 'c' or letter == 'q') .quit else .toggle_help,
-        .char => |codepoint| if (codepoint == '/') .begin_help_search else .toggle_help,
+        // Scrolling is the only thing besides filtering that does not close the
+        // card: everything else means "I have seen enough".
+        .char => |codepoint| switch (codepoint) {
+            '/' => .begin_help_search,
+            'j' => .{ .help_scroll = 1 },
+            'k' => .{ .help_scroll = -1 },
+            'd' => .{ .help_scroll = 8 },
+            'u' => .{ .help_scroll = -8 },
+            ' ' => .{ .help_scroll = 8 },
+            else => .toggle_help,
+        },
+        .down => .{ .help_scroll = 1 },
+        .up => .{ .help_scroll = -1 },
+        .page_down => .{ .help_scroll = 8 },
+        .page_up => .{ .help_scroll = -8 },
         else => .toggle_help,
     };
 }
@@ -316,9 +330,11 @@ test "actions: unread, flag, archive, delete, search, help, refresh" {
     for (cases) |case| try check(case);
 }
 
-test "help closes on any key, / starts a filter, and Ctrl+C/Ctrl+Q quit" {
+test "help closes on a key, scrolls with j/k, / starts a filter, Ctrl+C/Q quit" {
     const help: Context = .{ .view = .help };
-    try check(.{ .key = .{ .char = 'j' }, .context = help, .expected = .toggle_help });
+    try check(.{ .key = .{ .char = 'j' }, .context = help, .expected = .{ .help_scroll = 1 } });
+    try check(.{ .key = .{ .char = 'k' }, .context = help, .expected = .{ .help_scroll = -1 } });
+    try check(.{ .key = .page_down, .context = help, .expected = .{ .help_scroll = 8 } });
     try check(.{ .key = .{ .char = 'q' }, .context = help, .expected = .toggle_help });
     try check(.{ .key = .escape, .context = help, .expected = .toggle_help });
     try check(.{ .key = .{ .char = '/' }, .context = help, .expected = .begin_help_search });

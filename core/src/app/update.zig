@@ -56,6 +56,7 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .search_commit => search_commit(state, store),
         .search_cancel => search_cancel(state, store),
         .begin_help_search => begin_help_search(state),
+        .help_scroll => |delta| scroll_help(state, delta),
         .help_search_char => |byte| help_search_char(state, byte),
         .help_search_backspace => help_search_backspace(state),
         .help_search_commit => help_search_commit(state),
@@ -556,6 +557,15 @@ fn startsWithIgnoreCase(text: []const u8, prefix: []const u8) bool {
     return std.ascii.eqlIgnoreCase(text[0..prefix.len], prefix);
 }
 
+/// The card shows what fits; this is how the rest is reached. The render clamps
+/// the offset to the rows that exist, so a long list never scrolls intonothing.
+fn scroll_help(state: *State, delta: i16) void {
+    if (state.view != .help) return;
+    const current: i32 = state.help_scroll;
+    const next = current + delta;
+    state.help_scroll = @intCast(@max(@as(i32, 0), next));
+}
+
 fn begin_help_search(state: *State) void {
     if (state.view != .help) return;
     state.mode = .help_search;
@@ -593,6 +603,7 @@ fn toggle_help(state: *State) void {
     state.view = .help;
     state.mode = .normal;
     state.help_filter.clear();
+    state.help_scroll = 0;
 }
 
 fn apply_refresh(state: *State, effects: *Effects) void {

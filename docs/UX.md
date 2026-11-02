@@ -88,12 +88,16 @@ and disappears on the next action.
 | `Shift+Tab` `[` | previous mailbox |
 | `1`–`6` | jump to Inbox, Sent, Drafts, Archive, Trash, Junk |
 | `Ctrl+R` | refresh from the server |
-| `?` | help (`/` filters the key list) |
+| `?` | help: every key, grouped by where it works (`j`/`k` scrolls it, `/` filters it, anything else closes it) |
 | `c` | compose a new message |
 | `r` | reply to the selected message |
 | `a` | cycle account scope: all → account 1 → … → all |
 | `X` | delete the selected message for good (Trash only) |
 | `E`, `E` | empty Trash (asks once) |
+| `Ctrl+N` / `Ctrl+P` | down / up, for terminals without arrow keys |
+| `Space` | a page in the list and the reader |
+| `H` | in the reader: HTML view, or the plain text one |
+| `o` | in the reader: the whole mail in a browser |
 | `Ctrl+Q` `Ctrl+C` | quit. The top level never closes on `Esc`, `q`, or `h` |
 
 Search is live: typing filters as you go, `Enter` keeps the filter, `Esc`
@@ -231,9 +235,11 @@ because hovering is part of how a link is opened.
   the “did I open the wrong message?” feeling.
 - Wheel scrolls the list and the reader.
 - Releases and non-left buttons are ignored.
-- **Ctrl + click** opens a link. Holding Ctrl and moving over one makes it bold,
-  so the click is never a guess; the status line says "Opening … in the browser"
-  before the browser starts, so the click has an answer.
+- **Ctrl + click** opens a link, and so does a plain click that lands on one and
+  does not drag: a terminal may keep the modifier to itself, and a link that
+  ignores a click is worse than one that opens. Holding Ctrl and moving over a
+  link makes it bold, and the status line says "Opening … in the browser" before
+  the browser starts, so the click has an answer.
 
 ## States
 
@@ -273,7 +279,8 @@ while you drag, and on release the text goes to the clipboard and the primary
 selection through OSC 52, so no `xclip` or `wl-copy` is needed. A click without a
 drag does nothing, so a click meant for the text never launches a browser.
 
-Links are opened with Ctrl held, in either view. A Ctrl+click on a URL hands it to
+Links are opened with Ctrl held (or a click that lands on the link), in either
+view. A Ctrl+click on a URL hands it to
 the browser (`xdg-open`, `gio open`, `sensible-browser`, `open`, or `wslview`,
 whichever exists); a Ctrl+click on the words around it does nothing.
 

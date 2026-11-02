@@ -861,10 +861,11 @@ pub const Session = struct {
         if (self.body_cell(lay, mouse)) |cell| active.dragTo(cell);
 
         if (!active.isDrag()) {
-            // A plain click is not a link opener: opening takes ctrl, so a click
-            // meant for the text never launches a browser by accident.
+            // A click that never moved and landed on a link opens it. Ctrl does
+            // the same, but a terminal may keep the modifier to itself, and a
+            // link that ignores a click is worse than one that opens.
             self.needs_render = true;
-            return true;
+            return self.click_link(lay, mouse);
         }
 
         const text = selection_mod.extract(
@@ -3663,9 +3664,9 @@ test "clicking a link in the body opens it" {
     try testing.expectEqualStrings("https://example.com/a", sink.last[0..sink.last_len]);
 
     // A click on the words around it opens nothing.
-    // Without ctrl the same click selects text instead of opening anything.
-    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .press, .button = .left });
-    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .release, .button = .left });
+    // A click on the words around it opens nothing, with or without ctrl.
+    _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .press, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .release, .button = .left });
     try testing.expectEqual(@as(u8, 1), sink.opened);
 }
 
@@ -3851,7 +3852,7 @@ test "a drag in the reader copies the text to the clipboard" {
     try testing.expect(rig.session.selection == null);
 }
 
-test "a ctrl click without dragging still opens the link" {
+test "a click on a link opens it exactly once" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -3877,11 +3878,12 @@ test "a ctrl click without dragging still opens the link" {
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("Opened https://example.com/a", rig.session.state.status.slice());
 
-    // The same click without ctrl selects text and opens nothing.
+    // A plain click on the same cell also opens it, once: the press starts a
+    // selection, and the release without a drag is the click.
     sink.opened = 0;
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .press, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .release, .button = .left });
-    try testing.expectEqual(@as(u8, 0), sink.opened);
+    try testing.expectEqual(@as(u8, 1), sink.opened);
 }
 
 test "the account picked last time is the one the reader opens on" {
@@ -4314,4 +4316,28 @@ test "ctrl and the pointer light a link up, and let go of it" {
     try testing.expect(rig.session.hovered != null);
     try testing.expect(rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
     try testing.expect(rig.session.hovered == null);
+}
+
+test "a ctrl click reported by the terminal reaches the link" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: LinkSink = .{};
+    rig.session.deps.open_url = LinkSink.open;
+    rig.session.deps.open_url_context = &sink;
+
+    rig.session.set_raw("see https://example.com/a here");
+    rig.session.state.view = .reader;
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // The bytes a terminal sends for ctrl+left press: 16 is ctrl, 1-based cells.
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    var report: [32]u8 = undefined;
+    const bytes = std.fmt.bufPrint(&report, "\x1b[<16;7;{d}M", .{lay.reader_body_y + 1}) catch unreachable;
+    rig.session.handle_bytes(bytes);
+    try testing.expectEqual(@as(u8, 1), sink.opened);
 }

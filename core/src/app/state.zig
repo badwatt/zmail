@@ -190,6 +190,8 @@ pub const State = struct {
     help_return: View = .list,
     /// Filter typed inside the help overlay.
     help_filter: Text(limits.help_query_max) = .{},
+    /// How far the key list is scrolled: more keys than a card can show.
+    help_scroll: u16 = 0,
 
     /// The account's own address, used as the sender of composed mail.
     from_address: Address = .{},
