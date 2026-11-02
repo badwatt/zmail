@@ -97,11 +97,6 @@ fn next_link(text: []const u8, from: usize) ?Candidate {
             // address and the next one carries on with URL characters, it is
             // still one address.
             while (end < text.len) {
-                if (spacedContinuation(text, index, end)) |step| {
-                    end = step;
-                    while (end < text.len and is_url_byte(text[end])) end += 1;
-                    continue;
-                }
                 if (continuation(text, index, end)) |step| {
                     end = step;
                     while (end < text.len and is_url_byte(text[end])) end += 1;
@@ -115,75 +110,63 @@ fn next_link(text: []const u8, from: usize) ?Candidate {
     return null;
 }
 
-/// Where the address picks up again after a line break, if it does.
+/// Where the address picks up after the break a sender left in it: spaces, a
+/// line break, or both. Mailing lists wrap addresses in the middle and keep the
+/// spaces, so "…?p=0vDm 1780192 7260070" and "…&ems\nl=1055472" are one address.
 ///
-/// Mail wraps long addresses at the margin, which splits them in the middle.
-/// The two things that tell that apart from ordinary prose are the margin
-/// (the line the address started on was full) and the next line having no word
-/// break near its start.
+/// Two things must hold, or prose would be swallowed: the address already has a
+/// query (that is where wrapping happens), and what follows reads as data — a
+/// word does not carry digits, capitals or URL punctuation.
 fn continuation(text: []const u8, link_start: usize, end: usize) ?usize {
+    if (std.mem.indexOfAny(u8, text[link_start..end], "?%") == null) return null;
+
     var index = end;
+    var spaces: u8 = 0;
+    while (index < text.len and text[index] == ' ') : (spaces += 1) {
+        if (spaces == 2) return null;
+        index += 1;
+    }
     if (index < text.len and text[index] == '\r') index += 1;
-    if (index >= text.len or text[index] != '\n') return null;
-    index += 1;
+    var crossed_line = false;
+    if (index < text.len and text[index] == '\n') {
+        index += 1;
+        crossed_line = true;
+        // A blank line is a paragraph, not a wrap.
+        if (index < text.len and text[index] == '\n') return null;
+    }
+    if (!crossed_line and spaces == 0) return null;
+    while (index < text.len and text[index] == ' ') index += 1;
     if (index >= text.len or !is_url_byte(text[index])) return null;
-    // A fresh address on the next line is a new link, not a continuation.
     if (std.mem.startsWith(u8, text[index..], "http://")) return null;
     if (std.mem.startsWith(u8, text[index..], "https://")) return null;
     if (std.mem.startsWith(u8, text[index..], "www.")) return null;
 
-    const line_start = std.mem.lastIndexOfScalar(u8, text[0..end], '\n') orelse 0;
-    const line_length = end - line_start;
-    if (line_length < wrapped_at) return null;
-
-    // Prose carries on with words; a wrapped address carries on without a
-    // space for a good while.
-    var next_space = index;
-    while (next_space < text.len and text[next_space] != ' ' and text[next_space] != '\n') next_space += 1;
-    if (next_space - index < 12 and next_space < text.len) return null;
-
-    _ = link_start;
+    const token = text[index..token_end(text, index)];
+    if (token.len == 0 or !is_url_token(token)) return null;
+    if (!looks_like_data(token)) return null;
     return index;
 }
 
-/// A line this long was wrapped at a margin, not ended by a full stop.
-const wrapped_at: usize = 60;
-
-/// Where the address picks up after the spaces a sender left at a wrap point.
-/// Mailing lists break long addresses and keep the space, so the text reads
-/// "…XYLL  HCfTe…": the space is not part of the address, it is the break.
+/// Whether a token reads as data rather than as a word.
 ///
-/// Prose after an address looks the same to a scanner, so two things must hold:
-/// the address is already long (it was wrapped, not written), and what follows
-/// is a run of long, unpunctuated tokens — a wrapped address is a chain of them,
-/// while a sentence continues with ordinary words.
-fn spacedContinuation(text: []const u8, link_start: usize, end: usize) ?usize {
-    if (end - link_start < wrapped_at) return null;
-    var index = end;
-    var spaces: u8 = 0;
-    while (index < text.len and text[index] == ' ' and spaces < 2) : (spaces += 1) index += 1;
-    if (spaces == 0) return null;
-    if (index >= text.len or !is_url_byte(text[index])) return null;
-    if (std.mem.startsWith(u8, text[index..], "http://")) return null;
-    if (std.mem.startsWith(u8, text[index..], "https://")) return null;
-    if (std.mem.startsWith(u8, text[index..], "www.")) return null;
-
-    // The token here, and the one after it: a wrapped address keeps producing
-    // long tokens, a sentence does not.
-    const first = token_end(text, index);
-    if (first - index < 8 or !is_url_token(text[index..first])) return null;
-    if (first == text.len) return index;
-    if (text[first] != ' ' and text[first] != '\n') return null;
-
-    var next = first;
-    while (next < text.len and text[next] == ' ') next += 1;
-    if (next >= text.len) return index;
-    if (text[next] == '\n') return index;
-
-    const second = token_end(text, next);
-    if (second - next < 8) return null;
-    if (!is_url_token(text[next..second])) return null;
-    return index;
+/// One capital is how a sentence starts ("That is all."), so it takes two of
+/// them, a digit, or URL punctuation to say "this is an encoded fragment".
+fn looks_like_data(token: []const u8) bool {
+    var capitals: u8 = 0;
+    for (token) |byte| {
+        if (std.ascii.isDigit(byte)) return true;
+        if (std.ascii.isUpper(byte)) {
+            capitals += 1;
+            continue;
+        }
+        switch (byte) {
+            '%', '=', '&', '+', '/', '_', '~', '#', '@' => return true,
+            else => {},
+        }
+    }
+    if (capitals >= 2) return true;
+    // A long fragment with one capital is still more likely encoded than prose.
+    return token.len >= 16 and capitals >= 1;
 }
 
 /// End of the run of URL bytes starting at `start`.
@@ -374,6 +357,23 @@ test "an address broken with spaces, the way mailing lists do it" {
             "J9.OMhLWsKF3hmlXYLLHCfTeCMkde0KpicLdN9Gel7DRw",
         buffer[0].url(text, &url_buffer),
     );
+}
+
+test "the emarsys shape: short numeric chunks inside the query" {
+    const text = "the link below.\n" ++
+        "https://www1.emarsys.net/u/nrd.php?p=0vDm90jZvy 1780192 7260070 1 893&ems\n" ++
+        "l=1055472&d=MTM5M2E1MzU0OTM3MDc1M2FhNDY2YWNlYjNjQmNzM2Mx\n" ++
+        "esuh= 11\n" ++
+        "37309c913b494fc9c187884e7ad403d2c23ce045ffd732017232e92daac0476f\n";
+
+    var buffer: [max_links]Link = undefined;
+    const count = scan(text, &buffer);
+    try testing.expectEqual(@as(usize, 1), count);
+
+    var url_buffer: [512]u8 = undefined;
+    const url = buffer[0].url(text, &url_buffer);
+    try testing.expect(std.mem.startsWith(u8, url, "https://www1.emarsys.net/u/nrd.php?p=0vDm90jZvy178019272600701893&ems"));
+    try testing.expect(std.mem.endsWith(u8, url, "esuh=1137309c913b494fc9c187884e7ad403d2c23ce045ffd732017232e92daac0476f"));
 }
 
 test "prose after an address is not swallowed" {
