@@ -62,19 +62,35 @@ pub fn draw(
     return true;
 }
 
-/// The pixel a cell stands for, flattened over white when it is translucent.
+/// The colour a cell stands for: the average of the pixels it covers, flattened
+/// over white. Averaging is what keeps a picture from turning into a staircase
+/// when it is far bigger than the cells it has to fit in.
 fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16) u32 {
     const target_rows = @max(1, rows * 2);
-    const px = (@as(u32, pixel_row) * image.height) / target_rows;
-    const py = (@as(u32, column) * image.width) / @max(1, columns);
-    const index = (@as(usize, @min(px, image.height - 1)) * image.width +
-        @min(py, image.width - 1)) * 4;
+    const from_x = (@as(u32, column) * image.width) / @max(1, columns);
+    const to_x = @max(from_x + 1, ((@as(u32, column) + 1) * image.width) / @max(1, columns));
+    const from_y = (@as(u32, pixel_row) * image.height) / target_rows;
+    const to_y = @max(from_y + 1, ((@as(u32, pixel_row) + 1) * image.height) / target_rows);
 
-    const alpha: u32 = image.rgba[index + 3];
-    const r = flatten(image.rgba[index], alpha);
-    const g = flatten(image.rgba[index + 1], alpha);
-    const b = flatten(image.rgba[index + 2], alpha);
-    return (@as(u32, r) << 16) | (@as(u32, g) << 8) | b;
+    var red_total: u32 = 0;
+    var green_total: u32 = 0;
+    var blue_total: u32 = 0;
+    var count: u32 = 0;
+
+    var y = @min(from_y, image.height - 1);
+    while (y < @min(to_y, image.height)) : (y += 1) {
+        var x = @min(from_x, image.width - 1);
+        while (x < @min(to_x, image.width)) : (x += 1) {
+            const index = (@as(usize, y) * image.width + x) * 4;
+            const alpha: u32 = image.rgba[index + 3];
+            red_total += flatten(image.rgba[index], alpha);
+            green_total += flatten(image.rgba[index + 1], alpha);
+            blue_total += flatten(image.rgba[index + 2], alpha);
+            count += 1;
+        }
+    }
+    if (count == 0) return 0;
+    return ((red_total / count) << 16) | ((green_total / count) << 8) | (blue_total / count);
 }
 
 /// Alpha against white: mail is read on paper, not on a checkerboard.

@@ -8,6 +8,7 @@ const core = @import("core");
 const net = @import("net");
 
 const cli = @import("cli.zig");
+const graphics = @import("graphics.zig");
 const halfblocks = @import("halfblocks.zig");
 const os = @import("os.zig");
 const session_mod = @import("session.zig");
@@ -198,8 +199,13 @@ fn drawImageThunk(
 ) bool {
     const self: *Browser = @ptrCast(@alignCast(context));
 
-    // Half blocks: two pixels per cell, 24-bit colour, any terminal. This is
-    // what yazi does, and it needs nothing installed and no protocol.
+    // The picture at full resolution when the terminal speaks kitty: it scales
+    // it itself, with a real resampler, which is why it does not look blocky.
+    // Half blocks are the fallback, and they are what any terminal can do.
+    if (graphics.supported()) {
+        if (graphics.draw(self.system, png_bytes, x, y, columns, rows)) return true;
+    }
+
     const work = self.gpa.alloc(u8, png_bytes.len + core.limits.body_max * 2) catch return false;
     defer self.gpa.free(work);
     const rgba = self.gpa.alloc(u8, core.limits.body_max) catch return false;
@@ -210,8 +216,10 @@ fn drawImageThunk(
 }
 
 fn clearImagesThunk(context: *anyopaque) void {
-    // Text repaints itself: there is no image layer to take away, only cells.
-    _ = context;
+    const self: *Browser = @ptrCast(@alignCast(context));
+    // Half blocks belong to the text and are covered by the next frame; kitty
+    // pictures are a layer of their own and have to be taken away.
+    if (graphics.supported()) graphics.clear(self.system);
 }
 
 fn openUrlThunk(context: *anyopaque, url: []const u8) void {
