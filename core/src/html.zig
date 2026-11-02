@@ -315,43 +315,25 @@ const State = struct {
         self.anchor = null;
         if (target.len == 0) return;
 
-        // Write the address after the text, so it can be read and clicked even
-        // when the anchor text says "click here".
         const text_start = self.anchor_text_start;
-        const anchor_text = self.writer.buffered()[text_start..self.written()];
+        if (self.written() <= text_start) return;
 
-        // The words are a link in their own right: clicking "read more" has to
-        // go where "read more" goes.
-        if (self.written() > text_start and self.anchor_count < self.anchor_buffer.len) {
+        // The words are the link. The address is not written into the text: it
+        // would sit after every "read more", and the reader shows it on demand
+        // instead, when the pointer is over the words with ctrl held.
+        if (self.link_count < self.link_buffer.len) {
+            self.link_buffer[self.link_count] = .{
+                .start = @intCast(text_start),
+                .end = @intCast(self.written()),
+            };
+            self.link_count += 1;
+        }
+        if (self.anchor_count < self.anchor_buffer.len) {
             self.anchor_buffer[self.anchor_count] = .{
                 .span = .{ .start = @intCast(text_start), .end = @intCast(self.written()) },
                 .target = target,
             };
             self.anchor_count += 1;
-        }
-        // The text is already the address: writing it again would be noise.
-        if (std.mem.eql(u8, std.mem.trim(u8, anchor_text, " "), target)) {
-            if (self.link_count < self.link_buffer.len) {
-                self.link_buffer[self.link_count] = .{
-                    .start = @intCast(text_start),
-                    .end = @intCast(self.written()),
-                };
-                if (self.written() > text_start) self.link_count += 1;
-            }
-            return;
-        }
-
-        self.pending_space = true;
-        self.writeByte('(');
-        const url_start = self.written();
-        self.write(target);
-        const url_end = self.written();
-        self.write(")");
-        self.at_line_start = false;
-
-        if (self.link_count < self.link_buffer.len and url_end > url_start) {
-            self.link_buffer[self.link_count] = .{ .start = @intCast(url_start), .end = @intCast(url_end) };
-            self.link_count += 1;
         }
     }
 
@@ -672,21 +654,20 @@ test "paragraphs, lists and headings become readable text" {
     try testing.expectEqual(@as(usize, 0), rendered.links.len);
 }
 
-test "a link keeps its address, visible and recorded" {
+test "a link is its words, and its address is kept, not printed" {
     var out: [256]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     const html = "<p>Read <a href=\"https://example.com/a\">the docs</a> today.</p>";
     var anchor_buffer: [max_anchors]Anchor = undefined;
     const rendered = render(html, &out, &link_buffer, &.{}, &anchor_buffer);
-    try testing.expectEqualStrings("Read the docs (https://example.com/a) today.", rendered.text);
+    // Nothing is added to the sentence: the reader shows the address on demand.
+    try testing.expectEqualStrings("Read the docs today.", rendered.text);
     try testing.expectEqual(@as(usize, 1), rendered.links.len);
-    try testing.expectEqualStrings(
-        "https://example.com/a",
-        rendered.links[0].text(rendered.text),
-    );
+    try testing.expectEqualStrings("the docs", std.mem.trim(u8, rendered.links[0].text(rendered.text), " "));
+    try testing.expectEqualStrings("https://example.com/a", rendered.anchors[0].target);
 }
 
-test "an anchor whose text is the address is not written twice" {
+test "an anchor whose text is the address stays one span" {
     var out: [256]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     const html = "<a href='https://example.com/'>https://example.com/</a>";
@@ -803,8 +784,8 @@ test "the words of an anchor are a link, with the address it points at" {
     const anchor = rendered.anchors[0];
     try testing.expectEqualStrings("the notes", std.mem.trim(u8, rendered.text[anchor.span.start..anchor.span.end], " "));
     try testing.expectEqualStrings("https://example.com/x", anchor.target);
-    // The address is written after the words too, so it can be read and copied.
-    try testing.expect(std.mem.indexOf(u8, rendered.text, "(https://example.com/x)") != null);
+    // The sentence is untouched: no address is appended to it.
+    try testing.expectEqualStrings("See the notes for more", rendered.text);
 }
 
 test "an anchor whose text is the address is one link, not two" {

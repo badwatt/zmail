@@ -243,6 +243,8 @@ pub const Session = struct {
     image_slots: [max_images_drawn]ImageSlot = @splat(.{}),
     /// The link under a ctrl-hovered pointer, if any.
     hovered: ?core.links.Link = null,
+    /// Its address, shown in a popup while ctrl is held over it.
+    hover_url: core.text.Text(core.limits.url_max) = .{},
     image_slot_count: u8 = 0,
     /// How many rows each wrapped line hides behind a picture.
     cover_rows: [wrap.max_lines]u8 = @splat(0),
@@ -787,14 +789,27 @@ pub const Session = struct {
     /// a leap of faith.
     fn hover_link(self: *Session, mouse: input.Mouse) bool {
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        // Ctrl is the question "what would this do?": without it the pointer
+        // changes nothing, so reading is never disturbed.
         var found: ?core.links.Link = null;
-        // No modifier: a terminal may keep ctrl to itself, and knowing what is
-        // clickable is the whole point of hovering. What lights up is exactly
-        // what a click would open, anchor words included.
-        if (self.cell_offset(lay, mouse)) |offset| found = self.link_span_at(offset);
+        var target: ?[]const u8 = null;
+        if (mouse.ctrl) {
+            if (self.cell_offset(lay, mouse)) |offset| {
+                found = self.link_span_at(offset);
+                if (found != null) {
+                    var buffer: [core.limits.url_max]u8 = undefined;
+                    if (self.target_at(offset, &buffer)) |url| {
+                        // Kept for the popup: the address is not in the text.
+                        self.hover_url.set(url);
+                        target = self.hover_url.slice();
+                    }
+                }
+            }
+        }
         if (found == null and self.hovered == null) return false;
         if (found != null and self.hovered != null and found.?.start == self.hovered.?.start) return false;
         self.hovered = found;
+        if (target == null) self.hover_url.clear();
         self.needs_render = true;
         return true;
     }
@@ -1068,6 +1083,7 @@ pub const Session = struct {
         self.image_slot_count = 0;
         self.image_painted = 0;
         self.hovered = null;
+        self.hover_url.clear();
 
         self.html_len = 0;
         self.html_ready = false;
@@ -1652,6 +1668,7 @@ pub const Session = struct {
             .wrapped = if (self.body_loaded) &self.wrapped else null,
             .links = self.reader_links(),
             .hovered = self.hovered,
+            .hover_url = if (self.hover_url.is_empty()) null else self.hover_url.slice(),
             .kinds = self.html_kinds[0..self.html_kind_count],
             .cover = self.cover_rows[0..self.cover_len],
             .selection = self.selection,
@@ -3685,7 +3702,7 @@ test "mail with an HTML part opens as HTML, and H goes back to the text" {
     // What a mail client shows: the HTML part, laid out.
     try testing.expect(rig.session.html_view);
     try testing.expectEqualStrings(
-        "Read the docs (https://example.com/a)",
+        "Read the docs",
         rig.session.reader_text(),
     );
 
@@ -3753,13 +3770,13 @@ test "a message with an HTML part renders both views from one fetch" {
 
     // Both views come from the same fetch, and HTML is the one shown first.
     try testing.expectEqualStrings(
-        "Read the docs (https://example.com/a)",
+        "Read the docs",
         rig.session.reader_text(),
     );
     rig.send("H");
     try testing.expectEqualStrings("plain version", rig.session.reader_text());
     try testing.expectEqualStrings(
-        "Read the docs (https://example.com/a)",
+        "Read the docs",
         rig.session.html_text[0..rig.session.html_len],
     );
 }
@@ -4294,16 +4311,22 @@ test "the pointer lights a link up, and the light goes when it leaves" {
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     // Column 6 sits inside the address.
-    try testing.expect(rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
+    // Without ctrl the pointer changes nothing: reading is never disturbed.
+    try testing.expect(!rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
+    try testing.expect(rig.session.hovered == null);
+    try testing.expect(rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
     try testing.expect(rig.session.hovered != null);
+    // And the popup knows where it goes.
+    try testing.expectEqualStrings("https://example.com/a", rig.session.hover_url.slice());
 
     // Leaving the link, or hovering plain text, puts the light out.
-    try testing.expect(rig.session.hover_link(.{ .x = 1, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
+    try testing.expect(rig.session.hover_link(.{ .x = 1, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
     try testing.expect(rig.session.hovered == null);
+    try testing.expect(rig.session.hover_url.is_empty());
 
     // Moving between cells of the same link does not repaint.
-    _ = rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none });
-    try testing.expect(!rig.session.hover_link(.{ .x = 9, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
+    _ = rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true });
+    try testing.expect(!rig.session.hover_link(.{ .x = 9, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
 }
 
 test "a ctrl click reported by the terminal reaches the link" {
@@ -4401,7 +4424,7 @@ test "in the HTML view the pointer lights up the words of a link" {
         break;
     }
 
-    const hover = input.Mouse{ .x = column + 2, .y = lay.reader_body_y + row, .kind = .motion, .button = .none };
+    const hover = input.Mouse{ .x = column + 2, .y = lay.reader_body_y + row, .kind = .motion, .button = .none, .ctrl = true };
     try testing.expect(rig.session.hover_link(hover));
     // The lit span is the words of the anchor, not the address in parentheses.
     const lit = rig.session.hovered.?;

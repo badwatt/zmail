@@ -34,6 +34,8 @@ pub const Inputs = struct {
     links: []const core.links.Link = &.{},
     /// The link the pointer is over, if any: lit up so a click is not a guess.
     hovered: ?core.links.Link = null,
+    /// Where that link goes, shown in a popup while the pointer is on it.
+    hover_url: ?[]const u8 = null,
     /// What the mouse has covered so far, shown while it is being dragged.
     selection: ?selection.Selection = null,
     /// Which wrapped line is being drawn, so the selection can be placed.
@@ -559,6 +561,7 @@ fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     render_reader_meta(inputs, lay, message, out);
     out.hline(0, lay.reader_rule_y, lay.columns, '─', inputs.theme.border);
     render_body(inputs, lay, out);
+    render_hover_popup(inputs, lay, out);
     out.hline(0, lay.bottom_rule_y, lay.columns, '─', inputs.theme.border);
 }
 
@@ -618,6 +621,27 @@ fn render_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         const visible = if (std.mem.indexOf(u8, line, "[IMG:")) |marker| line[0..marker] else line;
         draw_line_with_links(line_inputs, out, visible, lay.reader_body_y + row, lay.columns - 2);
     }
+}
+
+/// The address of the link under the pointer, in a box at the bottom of the
+/// body: the mail says "read more", and this is where "read more" goes.
+fn render_hover_popup(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    const url = inputs.hover_url orelse return;
+    if (url.len == 0) return;
+
+    const inner: u16 = @min(@as(u16, @intCast(url.len)), lay.columns -| 6);
+    if (inner == 0) return;
+    const width: u16 = inner + 4;
+    const height: u16 = 3;
+    const rect = Rect{
+        .x = 1,
+        .y = lay.reader_body_y + lay.reader_rows -| (height + 1),
+        .width = width,
+        .height = height,
+    };
+    out.fill_rect(rect, ' ', inputs.theme.text);
+    out.box(rect, inputs.theme.accent);
+    _ = out.put_text(rect.x + 2, rect.y + 1, url, inner, inputs.theme.accent);
 }
 
 /// One wrapped line, with its links underlined so they read as links and not
@@ -1368,6 +1392,7 @@ test "frame says so when the body is not loaded yet or empty" {
     frame(f.inputs(100, 24), &out);
     try row_contains(&out, 3, "Loading...");
 
+    // Still empty: the reader says so instead of showing a blank body.
     f.wrapped = .{};
     f.wrapped_ready = true;
     frame(f.inputs(100, 24), &out);
@@ -1886,4 +1911,45 @@ test "the help card scrolls to its last row" {
     var buffer: [256]u8 = undefined;
     // The footer is the last row of the card, not the last row of the screen.
     try testing.expect(std.mem.indexOf(u8, out.row_text(23, &buffer), "filters") == null);
+}
+
+test "the address of the hovered link shows in a popup" {
+    var f = try fixture();
+    defer f.deinit();
+    // A real message, so the reader has something to draw over.
+    f.state.view = .reader;
+    const opened = f.state.selected(&f.store).?;
+    f.state.opened_account = opened.account;
+    f.state.opened = opened.id;
+    const body = "Read the docs today";
+    @memcpy(f.body[0..body.len], body);
+    f.body_len = body.len;
+    wrap.wrap(body, 80, &f.wrapped);
+    f.wrapped_ready = true;
+
+    var out = Screen.init(100, 24);
+    var inputs = f.inputs(100, 24);
+    inputs.hovered = .{ .start = 5, .end = 13 };
+    inputs.hover_url = "https://example.com/a";
+    frame(inputs, &out);
+
+    // The popup sits over the body, with the whole address in it.
+    var found = false;
+    var row: u16 = 0;
+    while (row < 24) : (row += 1) {
+        var buffer: [256]u8 = undefined;
+        if (std.mem.indexOf(u8, out.row_text(row, &buffer), "https://example.com/a") != null) found = true;
+    }
+    try testing.expect(found);
+
+    // With nothing hovered there is no popup.
+    var plain = Screen.init(100, 24);
+    inputs.hover_url = null;
+    inputs.hovered = null;
+    frame(inputs, &plain);
+    row = 0;
+    while (row < 24) : (row += 1) {
+        var buffer: [256]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, plain.row_text(row, &buffer), "https://example.com/a") == null);
+    }
 }
