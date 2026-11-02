@@ -45,11 +45,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2
-      # kcov is not in the runner's repositories. build.zig already falls back to
-      # nix-shell when kcov is not on PATH, so Nix is all that is needed here.
-      - name: Install Nix
-        uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
+      # The runner's repositories have no kcov package, and a kcov from Nix drags
+      # its own glibc into the process: the binary under test then loads two libcs
+      # and dies. Building it here keeps one libc in the picture.
+      - name: Install kcov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libelf-dev libdw-dev binutils-dev \
+            libcurl4-openssl-dev zlib1g-dev libssl-dev
+          curl -fsSL -o kcov.tar.gz https://github.com/SimonKagstrom/kcov/archive/refs/tags/v43.tar.gz
+          tar -xzf kcov.tar.gz
+          cmake -S kcov-43 -B kcov-build -DCMAKE_BUILD_TYPE=Release
+          cmake --build kcov-build -j"$(nproc)"
+          sudo cmake --install kcov-build
+          kcov --version
       - name: Line coverage
         run: zig build coverage
