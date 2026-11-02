@@ -234,6 +234,8 @@ pub const Session = struct {
     /// in the laid-out text.
     html_marked: [core.limits.body_max * 2]u8 = undefined,
     html_marked_len: u32 = 0,
+    /// The view the last frame was drawn for: a change repaints everything.
+    last_view: core.state.View = .list,
     /// Whether the reader already explained why no picture appeared.
     image_hint_shown: bool = false,
     /// Signature of the layer on screen, so an unchanged one is left alone.
@@ -1586,6 +1588,13 @@ pub const Session = struct {
             self.flush();
             return;
         }
+        // Another view means another screen: the rows that held a picture have
+        // nothing in them now, and a diff would leave them as they were.
+        if (self.last_view != self.state.view) {
+            self.last_view = self.state.view;
+            self.screen.pristine = true;
+        }
+
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
         if (self.html_needs_browser) self.layout_html_with_browser(lay.reader_text_width);
         if (self.body_loaded) {
