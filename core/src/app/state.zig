@@ -186,6 +186,13 @@ pub const State = struct {
     reader_rows: u16 = 1,
     body_rows: u32 = 0,
 
+    /// What the reader is showing, kept here so a refresh that drops the message
+    /// from the store does not blank the page under the reader's eyes.
+    opened_subject: Text(limits.subject_max) = .{},
+    opened_from: Address = .{},
+    opened_time: i64 = 0,
+    opened_size: u32 = 0,
+
     /// Where to return when the help overlay closes.
     help_return: View = .list,
     /// Filter typed inside the help overlay.

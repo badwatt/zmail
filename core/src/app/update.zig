@@ -178,6 +178,10 @@ fn apply_open(state: *State, store: *Store, effects: *Effects) void {
 
     state.opened = message.id;
     state.opened_account = message.account;
+    state.opened_subject.set(message.subject.slice());
+    state.opened_from = message.from;
+    state.opened_time = message.timestamp_unix;
+    state.opened_size = message.size_bytes;
     state.view = .reader;
     state.reader_scroll = 0;
 

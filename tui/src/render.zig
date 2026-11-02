@@ -542,46 +542,66 @@ fn render_compose_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) voi
 }
 
 fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
-    const message = (if (inputs.state.opened_account.is_known())
+    // The store is the live copy, but a refresh can drop a message while it is
+    // on screen: what the reader shows comes from the snapshot taken when it was
+    // opened, so the page never blanks under the cursor.
+    const stored = if (inputs.state.opened_account.is_known())
         inputs.store.get_const(inputs.state.opened_account, inputs.state.opened)
     else
-        null) orelse {
+        null;
+
+    const header = Header{
+        .subject = if (stored) |message| message.subject.slice() else inputs.state.opened_subject.slice(),
+        .from = if (stored) |message| message.from else inputs.state.opened_from,
+        .timestamp_unix = if (stored) |message| message.timestamp_unix else inputs.state.opened_time,
+        .size_bytes = if (stored) |message| message.size_bytes else inputs.state.opened_size,
+    };
+
+    if (header.subject.len == 0 and !inputs.state.opened.is_known()) {
         put_centered(out, lay.reader_body_y + lay.reader_rows / 2, "Message unavailable", inputs.theme.alert);
         out.hline(0, lay.bottom_rule_y, lay.columns, '─', inputs.theme.border);
         return;
-    };
+    }
 
     out.put_text_truncated(
         1,
         lay.reader_subject_y,
-        message.subject.slice(),
+        header.subject,
         lay.columns - 2,
         inputs.theme.text.with_bold(),
     );
-    render_reader_meta(inputs, lay, message, out);
+    render_reader_meta(inputs, lay, header, out);
     out.hline(0, lay.reader_rule_y, lay.columns, '─', inputs.theme.border);
     render_body(inputs, lay, out);
     render_hover_popup(inputs, lay, out);
     out.hline(0, lay.bottom_rule_y, lay.columns, '─', inputs.theme.border);
 }
 
-fn render_reader_meta(inputs: Inputs, lay: layout_mod.Layout, message: *const core.message.Message, out: *Screen) void {
+/// What the reader needs to know about the message it is showing.
+const Header = struct {
+    subject: []const u8,
+    from: core.address.Address,
+    timestamp_unix: i64,
+    size_bytes: u32,
+};
+
+fn render_reader_meta(inputs: Inputs, lay: layout_mod.Layout, header: Header, out: *Screen) void {
     var date_buffer: [16]u8 = undefined;
-    const date = core.time.full_date(&date_buffer, message.timestamp_unix);
+    const date = core.time.full_date(&date_buffer, header.timestamp_unix);
     var size_buffer: [16]u8 = undefined;
-    const size = size_text(&size_buffer, message.size_bytes);
+    const size = size_text(&size_buffer, header.size_bytes);
 
     // The name somebody chose and the address they actually wrote from: mail
     // clients show both, and so does this one.
     var address_buffer: [core.limits.address_max]u8 = undefined;
-    const address = message.from.addr_spec(&address_buffer);
-    const named = message.from.name.len > 0 and address.len > 0;
+    const address = header.from.addr_spec(&address_buffer);
+    const named = header.from.name.len > 0 and address.len > 0;
 
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     if (named) {
         writer.print("From {s} <{s}>  ·  {s}  ·  {s}", .{
-            message.from.name.slice(), address, date, size,
+            header.from.name.slice(), address, date, size,
         }) catch {};
     } else {
         writer.print("From {s}  ·  {s}  ·  {s}", .{ address, date, size }) catch {};
@@ -1402,11 +1422,50 @@ test "frame reports an unavailable message instead of crashing" {
     var f = try fixture();
     defer f.deinit();
     f.state.view = .reader;
-    f.state.opened = MessageId.from_int(99);
+    // Nothing was ever opened: there is no message to describe.
+    f.state.opened = .unknown;
 
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
     try row_contains(&out, 12, "Message unavailable");
+}
+
+test "a message dropped from the store still reads on screen" {
+    var f = try fixture();
+    defer f.deinit();
+    _ = core.update.apply(&f.state, &f.store, .open_selected);
+
+    // What a refresh does: the mailbox is swapped for a newer list, and the
+    // message being read is not in it.
+    const opened = f.state.opened;
+    _ = f.store.remove_in(f.state.opened_account, f.state.mailbox);
+    f.state.rebuild(&f.store);
+
+    const body = "still here";
+    @memcpy(f.body[0..body.len], body);
+    f.body_len = body.len;
+    wrap.wrap(f.body[0..f.body_len], 80, &f.wrapped);
+    f.wrapped_ready = true;
+
+    var out = Screen.init(100, 24);
+    frame(f.inputs(100, 24), &out);
+
+    // The header comes from the snapshot, and the body is still drawn.
+    try testing.expectEqual(opened, f.state.opened);
+    var found = false;
+    var row: u16 = 0;
+    while (row < 24) : (row += 1) {
+        var buffer: [256]u8 = undefined;
+        if (std.mem.indexOf(u8, out.row_text(row, &buffer), f.state.opened_subject.slice()) != null) found = true;
+    }
+    try testing.expect(found);
+    found = false;
+    row = 0;
+    while (row < 24) : (row += 1) {
+        var buffer: [256]u8 = undefined;
+        if (std.mem.indexOf(u8, out.row_text(row, &buffer), "still here") != null) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "frame draws the help overlay over the current view" {
