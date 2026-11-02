@@ -51,6 +51,15 @@
 - 100-column lines, 4-space indent, `zig fmt`.
 - Sanitization happens on ingress (`core/src/domain/text.zig`), not on render.
 
+## Releasing
+
+- `build.zig.zon` is the release: `.version` is the tag, `.name` is the binary and
+  `.minimum_zig_version` is the compiler. Nothing else may spell any of them.
+- Bump `.version` and push; `release.yml` only starts when the manifest changes,
+  and refuses to tag a version that already has a tag.
+- `zig build docs:check` keeps README/AGENTS honest about the toolchain and fails
+  if a Zig file writes the product name as a literal.
+
 ## Questions?
 
 Ask before uncertain decisions. Prefer stating assumptions in the commit

@@ -117,8 +117,9 @@ zig build coverage   # kcov, fails below 100% line coverage
 zig build fmt        # zig fmt
 ```
 
-Requires Zig 0.17.0. The coverage step pulls `kcov` from `nix-shell` (a
-development tool, not a dependency).
+Requires Zig 0.17.0. The coverage step uses `kcov` from `PATH` when it is
+installed and falls back to `nix-shell` when it is not (a development tool, not a
+dependency).
 
 ## What it is today
 
@@ -174,6 +175,21 @@ for a bogus password). STARTTLS and a real secret store are next.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — IMAP/SMTP, compose, self-hosted
   credential storage, GUI.
 - [`docs/TIGER_STYLE.md`](docs/TIGER_STYLE.md) — the style guide we follow.
+
+## Releasing
+
+The version in [`build.zig.zon`](build.zig.zon) is the release: bumping it is the
+only thing that can cut one.
+
+1. Bump `.version` in `build.zig.zon` and commit it.
+2. Push to `main`. The `release` workflow starts because the manifest changed,
+   tags that version (a tag that already exists stops it there), builds
+   `ReleaseSafe` binaries for x86_64 and aarch64 Linux, and publishes them with
+   `SHA256SUMS` and a changelog grouped by commit prefix.
+
+Pushing code without touching the manifest runs the CI and nothing else. A
+release that failed halfway can be retried with **Run workflow**
+(`workflow_dispatch`) without changing the version again.
 
 ## Status
 
