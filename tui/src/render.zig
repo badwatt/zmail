@@ -561,9 +561,21 @@ fn render_reader_meta(inputs: Inputs, lay: layout_mod.Layout, message: *const co
     var size_buffer: [16]u8 = undefined;
     const size = size_text(&size_buffer, message.size_bytes);
 
-    var buffer: [160]u8 = undefined;
+    // The name somebody chose and the address they actually wrote from: mail
+    // clients show both, and so does this one.
+    var address_buffer: [core.limits.address_max]u8 = undefined;
+    const address = message.from.addr_spec(&address_buffer);
+    const named = message.from.name.len > 0 and address.len > 0;
+
+    var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    writer.print("From {s}  ·  {s}  ·  {s}", .{ message.from.label(), date, size }) catch {};
+    if (named) {
+        writer.print("From {s} <{s}>  ·  {s}  ·  {s}", .{
+            message.from.name.slice(), address, date, size,
+        }) catch {};
+    } else {
+        writer.print("From {s}  ·  {s}  ·  {s}", .{ address, date, size }) catch {};
+    }
     _ = out.put_text(1, lay.reader_meta_y, writer.buffered(), lay.columns - 2, inputs.theme.dim);
 }
 
@@ -1571,4 +1583,86 @@ test "a link that wraps is drawn without gaps or doubled spaces" {
     var second: [64]u8 = undefined;
     const next = std.mem.trimEnd(u8, canvas.row_text(1, &second), " ");
     try testing.expectEqualStrings(wrapped.at(1, body), std.mem.trimStart(u8, next, " "));
+}
+
+/// Reads every row: the reader's layout decides where the meta line lands.
+fn screen_contains(out: *const Screen, needle: []const u8) bool {
+    var row: u16 = 0;
+    var buffer: [512]u8 = undefined;
+    while (row < out.rows) : (row += 1) {
+        if (std.mem.indexOf(u8, out.row_text(row, &buffer), needle) != null) return true;
+    }
+    return false;
+}
+
+test "the reader shows the address behind the name" {
+    var store = try core.store.Store.init(testing.allocator, 4);
+    defer store.deinit(testing.allocator);
+
+    var message = core.message.Message{
+        .id = core.id.MessageId.from_int(1),
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .timestamp_unix = 1_700_000_000,
+        .from = try core.address.Address.init("Alice Rivera <alice@example.com>"),
+    };
+    message.subject.set("Hello");
+    try store.insert(&message);
+
+    var state = State{};
+    state.accounts.add(core.id.AccountId.from_int(1), "work", message.from, .{});
+    state.view = .reader;
+    state.opened_account = message.account;
+    state.opened = message.id;
+    state.rebuild(&store);
+
+    var out: Screen = .{};
+    var inputs = Inputs{
+        .state = &state,
+        .store = &store,
+        .theme = &Theme.dark(),
+        .body = "text",
+        .columns = 100,
+        .rows = 24,
+    };
+    inputs.now_unix = 1_700_000_000;
+    frame(inputs, &out);
+
+    try testing.expect(screen_contains(&out, "Alice Rivera <alice@example.com>"));
+}
+
+test "a sender with no display name is just the address, not twice" {
+    var store = try core.store.Store.init(testing.allocator, 2);
+    defer store.deinit(testing.allocator);
+
+    var message = core.message.Message{
+        .id = core.id.MessageId.from_int(1),
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .timestamp_unix = 1_700_000_000,
+        .from = try core.address.Address.init("bob@example.com"),
+    };
+    message.subject.set("Hello");
+    try store.insert(&message);
+
+    var state = State{};
+    state.accounts.add(core.id.AccountId.from_int(1), "work", message.from, .{});
+    state.view = .reader;
+    state.opened_account = message.account;
+    state.opened = message.id;
+    state.rebuild(&store);
+
+    var out: Screen = .{};
+    frame(.{
+        .state = &state,
+        .store = &store,
+        .theme = &Theme.dark(),
+        .body = "text",
+        .columns = 100,
+        .rows = 24,
+        .now_unix = 1_700_000_000,
+    }, &out);
+
+    try testing.expect(screen_contains(&out, "From bob@example.com"));
+    try testing.expect(!screen_contains(&out, "<bob@example.com>"));
 }
