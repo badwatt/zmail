@@ -18,13 +18,48 @@ const chunk_max: usize = 4096;
 const raw_chunk_max: usize = chunk_max / 4 * 3;
 
 /// Whether this terminal speaks the kitty graphics protocol.
+/// Whether this terminal speaks the protocol. Asked for, it is used; forced
+/// off, it is not; otherwise the terminal's own name decides, because the
+/// protocol has no way of being tested without waiting for an answer.
 pub fn supported() bool {
-    // Off unless asked for. The protocol draws a layer the terminal owns, and
-    // that layer has to be placed, moved and deleted by hand: when any of that
-    // goes wrong the reader shows pictures over the wrong screen. Blocks are
-    // cells, and cells cannot go wrong.
-    const value = Env.get("AMAIL_IMAGES") orelse return false;
-    return std.mem.eql(u8, value, "kitty");
+    return decide(
+        Env.get("AMAIL_IMAGES"),
+        Env.get("TERM"),
+        Env.get("TERM_PROGRAM"),
+        Env.get("KITTY_WINDOW_ID"),
+        Env.get("WEZTERM_PANE"),
+        Env.get("TMUX") != null or Env.get("STY") != null,
+    );
+}
+
+/// The decision, without the environment, so it can be tested.
+pub fn decide(
+    choice: ?[]const u8,
+    term: ?[]const u8,
+    program: ?[]const u8,
+    kitty_window: ?[]const u8,
+    wezterm_pane: ?[]const u8,
+    multiplexer: bool,
+) bool {
+    if (choice) |value| {
+        if (std.mem.eql(u8, value, "blocks")) return false;
+        if (std.mem.eql(u8, value, "kitty")) return true;
+    }
+    // A multiplexer passes the escape through only when told to; the picture
+    // then lands on the wrong screen or not at all.
+    if (multiplexer) return false;
+    if (kitty_window != null or wezterm_pane != null) return true;
+    if (term) |name| {
+        if (std.mem.indexOf(u8, name, "kitty") != null) return true;
+        if (std.mem.indexOf(u8, name, "ghostty") != null) return true;
+        if (std.mem.indexOf(u8, name, "wezterm") != null) return true;
+    }
+    if (program) |name| {
+        if (std.mem.eql(u8, name, "ghostty")) return true;
+        if (std.mem.eql(u8, name, "WezTerm")) return true;
+        if (std.mem.eql(u8, name, "kitty")) return true;
+    }
+    return false;
 }
 
 /// The environment, behind a name so tests can replace it.
@@ -150,7 +185,7 @@ fn fakeGet(name: [:0]const u8) ?[]const u8 {
     return null;
 }
 
-test "pictures by protocol are opt-in, and only with the word kitty" {
+test "a terminal that speaks the protocol is used without being asked" {
     const previous = Env.get;
     Env.get = fakeGet;
     defer Env.get = previous;
@@ -159,14 +194,29 @@ test "pictures by protocol are opt-in, and only with the word kitty" {
     fake_term = "xterm-ghostty";
     fake_program = "ghostty";
     fake_images = "";
-    // A terminal that supports it perfectly is still not asked unless told.
+    fake_tmux = false;
+    // Sharp by default when the terminal can do it.
+    try testing.expect(supported());
+
+    // A plain terminal gets blocks, which every terminal can draw.
+    fake_kitty = false;
+    fake_term = "xterm-256color";
+    fake_program = "";
     try testing.expect(!supported());
 
+    // The variable settles it either way.
+    fake_term = "xterm-ghostty";
     fake_images = "blocks";
     try testing.expect(!supported());
-
+    fake_term = "xterm-256color";
     fake_images = "kitty";
     try testing.expect(supported());
+
+    // And a multiplexer is never answered.
+    fake_images = "";
+    fake_term = "xterm-kitty";
+    fake_tmux = true;
+    try testing.expect(!supported());
 }
 
 test "draw streams one image in chunks, then clears it" {
@@ -193,4 +243,22 @@ test "draw refuses an empty picture or no room for it" {
     try testing.expect(!draw(fake.system(), "", 1, 1, 10, 10));
     try testing.expect(!draw(fake.system(), "x", 1, 1, 0, 10));
     try testing.expectEqualStrings("", fake.output_text());
+}
+
+test "the terminal's name decides, unless the user insists" {
+    // A terminal that speaks the protocol gets the sharp picture by default.
+    try testing.expect(decide(null, "xterm-kitty", null, null, null, false));
+    try testing.expect(decide(null, "xterm-ghostty", null, null, null, false));
+    try testing.expect(decide(null, "xterm-256color", "ghostty", "1", null, false));
+    try testing.expect(decide(null, "xterm-256color", null, null, "1", false));
+
+    // A plain terminal falls back to blocks.
+    try testing.expect(!decide(null, "xterm-256color", null, null, null, false));
+    try testing.expect(!decide(null, "screen", null, null, null, false));
+    // A multiplexer eats the escape.
+    try testing.expect(!decide(null, "xterm-kitty", null, "1", null, true));
+
+    // The variable wins both ways.
+    try testing.expect(decide("kitty", "dumb", null, null, null, false));
+    try testing.expect(!decide("blocks", "xterm-kitty", null, "1", null, false));
 }
