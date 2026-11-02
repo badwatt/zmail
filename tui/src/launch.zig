@@ -56,7 +56,7 @@ fn run_inside(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: S
     if (options.set_password) return run_set_password(io, options, system);
     if (options.add_account) return run_add_account(io, options, system);
     return switch (options.mode) {
-        .demo => run_demo(gpa, system),
+        .demo => run_demo(gpa, io, system),
         .live => run_live(gpa, io, options, system),
     };
 }
@@ -70,7 +70,7 @@ const Demo = struct {
     outboxes: [2]session_mod.OutboxSource = undefined,
 };
 
-fn run_demo(gpa: std.mem.Allocator, system: SessionSystem) ?Failure {
+fn run_demo(gpa: std.mem.Allocator, io: std.Io, system: SessionSystem) ?Failure {
     var demo: Demo = .{};
     const now = os.now_unix();
 
@@ -92,11 +92,12 @@ fn run_demo(gpa: std.mem.Allocator, system: SessionSystem) ?Failure {
     demo.outboxes[0] = .{ .id = core.id.AccountId.from_int(1), .outbox = demo.outbox[0].outbox() };
     demo.outboxes[1] = .{ .id = core.id.AccountId.from_int(2), .outbox = demo.outbox[1].outbox() };
 
-    return run_session(gpa, system, &demo.sources, &demo.outboxes, null, null, null, false, null);
+    return run_session(gpa, io, system, &demo.sources, &demo.outboxes, null, null, null, false, null);
 }
 
 fn run_session(
     gpa: std.mem.Allocator,
+    io: std.Io,
     system: SessionSystem,
     accounts: []const session_mod.MailSource,
     outboxes: []const session_mod.OutboxSource,
@@ -108,6 +109,7 @@ fn run_session(
 ) ?Failure {
     // The session owns megabytes of bounded buffers; keeping it on the stack
     // next to the adapters overflows it.
+    var browser = Browser{ .io = io };
     const session = gpa.create(session_mod.Session) catch
         return .{ .message = "Not enough memory to start" };
     defer gpa.destroy(session);
@@ -122,11 +124,23 @@ fn run_session(
         .system = system,
         .theme = theme_for_environment(),
         .now = os.now_unix,
+        .open_url = openUrlThunk,
+        .open_url_context = &browser,
     }) catch return .{ .message = "Not enough memory to start" };
     defer session.deinit();
 
     session.loop();
     return null;
+}
+
+/// Clicking a link hands it to whatever opens browsers on this machine.
+const Browser = struct {
+    io: std.Io,
+};
+
+fn openUrlThunk(context: *anyopaque, url: []const u8) void {
+    const self: *Browser = @ptrCast(@alignCast(context));
+    net.oauth_flow.open_in_browser(self.io, url);
 }
 
 const max_accounts = core.config.max_accounts;
@@ -372,7 +386,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
     // accounts and say what is wrong, so the file can be fixed in another
     // window and the client restarted.
     const file = core.config.parse(config_text) catch |err| {
-        return run_session(gpa, system, &.{}, &.{}, null, null, null, true, config_message(err));
+        return run_session(gpa, io, system, &.{}, &.{}, null, null, null, true, config_message(err));
     };
     if (file.len == 0) return .{ .message = "The config has no accounts" };
 
@@ -462,6 +476,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
 
     const outcome = run_session(
         gpa,
+        io,
         system,
         live.sources[0..live.mail_count],
         live.outboxes[0..live.outbox_count],

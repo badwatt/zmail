@@ -46,6 +46,7 @@ pub const MemoryMail = struct {
         return .{ .context = self, .vtable = &.{
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
+            .fetch_raw = fetchRawThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
             .delete_message = deleteThunk,
@@ -70,6 +71,16 @@ pub const MemoryMail = struct {
         const message = self.find(id) orelse return error.NotFound;
         if (message.mailbox != mailbox) return error.NotFound;
         return render_body(message, out);
+    }
+
+    /// The memory adapter stores whole messages, so the raw form is the same
+    /// bytes the text form is rendered from.
+    fn fetchRawThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) port.Error![]const u8 {
+        const self: *MemoryMail = @ptrCast(@alignCast(context));
+        const message = self.find(id) orelse return error.NotFound;
+        if (message.mailbox != mailbox) return error.NotFound;
+        const text = render_body(message, out);
+        return text;
     }
 
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) port.Error!void {

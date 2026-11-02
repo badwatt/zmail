@@ -34,6 +34,9 @@ pub const Mail = struct {
         /// never cached in envelopes. UIDs are per mailbox, so the mailbox is
         /// part of the address.
         fetch_body: *const fn (context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) Error![]const u8,
+        /// The message as the server sent it: the reader renders text and HTML
+        /// from the same bytes, so switching views costs no second fetch.
+        fetch_raw: *const fn (context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) Error![]const u8,
         set_flags: *const fn (context: *anyopaque, id: MessageId, flags: Flags) Error!void,
         move_message: *const fn (context: *anyopaque, id: MessageId, to: Mailbox) Error!void,
         /// Removes a message for good: mark deleted, then expunge.
@@ -48,6 +51,10 @@ pub const Mail = struct {
 
     pub fn fetch_body(self: Mail, mailbox: Mailbox, id: MessageId, out: []u8) Error![]const u8 {
         return self.vtable.fetch_body(self.context, mailbox, id, out);
+    }
+
+    pub fn fetch_raw(self: Mail, mailbox: Mailbox, id: MessageId, out: []u8) Error![]const u8 {
+        return self.vtable.fetch_raw(self.context, mailbox, id, out);
     }
 
     pub fn set_flags(self: Mail, id: MessageId, flags: Flags) Error!void {
@@ -93,6 +100,7 @@ const Recorder = struct {
         return .{ .context = self, .vtable = &.{
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
+            .fetch_raw = fetchRawThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
             .delete_message = deleteThunk,
@@ -117,6 +125,15 @@ const Recorder = struct {
         if (out.len == 0) return "";
         out[0] = 'x';
         return out[0..1];
+    }
+
+    fn fetchRawThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) Error![]const u8 {
+        const self: *Recorder = @ptrCast(@alignCast(context));
+        self.last_id = id;
+        self.last_mailbox = mailbox;
+        if (out.len < 3) return "";
+        @memcpy(out[0..3], "raw");
+        return out[0..3];
     }
 
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) Error!void {
@@ -171,6 +188,15 @@ test "Mail.fetch_body forwards the id and returns a slice into out" {
     const body = try recorder.mail().fetch_body(.inbox, MessageId.from_int(9), &out);
     try testing.expectEqualStrings("x", body);
     try testing.expectEqual(MessageId.from_int(9), recorder.last_id);
+}
+
+test "Mail.fetch_raw forwards the same way" {
+    var recorder: Recorder = .{};
+    var out: [8]u8 = undefined;
+    const raw = try recorder.mail().fetch_raw(.sent, MessageId.from_int(4), &out);
+    try testing.expectEqualStrings("raw", raw);
+    try testing.expectEqual(Mailbox.sent, recorder.last_mailbox);
+    try testing.expectEqual(MessageId.from_int(4), recorder.last_id);
 }
 
 test "Mail.fetch_body handles an empty output buffer" {

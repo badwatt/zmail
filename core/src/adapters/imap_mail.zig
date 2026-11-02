@@ -68,6 +68,7 @@ pub const ImapMail = struct {
         return .{ .context = self, .vtable = &.{
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
+            .fetch_raw = fetchRawThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
             .delete_message = deleteThunk,
@@ -158,6 +159,20 @@ pub const ImapMail = struct {
         if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
         const raw = self.client.fetch_body(try uid_of(id), &self.raw) catch |err| return mapError(err);
         return mime.text_body(raw, out, &self.scratch);
+    }
+
+    fn fetchRawThunk(
+        context: *anyopaque,
+        mailbox: Mailbox,
+        id: MessageId,
+        out: []u8,
+    ) port.Error![]const u8 {
+        const self: *ImapMail = @ptrCast(@alignCast(context));
+        if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
+        const raw = self.client.fetch_body(try uid_of(id), &self.raw) catch |err| return mapError(err);
+        if (raw.len > out.len) return error.Unavailable;
+        @memcpy(out[0..raw.len], raw);
+        return out[0..raw.len];
     }
 
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) port.Error!void {

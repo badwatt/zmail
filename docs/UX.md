@@ -255,3 +255,16 @@ is unchanged.
 No colon command line, no tabs-within-tabs, no threading view, no HTML
 rendering. Each of those adds a mode or a pane, and the next milestone is live
 mail, not more surface area.
+
+## Reading
+
+`j`/`k` scroll, `Space` pages, `q` goes back. A message that has an HTML part
+can be read that way with `H`: paragraphs, lists, quotes and headings keep
+their shape, and every link is written out after its text, underlined.
+
+Links are clickable in either view. A click on a URL hands it to the browser
+(`xdg-open`, `gio open`, `sensible-browser`, `open`, or `wslview`, whichever
+exists); a click on the words around it does nothing.
+
+The accounts overlay (`A`) lists "All accounts" first and then your accounts by
+name, whatever order the config file uses.

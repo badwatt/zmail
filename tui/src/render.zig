@@ -564,13 +564,39 @@ fn render_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     while (row < lay.reader_rows) : (row += 1) {
         const line_index = inputs.state.reader_scroll + row;
         if (line_index >= wrapped.len) break;
+        const line = wrapped.at(line_index, inputs.body);
+        draw_line_with_links(inputs, out, line, lay.reader_body_y + row, lay.columns - 2);
+    }
+}
+
+/// One wrapped line, with its links underlined so they read as links and not
+/// as punctuation soup.
+fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16) void {
+    var buffer: [core.links.max_links]core.links.Link = undefined;
+    const count = core.links.scan(line, &buffer);
+    if (count == 0) {
+        _ = out.put_text(1, y, line, width, inputs.theme.text);
+        return;
+    }
+
+    var cursor: u16 = 0;
+    for (buffer[0..count]) |link| {
+        const start: u16 = @intCast(link.start);
+        const end: u16 = @intCast(link.end);
+        if (start > cursor) {
+            _ = out.put_text(1 + cursor, y, line[cursor..start], width -| cursor, inputs.theme.text);
+        }
         _ = out.put_text(
-            1,
-            lay.reader_body_y + row,
-            wrapped.at(line_index, inputs.body),
-            lay.columns - 2,
-            inputs.theme.text,
+            1 + start,
+            y,
+            link.text(line),
+            width -| start,
+            inputs.theme.accent.with_underline(),
         );
+        cursor = end;
+    }
+    if (cursor < line.len) {
+        _ = out.put_text(1 + cursor, y, line[cursor..], width -| cursor, inputs.theme.text);
     }
 }
 
@@ -612,9 +638,10 @@ const list_hints = [_]Hint{
 const reader_hints = [_]Hint{
     .{ .keys = "j/k", .action = "scroll" },
     .{ .keys = "Space", .action = "page" },
+    .{ .keys = "H", .action = "html" },
+    .{ .keys = "click", .action = "open link" },
     .{ .keys = "r", .action = "reply" },
     .{ .keys = "q", .action = "back" },
-    .{ .keys = "u", .action = "unread" },
     .{ .keys = "^R", .action = "refresh" },
 };
 

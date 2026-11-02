@@ -90,6 +90,10 @@ pub const Deps = struct {
     now: Now = fixed_now,
     /// Fallback sender when an account has no address configured.
     from_address: core.address.Address = .{},
+    /// Opens a link in the browser. Null in tests and in a terminal with no
+    /// opener: clicking a link then does nothing rather than lying.
+    open_url: ?*const fn (context: *anyopaque, url: []const u8) void = null,
+    open_url_context: *anyopaque = undefined,
 };
 
 pub const Session = struct {
@@ -108,6 +112,19 @@ pub const Session = struct {
     body_len: u32 = 0,
     body_loaded: bool = false,
     wrapped: wrap.Wrapped = .{},
+    /// The message as it arrived, kept so both views can be rendered without a
+    /// second fetch.
+    raw: [core.limits.body_max]u8 = undefined,
+    raw_len: u32 = 0,
+    /// The HTML part, and the reading view made from it.
+    html_part: [core.limits.body_max]u8 = undefined,
+    html_text: [core.limits.body_max]u8 = undefined,
+    html_len: u32 = 0,
+    /// Which view the reader is showing. HTML only when the message has it.
+    html_view: bool = false,
+    html_links: [core.links.max_links]core.links.Link = undefined,
+    /// MIME decoding scratch, kept here so nothing is allocated per message.
+    scratch_bytes: [core.limits.body_max]u8 = undefined,
 
     size: system_mod.Size = .{},
     now_unix: i64 = 0,
@@ -456,6 +473,10 @@ pub const Session = struct {
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
+        // `H` is a view, not a command: the core has no opinion about it.
+        if (key == .char and key.char == 'H' and self.state.view == .reader) {
+            return self.toggle_html();
+        }
         const command = keymap.translate(key, .{ .mode = self.state.mode, .view = self.state.view }) orelse return false;
         return self.apply(command);
     }
@@ -483,6 +504,49 @@ pub const Session = struct {
             if (mouse.y >= lay.body_y and mouse.y < lay.body_y + lay.list_rows) {
                 return self.click_row(lay, mouse.y);
             }
+        }
+        return self.click_link(lay, mouse);
+    }
+
+    /// Swaps the reader between the text and the HTML reading view.
+    fn toggle_html(self: *Session) bool {
+        if (!self.body_loaded) return false;
+        if (self.html_len == 0) {
+            self.state.set_status("This message has no HTML version", .{});
+            self.needs_render = true;
+            return true;
+        }
+        self.html_view = !self.html_view;
+        self.wrapped = .{};
+        self.state.reader_scroll = 0;
+        self.state.set_status("{s}", .{if (self.html_view) "HTML view" else "Plain text"});
+        self.needs_render = true;
+        return true;
+    }
+
+    /// A click inside the body that lands on a link opens it. The scan is the
+    /// same one the highlighter uses, over the same line, so what looks like a
+    /// link is what reacts.
+    fn click_link(self: *Session, lay: layout_mod.Layout, mouse: input.Mouse) bool {
+        if (self.state.view != .reader or !self.body_loaded) return false;
+        if (mouse.y < lay.reader_body_y or mouse.y >= lay.reader_body_y + lay.reader_rows) return false;
+
+        const row = mouse.y - lay.reader_body_y;
+        const index = self.state.reader_scroll + row;
+        if (index >= self.wrapped.len) return false;
+        if (mouse.x < 1) return false;
+
+        const line = self.wrapped.at(index, self.reader_text());
+        const column = mouse.x - 1;
+        var buffer: [core.links.max_links]core.links.Link = undefined;
+        const count = core.links.scan(line, &buffer);
+        for (buffer[0..count]) |link| {
+            if (column < link.start or column >= link.end) continue;
+            const url = link.text(line);
+            if (self.deps.open_url) |open| open(self.deps.open_url_context, url);
+            self.state.set_status("Opened {s}", .{url});
+            self.needs_render = true;
+            return true;
         }
         return false;
     }
@@ -591,11 +655,8 @@ pub const Session = struct {
     fn fetch_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
         // The local copy first: opening a message you have read is instant.
         if (self.deps.bodies) |bodies| {
-            if (bodies.load(account, mailbox, id, &self.body) catch null) |cached| {
-                self.body_len = @intCast(cached.len);
-                self.body_loaded = true;
-                self.wrapped = .{};
-                self.needs_render = true;
+            if (bodies.load(account, mailbox, id, &self.raw) catch null) |cached| {
+                self.set_raw(cached);
                 return;
             }
         }
@@ -604,18 +665,46 @@ pub const Session = struct {
             self.state.set_alert("That account is not connected", .{});
             return;
         };
-        const body = mail.fetch_body(mailbox, id, &self.body) catch {
+        const raw = mail.fetch_raw(mailbox, id, &self.raw) catch {
+            self.raw_len = 0;
             self.body_len = 0;
+            self.html_len = 0;
             self.body_loaded = true;
             self.wrapped = .{};
+            self.needs_render = true;
             self.state.set_alert("Could not load this message", .{});
             return;
         };
-        self.body_len = @intCast(body.len);
-        self.body_loaded = true;
-        if (self.deps.bodies) |bodies| {
-            bodies.save(account, mailbox, id, body) catch {};
+        if (self.deps.bodies) |bodies| bodies.save(account, mailbox, id, raw) catch {};
+        self.set_raw(raw);
+    }
+
+    /// Renders both views from one message: the text one (what the reader shows
+    /// by default) and, when there is an HTML part, the reading view made from
+    /// it. `H` switches between them without touching the network.
+    fn set_raw(self: *Session, raw: []const u8) void {
+        const length = @min(raw.len, self.raw.len);
+        if (raw.ptr != &self.raw) @memcpy(self.raw[0..length], raw[0..length]);
+        self.raw_len = @intCast(length);
+        const message = self.raw[0..self.raw_len];
+
+        const text = core.mime.text_body(message, &self.body, &self.scratch_bytes);
+        self.body_len = @intCast(text.len);
+
+        self.html_len = 0;
+        if (core.mime.html_body(message, &self.html_part, &self.scratch_bytes)) |part| {
+            const rendered = core.html.render(part, &self.html_text, &self.html_links);
+            self.html_len = @intCast(rendered.text.len);
         }
+        self.body_loaded = true;
+        self.wrapped = .{};
+        self.needs_render = true;
+    }
+
+    /// The text the reader is showing right now.
+    fn reader_text(self: *const Session) []const u8 {
+        if (self.html_view and self.html_len > 0) return self.html_text[0..self.html_len];
+        return self.body[0..self.body_len];
     }
 
     fn delete_message(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
@@ -1105,7 +1194,7 @@ pub const Session = struct {
         }
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
         if (self.body_loaded) {
-            wrap.wrap(self.body[0..self.body_len], lay.reader_text_width, &self.wrapped);
+            wrap.wrap(self.reader_text(), lay.reader_text_width, &self.wrapped);
         }
 
         _ = core.update.apply(&self.state, &self.store, .{ .set_viewport = .{
@@ -1118,7 +1207,7 @@ pub const Session = struct {
             .state = &self.state,
             .store = &self.store,
             .theme = &self.deps.theme,
-            .body = self.body[0..self.body_len],
+            .body = self.reader_text(),
             .wrapped = if (self.body_loaded) &self.wrapped else null,
             .now_unix = self.now_unix,
             .columns = self.size.columns,
@@ -1172,6 +1261,7 @@ const FakeMail = struct {
         return .{ .context = self, .vtable = &.{
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
+            .fetch_raw = fetchRawThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
             .delete_message = deleteThunk,
@@ -1194,6 +1284,17 @@ const FakeMail = struct {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         if (self.fail_body) return error.Rejected;
         return self.inner.mail().fetch_body(mailbox, id, out);
+    }
+
+    fn fetchRawThunk(
+        context: *anyopaque,
+        mailbox: Mailbox,
+        id: MessageId,
+        out: []u8,
+    ) core.mail_port.Error![]const u8 {
+        const self: *FakeMail = @ptrCast(@alignCast(context));
+        if (self.fail_body) return error.Rejected;
+        return self.inner.mail().fetch_raw(mailbox, id, out);
     }
 
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: core.message.Flags) core.mail_port.Error!void {
@@ -1229,6 +1330,10 @@ fn rejectBody(_: *anyopaque, _: Mailbox, _: MessageId, _: []u8) core.mail_port.E
     return error.Rejected;
 }
 
+fn rejectRaw(_: *anyopaque, _: Mailbox, _: MessageId, _: []u8) core.mail_port.Error![]const u8 {
+    return error.Rejected;
+}
+
 fn rejectFlags(_: *anyopaque, _: MessageId, _: core.message.Flags) core.mail_port.Error!void {
     return error.Rejected;
 }
@@ -1248,6 +1353,7 @@ fn rejectEmpty(_: *anyopaque, _: Mailbox) core.mail_port.Error!void {
 const reject_vtable = core.mail_port.Mail.VTable{
     .fetch = rejectFetch,
     .fetch_body = rejectBody,
+    .fetch_raw = rejectRaw,
     .set_flags = rejectFlags,
     .move_message = rejectMove,
     .delete_message = rejectDelete,
@@ -2917,4 +3023,102 @@ test "loop runs until quit" {
     rig.fake_system.push_input("\x11");
     rig.session.loop();
     try testing.expect(rig.session.state.quit);
+}
+
+const LinkSink = struct {
+    opened: u8 = 0,
+    last: [128]u8 = undefined,
+    last_len: usize = 0,
+
+    fn open(context: *anyopaque, url: []const u8) void {
+        const self: *LinkSink = @ptrCast(@alignCast(context));
+        self.opened += 1;
+        self.last_len = @min(url.len, self.last.len);
+        @memcpy(self.last[0..self.last_len], url[0..self.last_len]);
+    }
+};
+
+test "clicking a link in the body opens it" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: LinkSink = .{};
+    rig.session.deps.open_url = LinkSink.open;
+    rig.session.deps.open_url_context = &sink;
+
+    const body = "See https://example.com/a for details";
+    // A plain message with no HTML: the text view is what the reader shows.
+    rig.session.set_raw(body);
+    rig.session.state.view = .reader;
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+    try testing.expect(rig.session.wrapped.len > 0);
+
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    // Column 4 is the 'h' of "https": inside the link.
+    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .press, .button = .left });
+    try testing.expectEqual(@as(u8, 1), sink.opened);
+    try testing.expectEqualStrings("https://example.com/a", sink.last[0..sink.last_len]);
+
+    // A click on the words around it opens nothing.
+    _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .press, .button = .left });
+    try testing.expectEqual(@as(u8, 1), sink.opened);
+}
+
+test "H switches to the HTML view only when there is one" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.state.view = .reader;
+    rig.session.body_loaded = true;
+
+    // No HTML part: say so, stay in the text view.
+    rig.session.html_len = 0;
+    rig.send("H");
+    try testing.expect(!rig.session.html_view);
+    try testing.expectEqualStrings("This message has no HTML version", rig.session.state.status.slice());
+
+    // With one, the reader switches and comes back.
+    const rendered = "Hello\n\nRead the docs (https://example.com/a)";
+    @memcpy(rig.session.html_text[0..rendered.len], rendered);
+    rig.session.html_len = rendered.len;
+    rig.session.state.reader_scroll = 3;
+    rig.send("H");
+    try testing.expect(rig.session.html_view);
+    try testing.expectEqualStrings(rendered, rig.session.reader_text());
+    try testing.expectEqual(@as(u32, 0), rig.session.state.reader_scroll);
+    rig.send("H");
+    try testing.expect(!rig.session.html_view);
+}
+
+test "a message with an HTML part renders both views from one fetch" {
+    const raw =
+        \\Content-Type: multipart/alternative; boundary="b"
+        \\
+        \\--b
+        \\Content-Type: text/plain
+        \\
+        \\plain version
+        \\--b
+        \\Content-Type: text/html
+        \\
+        \\<p>Read <a href="https://example.com/a">the docs</a></p>
+        \\--b--
+    ;
+
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.set_raw(raw);
+
+    try testing.expectEqualStrings("plain version", rig.session.reader_text());
+    try testing.expectEqualStrings(
+        "Read the docs (https://example.com/a)",
+        rig.session.html_text[0..rig.session.html_len],
+    );
 }

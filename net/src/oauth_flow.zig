@@ -166,14 +166,9 @@ pub fn refresh(
     return true;
 }
 
-fn show_url(io: std.Io, options: Options, url: []const u8) void {
-    // The URL always goes out first: it is the only thing that works
-    // everywhere, and a browser that fails to open must not hide it.
-    options.write(options.context, "\nOpen this URL to sign in:\n\n");
-    options.write(options.context, url);
-    options.write(options.context, "\n\n");
-
-    // Then try to save the copying: whatever opener this machine has.
+/// Hands a URL to whatever this machine uses to open one. Best effort: a
+/// terminal with no opener simply does nothing.
+pub fn open_in_browser(io: std.Io, url: []const u8) void {
     const openers = [_][]const []const u8{
         &.{ "xdg-open", url },
         &.{ "gio", "open", url },
@@ -189,8 +184,18 @@ fn show_url(io: std.Io, options: Options, url: []const u8) void {
             .stderr = .ignore,
         }) catch continue;
         _ = child.wait(io) catch null;
-        break;
+        return;
     }
+}
+
+fn show_url(io: std.Io, options: Options, url: []const u8) void {
+    // The URL always goes out first: it is the only thing that works
+    // everywhere, and a browser that fails to open must not hide it.
+    options.write(options.context, "\nOpen this URL to sign in:\n\n");
+    options.write(options.context, url);
+    options.write(options.context, "\n\n");
+
+    open_in_browser(io, url);
 
     // QR fallback: `qrencode` printing to the terminal.
     var qr = std.process.spawn(io, .{

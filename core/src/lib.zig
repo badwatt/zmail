@@ -45,6 +45,8 @@ pub const smtp = @import("protocol/smtp.zig");
 
 pub const demo = @import("demo.zig");
 pub const cache = @import("cache.zig");
+pub const html = @import("html.zig");
+pub const links = @import("links.zig");
 pub const mime = @import("mime.zig");
 pub const sealed = @import("sealed.zig");
 pub const oauth = @import("oauth.zig");
@@ -87,6 +89,8 @@ test {
     _ = @import("protocol/smtp.zig");
     _ = @import("demo.zig");
     _ = @import("cache.zig");
+    _ = @import("html.zig");
+    _ = @import("links.zig");
     _ = @import("mime.zig");
     _ = @import("sealed.zig");
     _ = @import("oauth.zig");

@@ -171,6 +171,38 @@ pub fn text_body(raw: []const u8, out: []u8, scratch: []u8) []const u8 {
     return writer.buffered();
 }
 
+/// The HTML part, decoded and converted, or null when the message has none.
+/// The reader hands this to `html.render` when the HTML view is asked for.
+pub fn html_body(raw: []const u8, out: []u8, scratch: []u8) ?[]const u8 {
+    if (out.len == 0 or scratch.len < 4) return null;
+    var writer = std.Io.Writer.fixed(out);
+
+    const root = split_part(raw);
+    const root_type = content_type(header(root.headers, "content-type"));
+    switch (root_type.media) {
+        .multipart => {
+            var found = Found{};
+            scan_multipart(root.body, root_type.boundary, 0, &found);
+            const part = found.html orelse return null;
+            write_html_part(part, scratch, &writer);
+        },
+        .html => write_html_part(root, scratch, &writer),
+        else => return null,
+    }
+    if (writer.buffered().len == 0) return null;
+    return writer.buffered();
+}
+
+/// The same part, but kept as HTML instead of being flattened.
+fn write_html_part(part: Part, scratch: []u8, writer: *std.Io.Writer) void {
+    const kind = content_type(header(part.headers, "content-type"));
+    const encoding = transfer_encoding(header(part.headers, "content-transfer-encoding"));
+    const half = scratch.len / 2;
+    const decoded = transfer_decode(part.body, encoding, scratch[0..half]);
+    const converted = convert_charset(decoded, kind.charset, scratch[half..]);
+    writer.writeAll(converted) catch {};
+}
+
 const Media = enum { plain, html, multipart, other };
 
 const Type = struct {
@@ -276,7 +308,9 @@ fn split_part(region: []const u8) Part {
 
 fn scan_multipart(body: []const u8, boundary: []const u8, depth: u8, found: *Found) void {
     if (depth >= max_depth or boundary.len == 0) return;
-    if (found.plain != null) return;
+    // Keep going while either view still needs a part: the reader can ask for
+    // the HTML one after the plain one has been found.
+    if (found.plain != null and found.html != null) return;
 
     var index: usize = 0;
     var part_start: ?usize = null;
@@ -288,7 +322,7 @@ fn scan_multipart(body: []const u8, boundary: []const u8, depth: u8, found: *Fou
         if (std.mem.startsWith(u8, line, "--") and std.mem.eql(u8, line[2..], boundary)) {
             if (part_start) |start| {
                 scan_part(trim_part_end(body[start..index]), depth, found);
-                if (found.plain != null) return;
+                if (found.plain != null and found.html != null) return;
             }
             part_start = @min(line_end + 1, body.len);
         } else if (is_closing_delimiter(line, boundary)) {
@@ -327,7 +361,7 @@ fn is_closing_delimiter(line: []const u8, boundary: []const u8) bool {
 }
 
 fn scan_part(region: []const u8, depth: u8, found: *Found) void {
-    if (found.plain != null) return;
+    if (found.plain != null and found.html != null) return;
     const part = split_part(region);
     const kind = content_type(header(part.headers, "content-type"));
     switch (kind.media) {
@@ -938,4 +972,25 @@ test "content_type: parses media, charset, and quoted boundary" {
     try testing.expectEqual(Charset.latin1, kind.charset);
     try testing.expectEqual(Media.plain, content_type(null).media);
     try testing.expectEqual(Media.other, content_type("image/png").media);
+}
+
+test "html_body keeps the HTML part instead of flattening it" {
+    const raw =
+        \\Content-Type: multipart/alternative; boundary="b"
+        \\
+        \\--b
+        \\Content-Type: text/plain
+        \\
+        \\plain
+        \\--b
+        \\Content-Type: text/html
+        \\
+        \\<p>hi</p>
+        \\--b--
+    ;
+    var out: [256]u8 = undefined;
+    var scratch: [256]u8 = undefined;
+    const html = html_body(raw, &out, &scratch);
+    try testing.expect(html != null);
+    try testing.expectEqualStrings("<p>hi</p>", std.mem.trim(u8, html.?, "\n"));
 }

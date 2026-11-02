@@ -32,6 +32,7 @@ pub const LazyMail = struct {
         return .{ .context = self, .vtable = &.{
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
+            .fetch_raw = fetchRawThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
             .delete_message = deleteThunk,
@@ -70,6 +71,16 @@ pub const LazyMail = struct {
     ) mail_port.Error![]const u8 {
         const self: *LazyMail = @ptrCast(@alignCast(context));
         return (try self.ensure()).fetch_body(mailbox, id, out);
+    }
+
+    fn fetchRawThunk(
+        context: *anyopaque,
+        mailbox: Mailbox,
+        id: MessageId,
+        out: []u8,
+    ) mail_port.Error![]const u8 {
+        const self: *LazyMail = @ptrCast(@alignCast(context));
+        return (try self.ensure()).fetch_raw(mailbox, id, out);
     }
 
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) mail_port.Error!void {
