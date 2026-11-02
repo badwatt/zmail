@@ -1072,7 +1072,10 @@ pub const Session = struct {
 
         const text = core.mime.text_body(message, &self.body, &self.scratch_bytes);
         self.body_len = @intCast(text.len);
-        const joined = core.links.unwrap_urls(self.body[0..self.body_len], &self.shown);
+        // A text part generated from HTML carries entities ("&emsp;", "&#8203;").
+        // They are spacing or nothing at all, never words.
+        const spaced = core.html.clean_spacing(self.body[0..self.body_len], &self.scratch_bytes);
+        const joined = core.links.unwrap_urls(spaced, &self.shown);
         self.shown_len = @intCast(joined.len);
 
         self.text_link_count = core.links.scan(self.shown[0..self.shown_len], &self.text_links);
@@ -4433,4 +4436,15 @@ test "in the HTML view the pointer lights up the words of a link" {
     const lit = rig.session.hovered.?;
     try testing.expectEqual(anchor.span.start, lit.start);
     try testing.expectEqual(anchor.span.end, lit.end);
+}
+
+test "a text body with HTML spacing entities is readable" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.session.set_raw("Content-Type: text/plain\r\n\r\n&emsp;&#8203;Hola&nbsp;mundo");
+    // "&emsp;" is a space, "&#8203;" is nothing, "&nbsp;" is a space.
+    try testing.expectEqualStrings(" Hola mundo", rig.session.reader_text());
 }

@@ -484,6 +484,33 @@ pub fn clean_entities(html: []const u8, out: []u8) []const u8 {
         .{ .from = "&rdquo;", .to = "\"" },
         .{ .from = "&ldquo;", .to = "\"" },
         .{ .from = "&nbsp;", .to = " " },
+        // Spacing entities: mail uses them to indent, and a terminal has no
+        // width to spare for the difference between one and four spaces.
+        .{ .from = "&emsp;", .to = " " },
+        .{ .from = "&ensp;", .to = " " },
+        .{ .from = "&thinsp;", .to = " " },
+        .{ .from = "&hairsp;", .to = " " },
+        .{ .from = "&bull;", .to = "*" },
+        .{ .from = "&middot;", .to = "-" },
+        .{ .from = "&sect;", .to = "S" },
+        .{ .from = "&para;", .to = "P" },
+        .{ .from = "&deg;", .to = "deg" },
+        .{ .from = "&plusmn;", .to = "+/-" },
+        .{ .from = "&times;", .to = "x" },
+        .{ .from = "&divide;", .to = "/" },
+        .{ .from = "&minus;", .to = "-" },
+        .{ .from = "&euro;", .to = "EUR" },
+        .{ .from = "&pound;", .to = "GBP" },
+        .{ .from = "&yen;", .to = "JPY" },
+        .{ .from = "&cent;", .to = "c" },
+        .{ .from = "&laquo;", .to = "<<" },
+        .{ .from = "&raquo;", .to = ">>" },
+        .{ .from = "&dagger;", .to = "+" },
+        .{ .from = "&frac12;", .to = "1/2" },
+        .{ .from = "&frac14;", .to = "1/4" },
+        .{ .from = "&frac34;", .to = "3/4" },
+        .{ .from = "&sup2;", .to = "^2" },
+        .{ .from = "&sup3;", .to = "^3" },
         .{ .from = "&mdash;", .to = "-" },
         .{ .from = "&ndash;", .to = "-" },
         .{ .from = "&hellip;", .to = "..." },
@@ -499,8 +526,8 @@ pub fn clean_entities(html: []const u8, out: []u8) []const u8 {
     var writer = std.Io.Writer.fixed(out);
     var index: usize = 0;
     while (index < html.len) {
-        var replaced = false;
         if (html[index] == '&') {
+            var replaced = false;
             for (replacements) |replacement| {
                 if (!std.mem.startsWith(u8, html[index..], replacement.from)) continue;
                 writer.writeAll(replacement.to) catch {};
@@ -508,9 +535,100 @@ pub fn clean_entities(html: []const u8, out: []u8) []const u8 {
                 replaced = true;
                 break;
             }
+            if (replaced) continue;
+
+            // A numbered entity is a codepoint, not a name: "&#8203;" is a
+            // zero-width space, and printing it is printing "&#8203;".
+            if (numeric_entity(html[index..])) |number| {
+                write_entity(&writer, number.codepoint);
+                index += number.length;
+                continue;
+            }
         }
-        if (replaced) continue;
         writer.writeByte(html[index]) catch {};
+        index += 1;
+    }
+    return writer.buffered();
+}
+
+const NumericEntity = struct { codepoint: u21, length: usize };
+
+/// `&#8203;` or `&#x200B;`: the codepoint and how many bytes it took.
+fn numeric_entity(text: []const u8) ?NumericEntity {
+    if (text.len < 4) return null;
+    if (text[0] != '&' or text[1] != '#') return null;
+
+    var index: usize = 2;
+    var base: u8 = 10;
+    if (index < text.len and (text[index] == 'x' or text[index] == 'X')) {
+        base = 16;
+        index += 1;
+    }
+    const digits_start = index;
+    while (index < text.len and text[index] != ';' and index - digits_start < 8) : (index += 1) {
+        const digit = std.fmt.charToDigit(text[index], base) catch return null;
+        _ = digit;
+    }
+    if (index >= text.len or text[index] != ';') return null;
+    const digits = text[digits_start..index];
+    if (digits.len == 0) return null;
+
+    const codepoint = std.fmt.parseInt(u21, digits, base) catch return null;
+    // Surrogates and out-of-range values are not characters.
+    if (codepoint > 0x10ffff) return null;
+    if (codepoint >= 0xd800 and codepoint <= 0xdfff) return null;
+    return .{ .codepoint = codepoint, .length = index + 1 };
+}
+
+/// Spaces and invisible marks become what they are; everything else is written
+/// as the character it names.
+fn write_entity(writer: *std.Io.Writer, codepoint: u21) void {
+    // Zero-width joiners, directional marks, BOM: nothing to show.
+    if (codepoint == 0xfeff or (codepoint >= 0x200b and codepoint <= 0x200f)) return;
+    if (codepoint == 0x2060) return;
+    // Every kind of space is one space in a terminal.
+    if (codepoint == 0x00a0 or (codepoint >= 0x2000 and codepoint <= 0x200a)) {
+        writer.writeByte(' ') catch {};
+        return;
+    }
+    if (codepoint == 0x3000) {
+        writer.writeByte(' ') catch {};
+        return;
+    }
+    var encoded: [4]u8 = undefined;
+    const length = std.unicode.utf8Encode(codepoint, &encoded) catch return;
+    writer.writeAll(encoded[0..length]) catch {};
+}
+
+/// Invisible and spacing entities, removed from a text that is not HTML. A mail
+/// whose text part was generated from its HTML arrives with "&emsp;" and
+/// "&#8203;" inside the prose: they are never meant as words.
+pub fn clean_spacing(text: []const u8, out: []u8) []const u8 {
+    const named = [_][]const u8{
+        "&nbsp;", "&emsp;", "&ensp;", "&thinsp;", "&hairsp;",
+        "&zwj;",  "&zwnj;", "&shy;",  "&lrm;",    "&rlm;",
+    };
+
+    var writer = std.Io.Writer.fixed(out);
+    var index: usize = 0;
+    while (index < text.len) {
+        if (text[index] == '&') {
+            var replaced = false;
+            for (named) |name| {
+                if (!std.mem.startsWith(u8, text[index..], name)) continue;
+                writer.writeByte(' ') catch {};
+                index += name.len;
+                replaced = true;
+                break;
+            }
+            if (replaced) continue;
+            if (numeric_entity(text[index..])) |number| {
+                write_entity(&writer, number.codepoint);
+                index += number.length;
+                continue;
+            }
+        }
+        writer.writeByte(text[index]) catch {};
         index += 1;
     }
     return writer.buffered();
@@ -802,4 +920,36 @@ test "an anchor whose text is the address is one link, not two" {
 
     try testing.expectEqual(@as(usize, 1), rendered.anchors.len);
     try testing.expect(!std.mem.endsWith(u8, rendered.text, ")"));
+}
+
+test "a spacing entity is a space, not its own name" {
+    var out: [128]u8 = undefined;
+    // "&emsp;" is what a mail uses to indent: it must never reach the reader.
+    const cleaned = clean_entities("a&emsp;b&ensp;c&thinsp;d&nbsp;e", &out);
+    try testing.expectEqualStrings("a b c d e", cleaned);
+}
+
+test "a numbered entity is the character it names" {
+    var out: [128]u8 = undefined;
+    // Zero-width space and BOM: invisible, so nothing to show.
+    try testing.expectEqualStrings("ab", clean_entities("a&#8203;b", &out));
+    try testing.expectEqualStrings("ab", clean_entities("a&#x200B;b", &out));
+    try testing.expectEqualStrings("ab", clean_entities("a&#65279;b", &out));
+    // A non-breaking space is a space, in decimal and in hex.
+    try testing.expectEqualStrings("a b", clean_entities("a&#160;b", &out));
+    try testing.expectEqualStrings("a b", clean_entities("a&#xA0;b", &out));
+    // A real character is decoded to its own text.
+    try testing.expectEqualStrings("a—b", clean_entities("a&#8212;b", &out));
+    // Something that is not an entity is left alone.
+    try testing.expectEqualStrings("&#nope;", clean_entities("&#nope;", &out));
+    try testing.expectEqualStrings("a&b", clean_entities("a&b", &out));
+}
+
+test "a text part made from HTML loses its spacing entities" {
+    var out: [128]u8 = undefined;
+    // What a sender's "text version" looks like after it has been flattened.
+    try testing.expectEqualStrings("  Hola mundo ", clean_spacing("&emsp;&#8203;&nbsp;Hola mundo&nbsp;", &out));
+    // Only spacing and invisible marks go: the words stay exactly as written.
+    try testing.expectEqualStrings("a & b", clean_spacing("a & b", &out));
+    try testing.expectEqualStrings("AT&T", clean_spacing("AT&T", &out));
 }
