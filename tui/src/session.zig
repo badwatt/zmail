@@ -250,6 +250,8 @@ pub const Session = struct {
     image_buffer: [core.limits.body_max]u8 = undefined,
     /// Every picture of this message, decoded or downloaded once.
     image_slots: [max_images_drawn]ImageSlot = @splat(.{}),
+    /// The link under a ctrl-hovered pointer, if any.
+    hovered: ?core.links.Link = null,
     image_slot_count: u8 = 0,
     /// How many rows each wrapped line hides behind a picture.
     cover_rows: [wrap.max_lines]u8 = @splat(0),
@@ -686,6 +688,7 @@ pub const Session = struct {
     fn handle_mouse(self: *Session, mouse: input.Mouse) bool {
         if (mouse.kind == .release) return self.finish_selection(mouse);
         if (mouse.kind == .motion and mouse.button == .left) return self.extend_selection(mouse);
+        if (mouse.kind == .motion) return self.hover_link(mouse);
 
         switch (mouse.button) {
             .wheel_up => return self.apply(.{ .move = .up }),
@@ -708,10 +711,12 @@ pub const Session = struct {
                 return self.click_row(lay, mouse.y);
             }
         }
-        // A press in the body starts a selection; the release decides whether it
-        // was a click (open a link) or a drag (copy).
+        // Ctrl turns the pointer into a link opener; without it a press in the
+        // body starts a selection, and the release decides whether it was a
+        // click (nothing) or a drag (copy).
+        if (mouse.ctrl) return self.click_link(lay, mouse);
         if (self.start_selection(lay, mouse)) return true;
-        return self.click_link(lay, mouse);
+        return false;
     }
 
     /// The whole message as another program would show it: the browser for the
@@ -723,8 +728,10 @@ pub const Session = struct {
             self.needs_render = true;
             return true;
         };
-        if (self.html_len > 0) {
-            open(self.deps.open_external_context, self.html_text[0..self.html_len], "");
+        if (self.html_part_len > 0) {
+            // The part itself: a browser that is handed our text rendering sees
+            // one collapsed paragraph with no styling at all.
+            open(self.deps.open_external_context, self.html_part[0..self.html_part_len], "");
             self.state.set_status("Opened in the browser", .{});
         } else if (self.text_link_count > 0) {
             var url_buffer: [core.limits.url_max]u8 = undefined;
@@ -763,19 +770,40 @@ pub const Session = struct {
     /// A click inside the body that lands on a link opens it. The scan is the
     /// same one the highlighter uses, over the same line, so what looks like a
     /// link is what reacts.
-    fn click_link(self: *Session, lay: layout_mod.Layout, mouse: input.Mouse) bool {
-        if (self.state.view != .reader or !self.body_loaded) return false;
-        if (mouse.y < lay.reader_body_y or mouse.y >= lay.reader_body_y + lay.reader_rows) return false;
+    /// Where the pointer is, in the body text. Null outside the reader's lines.
+    fn cell_offset(self: *Session, lay: layout_mod.Layout, mouse: input.Mouse) ?u32 {
+        if (self.state.view != .reader or !self.body_loaded) return null;
+        if (mouse.y < lay.reader_body_y or mouse.y >= lay.reader_body_y + lay.reader_rows) return null;
+        if (mouse.x < 1) return null;
 
         const row = mouse.y - lay.reader_body_y;
         const index = self.state.reader_scroll + row;
-        if (index >= self.wrapped.len) return false;
-        if (mouse.x < 1) return false;
+        if (index >= self.wrapped.len) return null;
 
         const text = self.reader_text();
         const line = self.wrapped.at(index, text);
         const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
-        const offset = line_start + (mouse.x - 1);
+        return line_start + (mouse.x - 1);
+    }
+
+    /// Ctrl held and the pointer over a link: it lights up, so the click is not
+    /// a leap of faith.
+    fn hover_link(self: *Session, mouse: input.Mouse) bool {
+        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        var found: ?core.links.Link = null;
+        if (mouse.ctrl) {
+            if (self.cell_offset(lay, mouse)) |offset| found = core.links.at(self.reader_text(), offset);
+        }
+        if (found == null and self.hovered == null) return false;
+        if (found != null and self.hovered != null and found.?.start == self.hovered.?.start) return false;
+        self.hovered = found;
+        self.needs_render = true;
+        return true;
+    }
+
+    fn click_link(self: *Session, lay: layout_mod.Layout, mouse: input.Mouse) bool {
+        const offset = self.cell_offset(lay, mouse) orelse return false;
+        const text = self.reader_text();
         // A click lands either on an address or on a numbered reference.
         var url_buffer: [core.limits.url_max]u8 = undefined;
         const url = if (core.links.at(text, offset)) |link|
@@ -784,6 +812,12 @@ pub const Session = struct {
             core.links.reference_url(text, number, &url_buffer) orelse return false
         else
             return false;
+
+        // Say it before the browser starts: opening one takes a moment, and a
+        // click with no answer feels broken. The frame goes out first.
+        self.state.set_status("Opening {s} in the browser…", .{url});
+        self.needs_render = true;
+        self.render();
         if (self.deps.open_url) |open| open(self.deps.open_url_context, url);
         self.state.set_status("Opened {s}", .{url});
         self.needs_render = true;
@@ -827,8 +861,10 @@ pub const Session = struct {
         if (self.body_cell(lay, mouse)) |cell| active.dragTo(cell);
 
         if (!active.isDrag()) {
+            // A plain click is not a link opener: opening takes ctrl, so a click
+            // meant for the text never launches a browser by accident.
             self.needs_render = true;
-            return self.click_link(lay, mouse);
+            return true;
         }
 
         const text = selection_mod.extract(
@@ -1009,6 +1045,7 @@ pub const Session = struct {
         // is another picture, and keeping the slot hands back the previous bytes.
         self.image_slot_count = 0;
         self.image_painted = 0;
+        self.hovered = null;
 
         self.html_len = 0;
         self.html_ready = false;
@@ -1625,6 +1662,7 @@ pub const Session = struct {
             .body = self.reader_text(),
             .wrapped = if (self.body_loaded) &self.wrapped else null,
             .links = self.reader_links(),
+            .hovered = self.hovered,
             .kinds = self.html_kinds[0..self.html_kind_count],
             .cover = self.cover_rows[0..self.cover_len],
             .selection = self.selection,
@@ -3619,14 +3657,15 @@ test "clicking a link in the body opens it" {
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     // Column 4 is the 'h' of "https": inside the link.
-    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .press, .button = .left });
-    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .release, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .press, .button = .left, .ctrl = true });
+    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .release, .button = .left, .ctrl = true });
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/a", sink.last[0..sink.last_len]);
 
     // A click on the words around it opens nothing.
-    _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .press, .button = .left });
-    _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .release, .button = .left });
+    // Without ctrl the same click selects text instead of opening anything.
+    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .press, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .release, .button = .left });
     try testing.expectEqual(@as(u8, 1), sink.opened);
 }
 
@@ -3768,12 +3807,14 @@ test "a link split by the wrap is still one link, and clicks anywhere on it" {
         .y = lay.reader_body_y + continuation.?,
         .kind = .press,
         .button = .left,
+        .ctrl = true,
     });
     _ = rig.session.handle_mouse(.{
         .x = 2,
         .y = lay.reader_body_y + continuation.?,
         .kind = .release,
         .button = .left,
+        .ctrl = true,
     });
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/a/really/long/path", sink.last[0..sink.last_len]);
@@ -3810,7 +3851,7 @@ test "a drag in the reader copies the text to the clipboard" {
     try testing.expect(rig.session.selection == null);
 }
 
-test "a click without dragging still opens the link" {
+test "a ctrl click without dragging still opens the link" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -3830,10 +3871,17 @@ test "a click without dragging still opens the link" {
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     const y = lay.reader_body_y;
-    // Column 6 is inside the address: press and release on the same cell.
+    // Column 6 is inside the address: ctrl, press and release on one cell.
+    _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .press, .button = .left, .ctrl = true });
+    _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .release, .button = .left, .ctrl = true });
+    try testing.expectEqual(@as(u8, 1), sink.opened);
+    try testing.expectEqualStrings("Opened https://example.com/a", rig.session.state.status.slice());
+
+    // The same click without ctrl selects text and opens nothing.
+    sink.opened = 0;
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .press, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .release, .button = .left });
-    try testing.expectEqual(@as(u8, 1), sink.opened);
+    try testing.expectEqual(@as(u8, 0), sink.opened);
 }
 
 test "the account picked last time is the one the reader opens on" {
@@ -3926,12 +3974,14 @@ test "a message whose sender wrapped the address shows one whole link" {
         .y = lay.reader_body_y + 1,
         .kind = .press,
         .button = .left,
+        .ctrl = true,
     });
     _ = rig.session.handle_mouse(.{
         .x = 6,
         .y = lay.reader_body_y + 1,
         .kind = .release,
         .button = .left,
+        .ctrl = true,
     });
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expect(std.mem.indexOf(u8, sink.last[0..sink.last_len], "&emsl=1055472") != null);
@@ -4195,12 +4245,14 @@ test "clicking a reference number opens the address it points at" {
         .y = lay.reader_body_y,
         .kind = .press,
         .button = .left,
+        .ctrl = true,
     });
     _ = rig.session.handle_mouse(.{
         .x = @intCast(1 + column + 1),
         .y = lay.reader_body_y,
         .kind = .release,
         .button = .left,
+        .ctrl = true,
     });
 
     try testing.expectEqual(@as(u8, 1), sink.opened);
@@ -4236,4 +4288,30 @@ test "a marker with the same name in another message is another picture" {
     // …and forgets it as soon as another message is opened.
     rig.session.set_raw(first);
     try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
+}
+
+test "ctrl and the pointer light a link up, and let go of it" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.session.set_raw("go to https://example.com/a now");
+    rig.session.state.view = .reader;
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    // Column 6 sits inside the address.
+    try testing.expect(rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
+    try testing.expect(rig.session.hovered != null);
+
+    // Leaving it, or letting go of ctrl, puts the light out.
+    try testing.expect(rig.session.hover_link(.{ .x = 1, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
+    try testing.expect(rig.session.hovered == null);
+    _ = rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true });
+    try testing.expect(rig.session.hovered != null);
+    try testing.expect(rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
+    try testing.expect(rig.session.hovered == null);
 }

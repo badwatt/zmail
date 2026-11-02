@@ -17,60 +17,42 @@ const System = system_mod.System;
 const chunk_max: usize = 4096;
 const raw_chunk_max: usize = chunk_max / 4 * 3;
 
-/// Whether this terminal speaks the kitty graphics protocol.
-/// Whether this terminal speaks the protocol. Asked for, it is used; forced
-/// off, it is not; otherwise the terminal's own name decides, because the
-/// protocol has no way of being tested without waiting for an answer.
+/// Whether this terminal speaks the kitty graphics protocol. There is no list of
+/// terminals that do: it is asked once, at startup, and silence means no.
 pub fn supported() bool {
-    return decide(
-        Env.get("AMAIL_IMAGES"),
-        Env.get("TERM"),
-        Env.get("TERM_PROGRAM"),
-        Env.get("KITTY_WINDOW_ID"),
-        Env.get("WEZTERM_PANE"),
-        Env.get("TMUX") != null or Env.get("STY") != null,
-    );
+    return detected;
 }
 
-/// The decision, without the environment, so it can be tested.
-pub fn decide(
-    choice: ?[]const u8,
-    term: ?[]const u8,
-    program: ?[]const u8,
-    kitty_window: ?[]const u8,
-    wezterm_pane: ?[]const u8,
-    multiplexer: bool,
-) bool {
-    if (choice) |value| {
-        if (std.mem.eql(u8, value, "blocks")) return false;
-        if (std.mem.eql(u8, value, "kitty")) return true;
-    }
-    // A multiplexer passes the escape through only when told to; the picture
-    // then lands on the wrong screen or not at all.
-    if (multiplexer) return false;
-    if (kitty_window != null or wezterm_pane != null) return true;
-    if (term) |name| {
-        if (std.mem.indexOf(u8, name, "kitty") != null) return true;
-        if (std.mem.indexOf(u8, name, "ghostty") != null) return true;
-        if (std.mem.indexOf(u8, name, "wezterm") != null) return true;
-    }
-    if (program) |name| {
-        if (std.mem.eql(u8, name, "ghostty")) return true;
-        if (std.mem.eql(u8, name, "WezTerm")) return true;
-        if (std.mem.eql(u8, name, "kitty")) return true;
+/// The answer from `probe`, kept for the whole run.
+var detected: bool = false;
+
+/// Asks the terminal, once, while it is in raw mode and before the first frame.
+/// The answer arrives on stdin, so it has to be read before the key parser is
+/// running or it is read as the user typing.
+pub fn detect(system: System) void {
+    detected = probe(system);
+}
+
+/// Sends the query and waits for the terminal to say whether it understood. The
+/// reply to our id is `ESC _ G i=31 ; OK ESC \\` when it did.
+pub fn probe(system: System) bool {
+    // a=q asks a question; the payload is one transparent pixel, so nothing is
+    // drawn even if the answer never comes.
+    system.write("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=32;AAAAAQ==\x1b\\") catch return false;
+
+    var buffer: [128]u8 = undefined;
+    var filled: usize = 0;
+    var waits: u8 = 0;
+    while (waits < 3) : (waits += 1) {
+        const read = system.read(buffer[filled..], 120) catch return false;
+        if (read == 0) return false;
+        filled += read;
+        if (std.mem.indexOf(u8, buffer[0..filled], "\x1b_Gi=31;OK") != null) return true;
+        // An error answer ("EINVAL", "ENOTSUP") is an answer too: it cannot draw.
+        if (std.mem.indexOf(u8, buffer[0..filled], "\x1b_Gi=31;E") != null) return false;
     }
     return false;
 }
-
-/// The environment, behind a name so tests can replace it.
-pub const Env = struct {
-    pub var get: *const fn (name: [:0]const u8) ?[]const u8 = default_get;
-
-    fn default_get(name: [:0]const u8) ?[]const u8 {
-        return @import("os.zig").env(name);
-    }
-};
-
 /// Sends a picture to the terminal once, under `id`. Placing it afterwards is
 /// a few dozen bytes: that is the difference between a reader that scrolls and
 /// one that stutters.
@@ -170,53 +152,20 @@ pub fn clear(system: System) void {
 
 const testing = std.testing;
 
-var fake_kitty: bool = false;
-var fake_term: []const u8 = "xterm-256color";
-var fake_program: []const u8 = "";
-var fake_tmux: bool = false;
-var fake_images: []const u8 = "";
+test "the probe asks the terminal instead of reading its name" {
+    // No answer: the escape was swallowed, so there is no protocol here.
+    var silent: system_mod.Fake = .{};
+    try testing.expect(!probe(silent.system()));
 
-fn fakeGet(name: [:0]const u8) ?[]const u8 {
-    if (std.mem.eql(u8, name, "AMAIL_IMAGES")) return if (fake_images.len > 0) fake_images else null;
-    if (std.mem.eql(u8, name, "TMUX")) return if (fake_tmux) "/tmp/tmux-1000/default,1,0" else null;
-    if (std.mem.eql(u8, name, "KITTY_WINDOW_ID")) return if (fake_kitty) "1" else null;
-    if (std.mem.eql(u8, name, "TERM")) return fake_term;
-    if (std.mem.eql(u8, name, "TERM_PROGRAM")) return if (fake_program.len > 0) fake_program else null;
-    return null;
-}
+    // An answer to our id: it understood, and will draw.
+    var answering: system_mod.Fake = .{};
+    answering.push_input("\x1b_Gi=31;OK\x1b\\");
+    try testing.expect(probe(answering.system()));
 
-test "a terminal that speaks the protocol is used without being asked" {
-    const previous = Env.get;
-    Env.get = fakeGet;
-    defer Env.get = previous;
-
-    fake_kitty = true;
-    fake_term = "xterm-ghostty";
-    fake_program = "ghostty";
-    fake_images = "";
-    fake_tmux = false;
-    // Sharp by default when the terminal can do it.
-    try testing.expect(supported());
-
-    // A plain terminal gets blocks, which every terminal can draw.
-    fake_kitty = false;
-    fake_term = "xterm-256color";
-    fake_program = "";
-    try testing.expect(!supported());
-
-    // The variable settles it either way.
-    fake_term = "xterm-ghostty";
-    fake_images = "blocks";
-    try testing.expect(!supported());
-    fake_term = "xterm-256color";
-    fake_images = "kitty";
-    try testing.expect(supported());
-
-    // And a multiplexer is never answered.
-    fake_images = "";
-    fake_term = "xterm-kitty";
-    fake_tmux = true;
-    try testing.expect(!supported());
+    // An error answer is an answer too: it cannot draw.
+    var refusing: system_mod.Fake = .{};
+    refusing.push_input("\x1b_Gi=31;EINVAL\x1b\\");
+    try testing.expect(!probe(refusing.system()));
 }
 
 test "draw streams one image in chunks, then clears it" {
@@ -243,22 +192,4 @@ test "draw refuses an empty picture or no room for it" {
     try testing.expect(!draw(fake.system(), "", 1, 1, 10, 10));
     try testing.expect(!draw(fake.system(), "x", 1, 1, 0, 10));
     try testing.expectEqualStrings("", fake.output_text());
-}
-
-test "the terminal's name decides, unless the user insists" {
-    // A terminal that speaks the protocol gets the sharp picture by default.
-    try testing.expect(decide(null, "xterm-kitty", null, null, null, false));
-    try testing.expect(decide(null, "xterm-ghostty", null, null, null, false));
-    try testing.expect(decide(null, "xterm-256color", "ghostty", "1", null, false));
-    try testing.expect(decide(null, "xterm-256color", null, null, "1", false));
-
-    // A plain terminal falls back to blocks.
-    try testing.expect(!decide(null, "xterm-256color", null, null, null, false));
-    try testing.expect(!decide(null, "screen", null, null, null, false));
-    // A multiplexer eats the escape.
-    try testing.expect(!decide(null, "xterm-kitty", null, "1", null, true));
-
-    // The variable wins both ways.
-    try testing.expect(decide("kitty", "dumb", null, null, null, false));
-    try testing.expect(!decide("blocks", "xterm-kitty", null, "1", null, false));
 }

@@ -222,7 +222,8 @@ Sent`.
 
 ## Mouse
 
-Mouse reporting is enabled at startup (`1000` + SGR `1006`).
+Mouse reporting is enabled at startup (`1000` + any-motion `1003` + SGR `1006`),
+because hovering is part of how a link is opened.
 
 - Click a mailbox tab to switch.
 - Click a row to select it; click it again to open it. Two clicks, no
@@ -230,6 +231,9 @@ Mouse reporting is enabled at startup (`1000` + SGR `1006`).
   the “did I open the wrong message?” feeling.
 - Wheel scrolls the list and the reader.
 - Releases and non-left buttons are ignored.
+- **Ctrl + click** opens a link. Holding Ctrl and moving over one makes it bold,
+  so the click is never a guess; the status line says "Opening … in the browser"
+  before the browser starts, so the click has an answer.
 
 ## States
 
@@ -267,11 +271,11 @@ it: no browser, no images, no scripts — the HTML is read, not run.
 Dragging over the body selects text and copies it: the selection is highlighted
 while you drag, and on release the text goes to the clipboard and the primary
 selection through OSC 52, so no `xclip` or `wl-copy` is needed. A click without a
-drag still opens the link under the pointer.
+drag does nothing, so a click meant for the text never launches a browser.
 
-Links are clickable in either view. A click on a URL hands it to the browser
-(`xdg-open`, `gio open`, `sensible-browser`, `open`, or `wslview`, whichever
-exists); a click on the words around it does nothing.
+Links are opened with Ctrl held, in either view. A Ctrl+click on a URL hands it to
+the browser (`xdg-open`, `gio open`, `sensible-browser`, `open`, or `wslview`,
+whichever exists); a Ctrl+click on the words around it does nothing.
 
 The accounts overlay (`A`) lists "All accounts" first and then your accounts by
 name, whatever order the config file uses. The choice is remembered in

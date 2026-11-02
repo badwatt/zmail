@@ -32,6 +32,8 @@ pub const Inputs = struct {
     /// Links in `body`, as byte ranges: one scan for the whole message, so a
     /// URL split by the wrapper is still one link.
     links: []const core.links.Link = &.{},
+    /// The link the pointer is over, if any: lit up so a click is not a guess.
+    hovered: ?core.links.Link = null,
     /// What the mouse has covered so far, shown while it is being dragged.
     selection: ?selection.Selection = null,
     /// Which wrapped line is being drawn, so the selection can be placed.
@@ -638,16 +640,20 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
         const start = @max(link.start, line_start);
         const end = @min(link.end, line_end);
         if (start > cursor) {
-            draw_segment(out, inputs, line, cursor - line_start, start - line_start, y, width, false);
+            draw_segment_kind(inputs, out, line, cursor - line_start, start - line_start, y, width, .text);
             cursor = start;
         }
         if (end > cursor) {
-            draw_segment(out, inputs, line, cursor - line_start, end - line_start, y, width, true);
+            const lit = if (inputs.hovered) |hovered|
+                hovered.start == link.start and hovered.end == link.end
+            else
+                false;
+            draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, if (lit) .hovered else .link);
             cursor = end;
         }
     }
     if (cursor < line_end) {
-        draw_segment(out, inputs, line, cursor - line_start, line.len, y, width, false);
+        draw_segment_kind(inputs, out, line, cursor - line_start, line.len, y, width, .text);
     }
 }
 
@@ -683,21 +689,31 @@ fn draw_line_selection(inputs: Inputs, out: *Screen, line: []const u8, y: u16, w
     return true;
 }
 
-fn draw_segment(
-    out: *Screen,
+const Segment = enum { text, link, hovered };
+
+fn draw_segment_kind(
     inputs: Inputs,
+    out: *Screen,
     line: []const u8,
-    from: usize,
-    to: usize,
+    start: usize,
+    end: usize,
     y: u16,
     width: u16,
-    underline: bool,
+    kind: Segment,
 ) void {
-    if (to <= from) return;
-    const column: u16 = @intCast(from);
-    if (column >= width) return;
-    const style = if (underline) inputs.theme.accent.with_underline() else line_style(inputs);
-    _ = out.put_text(1 + column, y, line[from..to], width -| column, style);
+    if (end <= start) return;
+    // Columns are counted from the line, which starts after the gutter.
+    const offset = screen.text_columns(line[0..start]);
+    const segment = line[@min(start, line.len)..@min(end, line.len)];
+    _ = out.put_text(1 + offset, y, segment, width -| offset, segment_style(inputs, kind));
+}
+
+fn segment_style(inputs: Inputs, kind: Segment) Style {
+    return switch (kind) {
+        .text => line_style(inputs),
+        .link => inputs.theme.accent.with_underline(),
+        .hovered => inputs.theme.accent.with_bold().with_underline(),
+    };
 }
 
 const Hint = struct {

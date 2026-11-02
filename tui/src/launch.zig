@@ -15,8 +15,8 @@ const session_mod = @import("session.zig");
 const setup_session = @import("setup_session.zig");
 const theme_mod = @import("theme.zig");
 
-const enter_screen = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h";
-const leave_screen = "\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[?25h\x1b[?1049l";
+const enter_screen = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h\x1b[?1006h";
+const leave_screen = "\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?25h\x1b[?1049l";
 
 const Failure = struct {
     message: []const u8,
@@ -39,6 +39,9 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
     }
 
     try system.enter_raw();
+    // Asked while the terminal is raw and before anything reads keys: the
+    // answer comes on stdin, and a parser would read it as typing.
+    graphics.detect(system);
     try system.write(enter_screen);
 
     const failure = run_inside(gpa, io, options, system);

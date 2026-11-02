@@ -15,6 +15,9 @@ pub const Mouse = struct {
     /// Zero-based cell coordinates.
     x: u16,
     y: u16,
+    /// Held while the event was reported: what tells a link-opener from a
+    /// selection, and what makes a link light up under the pointer.
+    ctrl: bool = false,
 
     pub const Kind = enum { press, release, motion };
 
@@ -316,12 +319,16 @@ fn parse_mouse(params: []const u8, final: u8) ?Key {
     else
         .press;
 
-    return .{ .mouse = .{
-        .kind = kind,
-        .button = button,
-        .x = @intCast(x -| 1),
-        .y = @intCast(y -| 1),
-    } };
+    return .{
+        .mouse = .{
+            .kind = kind,
+            .button = button,
+            .x = @intCast(x -| 1),
+            .y = @intCast(y -| 1),
+            // SGR packs the modifiers into the button code: 4 shift, 8 alt, 16 ctrl.
+            .ctrl = code & 16 != 0,
+        },
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -547,4 +554,19 @@ test "a graphics answer from the terminal is not a keypress" {
     // An unterminated one does not eat the keys after it forever.
     const open = try decode("\x1b_Gi=1;");
     try testing.expectEqual(@as(u32, 0), open.len);
+}
+
+test "ctrl is read from the mouse report" {
+    const plain = try single("\x1b[<0;9;5M");
+    try testing.expect(!plain.mouse.ctrl);
+
+    // 16 is the ctrl bit in an SGR report.
+    const with_ctrl = try single("\x1b[<16;9;5M");
+    try testing.expect(with_ctrl.mouse.ctrl);
+    try testing.expectEqual(Mouse.Kind.press, with_ctrl.mouse.kind);
+
+    // 48 is ctrl plus the motion bit: moving with ctrl held.
+    const hover = try single("\x1b[<48;9;5M");
+    try testing.expect(hover.mouse.ctrl);
+    try testing.expectEqual(Mouse.Kind.motion, hover.mouse.kind);
 }
