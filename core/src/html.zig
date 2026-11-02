@@ -415,6 +415,47 @@ pub fn remote_images(html: []const u8, out: *[max_remote_images][]const u8) usiz
     return count;
 }
 
+/// The document with every anchor's address written after its text, for the
+/// browsers whose dump does not list link targets (chawan prints the words and
+/// no address at all, so the reader would have nothing to open).
+pub fn inline_anchor_targets(html: []const u8, out: []u8) []const u8 {
+    var writer = std.Io.Writer.fixed(out);
+    var index: usize = 0;
+    var open: ?[]const u8 = null;
+
+    while (index < html.len) {
+        const start = std.mem.indexOfScalarPos(u8, html, index, '<') orelse {
+            writer.writeAll(html[index..]) catch {};
+            break;
+        };
+        writer.writeAll(html[index..start]) catch {};
+        const end = std.mem.indexOfScalarPos(u8, html, start, '>') orelse {
+            writer.writeAll(html[start..]) catch {};
+            break;
+        };
+        const inside = html[start + 1 .. end];
+        index = end + 1;
+
+        const closing = inside.len > 0 and inside[0] == '/';
+        const body = if (closing) inside[1..] else inside;
+        const name_end = std.mem.indexOfAny(u8, body, " \t\r\n/") orelse body.len;
+        const name = body[0..name_end];
+        if (!std.ascii.eqlIgnoreCase(name, "a")) {
+            writer.writeAll(html[start .. end + 1]) catch {};
+            continue;
+        }
+        if (!closing) {
+            open = href_of(body);
+            continue;
+        }
+        if (open) |target| {
+            if (target.len > 0) writer.print(" ({s})", .{target}) catch {};
+        }
+        open = null;
+    }
+    return writer.buffered();
+}
+
 /// Drops the entities a text browser does not know, which it would otherwise
 /// print as `&zwj;` in the middle of a sentence. The zero-width ones go away;
 /// the rest become the character they stand for.
@@ -619,6 +660,15 @@ test "an anchor whose text is the address is not written twice" {
     const rendered = render(html, &out, &link_buffer, &.{});
     try testing.expectEqualStrings("https://example.com/", rendered.text);
     try testing.expectEqualStrings("https://example.com/", rendered.links[0].text(rendered.text));
+}
+
+test "a browser that prints no references gets the addresses inline" {
+    var out: [256]u8 = undefined;
+    // The other tags are left alone: this only rewrites anchors.
+    try testing.expectEqualStrings(
+        "<p>Read the docs (https://example.com/a) today.</p>",
+        inline_anchor_targets("<p>Read <a href=\"https://example.com/a\">the docs</a> today.</p>", &out),
+    );
 }
 
 test "entities a text browser would print raw are cleaned first" {

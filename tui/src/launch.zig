@@ -157,6 +157,22 @@ const Browser = struct {
     system: SessionSystem = undefined,
 };
 
+/// Writes the page a second time with each anchor's address in the text, for
+/// the browsers whose dump prints no references.
+fn inlineAnchors(self: *Browser, html: []const u8, buffer: []u8) ?[]const u8 {
+    const inlined = self.gpa.alloc(u8, core.limits.body_max * 2) catch return null;
+    defer self.gpa.free(inlined);
+    const document = core.html.inline_anchor_targets(html, inlined);
+
+    const path = std.fmt.bufPrint(buffer, "{s}/amail/message-inline.html", .{self.cache_dir}) catch
+        return null;
+    const file = std.Io.Dir.cwd().createFile(self.io, path, .{ .permissions = file_mode }) catch
+        return null;
+    file.writeStreamingAll(self.io, document) catch {};
+    file.close(self.io);
+    return path;
+}
+
 /// Downloads one picture the message points at. Only what can be painted is
 /// kept: a PNG that fits, from an https address.
 fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 {
@@ -297,26 +313,33 @@ fn renderHtmlTextThunk(
     var width_buffer: [16]u8 = undefined;
     const width = std.fmt.bufPrint(&width_buffer, "{d}", .{columns}) catch return null;
 
-    const attempts = [_]struct { engine: []const u8, argv: []const []const u8 }{
+    const attempts = [_]struct {
+        engine: []const u8,
+        binary: []const u8,
+        argv: []const []const u8,
+    }{
         // w3m prints the address after its text, which is what keeps links
         // clickable in the reader.
         // The width is its own argument: w3m prints its usage for "-cols=80".
         // Numbered references: the body stays clean and the addresses are
         // listed at the end, which is what w3m looks like under aerc.
-        .{ .engine = "w3m", .argv = &.{
+        .{ .engine = "w3m", .binary = "w3m", .argv = &.{
             "w3m", "-dump", "-T", "text/html", "-cols", width, "-o", "display_link_number=1", path,
         } },
-        .{ .engine = "lynx", .argv = &.{ "lynx", "-dump", "-nolist", "-width", width, path } },
+        .{ .engine = "lynx", .binary = "lynx", .argv = &.{ "lynx", "-dump", "-nolist", "-width", width, path } },
     };
 
     for (attempts) |attempt| {
-        var child = spawn_engine(self, attempt.engine, attempt.argv) orelse continue;
+        var child = spawn_engine(self, attempt.engine, attempt.binary, attempt.argv) orelse continue;
         const stdout = child.stdout orelse continue;
+        // A pipe is not a file: it is read as a stream, not at a position.
+        var read_buffer: [8192]u8 = undefined;
+        var reader = stdout.reader(self.io, &read_buffer);
         var total: usize = 0;
         while (total < out.len) {
-            const read = stdout.readPositionalAll(self.io, out[total..], @intCast(total)) catch break;
-            if (read == 0) break;
-            total += read;
+            const count = reader.interface.readSliceShort(out[total..]) catch break;
+            if (count == 0) break;
+            total += count;
         }
         _ = child.wait(self.io) catch {};
         if (total == 0) continue;
@@ -327,7 +350,7 @@ fn renderHtmlTextThunk(
 
 /// Spawns an engine from the path, or from the Nix store where these live as
 /// dependencies rather than installed programs.
-fn spawn_engine(self: *Browser, name: []const u8, argv: []const []const u8) ?std.process.Child {
+fn spawn_engine(self: *Browser, name: []const u8, binary: []const u8, argv: []const []const u8) ?std.process.Child {
     var child = std.process.spawn(self.io, .{
         .argv = argv,
         .stdin = .ignore,
@@ -337,7 +360,7 @@ fn spawn_engine(self: *Browser, name: []const u8, argv: []const []const u8) ?std
     if (child) |*process| return process.*;
 
     var found_buffer: [512]u8 = undefined;
-    const engine = find_in_store(self, name, &found_buffer) orelse return null;
+    const engine = find_in_store(self, name, binary, &found_buffer) orelse return null;
     var argv_buffer: [8][]const u8 = undefined;
     if (argv.len > argv_buffer.len) return null;
     @memcpy(argv_buffer[0..argv.len], argv);
@@ -351,7 +374,7 @@ fn spawn_engine(self: *Browser, name: []const u8, argv: []const []const u8) ?std
     return second;
 }
 
-fn find_in_store(self: *Browser, name: []const u8, buffer: []u8) ?[]const u8 {
+fn find_in_store(self: *Browser, name: []const u8, binary: []const u8, buffer: []u8) ?[]const u8 {
     var dir = std.Io.Dir.cwd().openDir(self.io, "/nix/store", .{ .iterate = true }) catch
         return null;
     defer dir.close(self.io);
@@ -367,7 +390,7 @@ fn find_in_store(self: *Browser, name: []const u8, buffer: []u8) ?[]const u8 {
         seen += 1;
         if (seen > 64) break;
 
-        const path = std.fmt.bufPrint(buffer, "/nix/store/{s}/bin/{s}", .{ entry.name, name }) catch
+        const path = std.fmt.bufPrint(buffer, "/nix/store/{s}/bin/{s}", .{ entry.name, binary }) catch
             return null;
         const file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch continue;
         file.close(self.io);
