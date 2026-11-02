@@ -8,7 +8,7 @@ const core = @import("core");
 const net = @import("net");
 
 const cli = @import("cli.zig");
-const graphics = @import("graphics.zig");
+const halfblocks = @import("halfblocks.zig");
 const os = @import("os.zig");
 const session_mod = @import("session.zig");
 const setup_session = @import("setup_session.zig");
@@ -190,20 +190,28 @@ fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 
 /// One image of the message, painted where the layout left its marker.
 fn drawImageThunk(
     context: *anyopaque,
-    png: []const u8,
+    png_bytes: []const u8,
     x: u16,
     y: u16,
     columns: u16,
     rows: u16,
 ) bool {
     const self: *Browser = @ptrCast(@alignCast(context));
-    if (!graphics.supported()) return false;
-    return graphics.draw(self.system, png, x, y, columns, rows);
+
+    // Half blocks: two pixels per cell, 24-bit colour, any terminal. This is
+    // what yazi does, and it needs nothing installed and no protocol.
+    const work = self.gpa.alloc(u8, png_bytes.len + core.limits.body_max * 2) catch return false;
+    defer self.gpa.free(work);
+    const rgba = self.gpa.alloc(u8, core.limits.body_max) catch return false;
+    defer self.gpa.free(rgba);
+
+    const image = core.png.decode(png_bytes, work, rgba) catch return false;
+    return halfblocks.draw(self.system, image, x, y, columns, rows);
 }
 
 fn clearImagesThunk(context: *anyopaque) void {
-    const self: *Browser = @ptrCast(@alignCast(context));
-    graphics.clear(self.system);
+    // Text repaints itself: there is no image layer to take away, only cells.
+    _ = context;
 }
 
 fn openUrlThunk(context: *anyopaque, url: []const u8) void {

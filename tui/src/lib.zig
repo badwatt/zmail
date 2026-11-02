@@ -16,7 +16,7 @@ pub const cli = @import("cli.zig");
 pub const screen = @import("screen.zig");
 pub const theme = @import("theme.zig");
 pub const wrap = @import("wrap.zig");
-pub const graphics = @import("graphics.zig");
+pub const halfblocks = @import("halfblocks.zig");
 pub const selection = @import("selection.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const layout = @import("layout.zig");
@@ -36,7 +36,7 @@ test {
     _ = @import("screen.zig");
     _ = @import("theme.zig");
     _ = @import("wrap.zig");
-    _ = @import("graphics.zig");
+    _ = @import("halfblocks.zig");
     _ = @import("selection.zig");
     _ = @import("clipboard.zig");
     _ = @import("layout.zig");

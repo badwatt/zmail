@@ -1675,11 +1675,8 @@ pub const Session = struct {
         if (self.state.view != .reader) return;
         const draw = self.deps.draw_image orelse return;
 
-        // Repainting an unchanged layer is the difference between a reader that
-        // keeps up with the keyboard and one that does not.
-        const signature = self.image_signature();
-        if (self.image_painted == signature) return;
-        self.image_painted = signature;
+        // The picture is made of cells, so it is drawn right after the frame
+        // that would otherwise paint over it.
         // Clearing is a nicety; painting is the point.
         if (self.deps.clear_images) |clear| clear(self.deps.clear_images_context);
         if (self.html_view == false or self.html_len == 0) return;

@@ -46,6 +46,7 @@ pub const smtp = @import("protocol/smtp.zig");
 pub const demo = @import("demo.zig");
 pub const cache = @import("cache.zig");
 pub const html = @import("html.zig");
+pub const png = @import("png.zig");
 pub const scope_port = @import("ports/scope.zig");
 pub const links = @import("links.zig");
 pub const mime = @import("mime.zig");
@@ -91,6 +92,7 @@ test {
     _ = @import("demo.zig");
     _ = @import("cache.zig");
     _ = @import("html.zig");
+    _ = @import("png.zig");
     _ = @import("ports/scope.zig");
     _ = @import("links.zig");
     _ = @import("mime.zig");
