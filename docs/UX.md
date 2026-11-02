@@ -96,7 +96,7 @@ and disappears on the next action.
 | `E`, `E` | empty Trash (asks once) |
 | `Ctrl+N` / `Ctrl+P` | down / up, for terminals without arrow keys |
 | `Space` | a page in the list and the reader |
-| `H` | in the reader: HTML view, or the plain text one |
+| `H` | in the reader: HTML view, or the plain text one. The HTML is read by amail itself: no browser, no external program |
 | `o` | in the reader: the whole mail in a browser |
 | `Ctrl+Q` `Ctrl+C` | quit. The top level never closes on `Esc`, `q`, or `h` |
 

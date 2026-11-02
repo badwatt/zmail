@@ -125,15 +125,6 @@ pub const Deps = struct {
     /// Takes every painted image away before the next frame is drawn.
     clear_images: ?*const fn (context: *anyopaque) void = null,
     clear_images_context: *anyopaque = undefined,
-    /// Renders the HTML part to text with a text browser (w3m, lynx): that is
-    /// what aerc and neomutt do, and it is why their mail looks laid out.
-    render_html_text: ?*const fn (
-        context: *anyopaque,
-        html: []const u8,
-        columns: u16,
-        out: []u8,
-    ) ?[]const u8 = null,
-    render_html_text_context: *anyopaque = undefined,
 };
 
 /// How many images one frame will paint: past a handful the mail is a gallery,
@@ -266,7 +257,6 @@ pub const Session = struct {
     remote_len: u32 = 0,
     html_part_len: u32 = 0,
     /// Set when a text browser has to lay the HTML out before it can be shown.
-    html_needs_browser: bool = false,
     html_text: [core.limits.body_max]u8 = undefined,
     html_len: u32 = 0,
     /// Which view the reader is showing. HTML only when the message has it.
@@ -799,13 +789,26 @@ pub const Session = struct {
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
         var found: ?core.links.Link = null;
         // No modifier: a terminal may keep ctrl to itself, and knowing what is
-        // clickable is the whole point of hovering.
-        if (self.cell_offset(lay, mouse)) |offset| found = core.links.at(self.reader_text(), offset);
+        // clickable is the whole point of hovering. What lights up is exactly
+        // what a click would open, anchor words included.
+        if (self.cell_offset(lay, mouse)) |offset| found = self.link_span_at(offset);
         if (found == null and self.hovered == null) return false;
         if (found != null and self.hovered != null and found.?.start == self.hovered.?.start) return false;
         self.hovered = found;
         self.needs_render = true;
         return true;
+    }
+
+    /// The span of the link under a cell: the words of an anchor in the HTML
+    /// view, or a written-out address. What the pointer lights up and what a
+    /// click opens both come from here, so they cannot disagree.
+    fn link_span_at(self: *Session, offset: u32) ?core.links.Link {
+        if (self.html_view) {
+            for (self.html_anchors[0..self.html_anchor_count]) |anchor| {
+                if (offset >= anchor.span.start and offset < anchor.span.end) return anchor.span;
+            }
+        }
+        return core.links.at(self.reader_text(), offset);
     }
 
     /// The address under a cell of the body: the anchor whose words it is, the
@@ -1099,14 +1102,6 @@ pub const Session = struct {
             self.remote_sources[index].set(source);
         }
 
-        // A text browser lays mail out the way aerc and neomutt do: tables,
-        // columns, lists. It needs the width of the reader, so it runs when the
-        // reader is drawn, not here.
-        if (self.deps.render_html_text != null) {
-            self.html_needs_browser = true;
-            return;
-        }
-
         const rendered = core.html.render(
             self.html_marked[0..self.html_marked_len],
             &self.html_text,
@@ -1122,41 +1117,6 @@ pub const Session = struct {
 
     /// Lays the HTML part out with a text browser, at the reader's width. The
     /// result is what aerc shows: real columns, real tables, links inline.
-    fn layout_html_with_browser(self: *Session, width: u16) void {
-        self.html_needs_browser = false;
-        if (self.html_part_len == 0) return;
-        const browser = self.deps.render_html_text orelse return;
-
-        const laid_out = browser(
-            self.deps.render_html_text_context,
-            self.html_marked[0..self.html_marked_len],
-            width,
-            &self.html_text,
-        ) orelse {
-            // No engine: fall back to our own fold rather than showing nothing.
-            const rendered = core.html.render(
-                self.html_marked[0..self.html_marked_len],
-                &self.html_text,
-                &self.html_links,
-                &self.html_kinds,
-                &self.html_anchors,
-            );
-            self.html_len = @intCast(rendered.text.len);
-            self.html_link_count = rendered.links.len;
-            self.html_kind_count = rendered.kinds.len;
-            self.html_anchor_count = rendered.anchors.len;
-            self.html_view = self.html_len > 0;
-            return;
-        };
-
-        self.html_len = @intCast(laid_out.len);
-        self.html_kind_count = 0;
-        // The browser wrote the addresses into the text: they are the links.
-        self.html_link_count = core.links.scan(laid_out, &self.html_links);
-        self.html_view = self.html_len > 0;
-        if (self.html_view) self.prefer_html();
-    }
-
     /// Opens on the view a mail client would show: HTML when the message has
     /// one, text when it does not.
     fn prefer_html(self: *Session) void {
@@ -1673,7 +1633,6 @@ pub const Session = struct {
         }
 
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
-        if (self.html_needs_browser) self.layout_html_with_browser(lay.reader_text_width);
         if (self.body_loaded) {
             wrap.wrap(self.reader_text(), lay.reader_text_width, &self.wrapped);
         }
@@ -4412,4 +4371,40 @@ test "in the HTML view, clicking the words of a link opens its address" {
 
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/x", sink.last[0..sink.last_len]);
+}
+
+test "in the HTML view the pointer lights up the words of a link" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.session.set_raw(
+        "Content-Type: text/html\r\n\r\n<p>See <a href=\"https://example.com/x\">the notes</a> now</p>",
+    );
+    rig.session.state.view = .reader;
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    const text = rig.session.reader_text();
+    const anchor = rig.session.html_anchors[0];
+
+    var row: u16 = 0;
+    var column: u16 = 0;
+    while (row < rig.session.wrapped.len) : (row += 1) {
+        const line = rig.session.wrapped.at(row, text);
+        const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
+        if (anchor.span.start < line_start or anchor.span.start >= line_start + line.len) continue;
+        column = @intCast(anchor.span.start - line_start);
+        break;
+    }
+
+    const hover = input.Mouse{ .x = column + 2, .y = lay.reader_body_y + row, .kind = .motion, .button = .none };
+    try testing.expect(rig.session.hover_link(hover));
+    // The lit span is the words of the anchor, not the address in parentheses.
+    const lit = rig.session.hovered.?;
+    try testing.expectEqual(anchor.span.start, lit.start);
+    try testing.expectEqual(anchor.span.end, lit.end);
 }

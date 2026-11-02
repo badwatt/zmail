@@ -137,8 +137,6 @@ fn run_session(
         .open_url_context = &browser,
         .open_external = openExternalThunk,
         .open_external_context = &browser,
-        .render_html_text = renderHtmlTextThunk,
-        .render_html_text_context = &browser,
         .fetch_image = fetchImageThunk,
         .fetch_image_context = &browser,
         .draw_image = drawImageThunk,
@@ -316,111 +314,6 @@ fn writeHtmlFile(
     return path;
 }
 
-/// Lays the HTML out with a text browser, the way aerc and neomutt do. w3m and
-/// lynx both print tables as tables and links as text plus their address.
-fn renderHtmlTextThunk(
-    context: *anyopaque,
-    html: []const u8,
-    columns: u16,
-    out: []u8,
-) ?[]const u8 {
-    const self: *Browser = @ptrCast(@alignCast(context));
-    if (html.len == 0 or out.len == 0) return null;
-
-    var page_buffer: [512]u8 = undefined;
-    const path = writeHtmlFile(self, html, &page_buffer, 0) orelse return null;
-
-    var width_buffer: [16]u8 = undefined;
-    const width = std.fmt.bufPrint(&width_buffer, "{d}", .{columns}) catch return null;
-
-    const attempts = [_]struct {
-        engine: []const u8,
-        binary: []const u8,
-        argv: []const []const u8,
-    }{
-        // w3m prints the address after its text, which is what keeps links
-        // clickable in the reader.
-        // The width is its own argument: w3m prints its usage for "-cols=80".
-        // Numbered references: the body stays clean and the addresses are
-        // listed at the end, which is what w3m looks like under aerc.
-        .{ .engine = "w3m", .binary = "w3m", .argv = &.{
-            "w3m", "-dump", "-T", "text/html", "-cols", width, "-o", "display_link_number=1", path,
-        } },
-        .{ .engine = "lynx", .binary = "lynx", .argv = &.{ "lynx", "-dump", "-nolist", "-width", width, path } },
-    };
-
-    for (attempts) |attempt| {
-        var child = spawn_engine(self, attempt.engine, attempt.binary, attempt.argv) orelse continue;
-        const stdout = child.stdout orelse continue;
-        // A pipe is not a file: it is read as a stream, not at a position.
-        var read_buffer: [8192]u8 = undefined;
-        var reader = stdout.reader(self.io, &read_buffer);
-        var total: usize = 0;
-        while (total < out.len) {
-            const count = reader.interface.readSliceShort(out[total..]) catch break;
-            if (count == 0) break;
-            total += count;
-        }
-        _ = child.wait(self.io) catch {};
-        if (total == 0) continue;
-        return trim_lines(out[0..total]);
-    }
-    return null;
-}
-
-/// Spawns an engine from the path, or from the Nix store where these live as
-/// dependencies rather than installed programs.
-fn spawn_engine(self: *Browser, name: []const u8, binary: []const u8, argv: []const []const u8) ?std.process.Child {
-    var child = std.process.spawn(self.io, .{
-        .argv = argv,
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .ignore,
-    }) catch null;
-    if (child) |*process| return process.*;
-
-    var found_buffer: [512]u8 = undefined;
-    const engine = find_in_store(self, name, binary, &found_buffer) orelse return null;
-    var argv_buffer: [8][]const u8 = undefined;
-    if (argv.len > argv_buffer.len) return null;
-    @memcpy(argv_buffer[0..argv.len], argv);
-    argv_buffer[0] = engine;
-    const second = std.process.spawn(self.io, .{
-        .argv = argv_buffer[0..argv.len],
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .ignore,
-    }) catch return null;
-    return second;
-}
-
-fn find_in_store(self: *Browser, name: []const u8, binary: []const u8, buffer: []u8) ?[]const u8 {
-    var dir = std.Io.Dir.cwd().openDir(self.io, "/nix/store", .{ .iterate = true }) catch
-        return null;
-    defer dir.close(self.io);
-
-    var iterator = dir.iterate();
-    var seen: u32 = 0;
-    while (iterator.next(self.io) catch null) |entry| {
-        if (entry.kind != .directory) continue;
-        var prefix: [16]u8 = undefined;
-        const wanted = std.fmt.bufPrint(&prefix, "{s}-", .{name}) catch return null;
-        if (!std.mem.startsWith(u8, entry.name, wanted)) continue;
-        if (std.mem.indexOf(u8, entry.name, ".drv") != null) continue;
-        seen += 1;
-        if (seen > 64) break;
-
-        const path = std.fmt.bufPrint(buffer, "/nix/store/{s}/bin/{s}", .{ entry.name, binary }) catch
-            return null;
-        const file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch continue;
-        file.close(self.io);
-        return path;
-    }
-    return null;
-}
-
-/// A text browser pads its output with blank lines; a reader does not want them
-/// at the end.
 fn trim_lines(text: []u8) []const u8 {
     var end = text.len;
     while (end > 0 and (text[end - 1] == '\n' or text[end - 1] == ' ' or text[end - 1] == '\r')) end -= 1;

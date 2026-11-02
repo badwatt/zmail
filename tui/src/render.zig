@@ -626,6 +626,7 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
     if (draw_line_selection(inputs, out, line, y, width)) return;
     if (inputs.links.len == 0) {
         _ = out.put_text(1, y, line, width, line_style(inputs));
+        draw_hover(inputs, out, line, y, width);
         return;
     }
 
@@ -644,17 +645,14 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
             cursor = start;
         }
         if (end > cursor) {
-            const lit = if (inputs.hovered) |hovered|
-                hovered.start == link.start and hovered.end == link.end
-            else
-                false;
-            draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, if (lit) .hovered else .link);
+            draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, .link);
             cursor = end;
         }
     }
     if (cursor < line_end) {
         draw_segment_kind(inputs, out, line, cursor - line_start, line.len, y, width, .text);
     }
+    draw_hover(inputs, out, line, y, width);
 }
 
 /// How a line of the HTML rendering is drawn. A terminal has no fonts, so the
@@ -690,6 +688,20 @@ fn draw_line_selection(inputs: Inputs, out: *Screen, line: []const u8, y: u16, w
 }
 
 const Segment = enum { text, link, hovered };
+
+/// The link under the pointer, drawn over the line it is on. It is a separate
+/// pass because in the HTML view the link is the anchor's words, which are not
+/// one of the written-out addresses.
+fn draw_hover(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16) void {
+    const hovered = inputs.hovered orelse return;
+    const line_start = @intFromPtr(line.ptr) - @intFromPtr(inputs.body.ptr);
+    const line_end = line_start + line.len;
+    if (hovered.end <= line_start or hovered.start >= line_end) return;
+    const start = @max(hovered.start, line_start) - line_start;
+    const end = @min(hovered.end, line_end) - line_start;
+    if (end <= start) return;
+    draw_segment_kind(inputs, out, line, start, end, y, width, .hovered);
+}
 
 fn draw_segment_kind(
     inputs: Inputs,
