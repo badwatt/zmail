@@ -251,8 +251,13 @@ fn renderHtmlTextThunk(
     const self: *Browser = @ptrCast(@alignCast(context));
     if (html.len == 0 or out.len == 0) return null;
 
+    // An image becomes its alt text: a text browser has no pixels to give it.
+    const labelled = self.gpa.alloc(u8, core.limits.body_max * 2) catch return null;
+    defer self.gpa.free(labelled);
+    const document = core.html.label_images(html, labelled);
+
     var page_buffer: [512]u8 = undefined;
-    const path = writeHtmlFile(self, html, &page_buffer, 0) orelse return null;
+    const path = writeHtmlFile(self, document, &page_buffer, 0) orelse return null;
 
     var width_buffer: [16]u8 = undefined;
     const width = std.fmt.bufPrint(&width_buffer, "{d}", .{columns}) catch return null;

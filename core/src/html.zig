@@ -383,6 +383,65 @@ fn entity(text: []const u8, index: usize) ?Decoded {
     return null;
 }
 
+/// Replaces every `<img>` with the text a terminal can show: its alt text when
+/// it has one, `[imagen]` when it does not. A text browser draws words, not
+/// pictures, and an image nobody mentions is worse than a placeholder.
+pub fn label_images(html: []const u8, out: []u8) []const u8 {
+    var writer = std.Io.Writer.fixed(out);
+    var index: usize = 0;
+
+    while (index < html.len) {
+        const start = std.mem.indexOfScalarPos(u8, html, index, '<') orelse {
+            writer.writeAll(html[index..]) catch {};
+            break;
+        };
+        writer.writeAll(html[index..start]) catch {};
+        const end = std.mem.indexOfScalarPos(u8, html, start, '>') orelse {
+            writer.writeAll(html[start..]) catch {};
+            break;
+        };
+        const tag = html[start + 1 .. end];
+        index = end + 1;
+
+        const name_end = std.mem.indexOfAny(u8, tag, " \t\r\n/") orelse tag.len;
+        if (!std.ascii.eqlIgnoreCase(tag[0..name_end], "img")) {
+            writer.writeAll(html[start .. end + 1]) catch {};
+            continue;
+        }
+
+        const alt = attribute(tag, "alt");
+        if (alt.len > 0) {
+            writer.print("[{s}]", .{alt}) catch {};
+        } else {
+            writer.writeAll("[imagen]") catch {};
+        }
+    }
+    return writer.buffered();
+}
+
+/// The value of one attribute in a tag body, unquoted.
+fn attribute(tag: []const u8, name: []const u8) []const u8 {
+    var index: usize = 0;
+    while (index + name.len <= tag.len) : (index += 1) {
+        if (!std.ascii.eqlIgnoreCase(tag[index..][0..name.len], name)) continue;
+        if (index > 0 and std.ascii.isAlphanumeric(tag[index - 1])) continue;
+        var cursor = index + name.len;
+        while (cursor < tag.len and (tag[cursor] == ' ' or tag[cursor] == '\t')) cursor += 1;
+        if (cursor >= tag.len or tag[cursor] != '=') continue;
+        cursor += 1;
+        while (cursor < tag.len and (tag[cursor] == ' ' or tag[cursor] == '\t')) cursor += 1;
+        if (cursor >= tag.len) return "";
+        if (tag[cursor] == '"' or tag[cursor] == '\'') {
+            const quote = tag[cursor];
+            const close = std.mem.indexOfScalarPos(u8, tag, cursor + 1, quote) orelse return "";
+            return tag[cursor + 1 .. close];
+        }
+        const stop = std.mem.indexOfAnyPos(u8, tag, cursor, " \t\r\n") orelse tag.len;
+        return tag[cursor..stop];
+    }
+    return "";
+}
+
 fn href_of(body: []const u8) []const u8 {
     const marker = indexOfIgnoreCase(body, 0, "href") orelse return "";
     var index = marker + "href".len;
@@ -470,6 +529,12 @@ test "an anchor whose text is the address is not written twice" {
     const rendered = render(html, &out, &link_buffer, &.{});
     try testing.expectEqualStrings("https://example.com/", rendered.text);
     try testing.expectEqualStrings("https://example.com/", rendered.links[0].text(rendered.text));
+}
+
+test "an image becomes words: its alt text, or a placeholder" {
+    var out: [256]u8 = undefined;
+    const html = "<p>a<img src=\"x.png\" alt=\"Foto\">b<img src=\"y.png\">c</p>";
+    try testing.expectEqualStrings("<p>a[Foto]b[imagen]c</p>", label_images(html, &out));
 }
 
 test "entities become their characters, and nbsp is a space" {
