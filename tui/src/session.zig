@@ -813,6 +813,7 @@ pub const Session = struct {
     /// by default) and, when there is an HTML part, the reading view made from
     /// it. `H` switches between them without touching the network.
     fn set_raw(self: *Session, raw: []const u8) void {
+        self.html_view = false;
         const length = @min(raw.len, self.raw.len);
         if (raw.ptr != &self.raw) @memcpy(self.raw[0..length], raw[0..length]);
         self.raw_len = @intCast(length);
@@ -828,6 +829,8 @@ pub const Session = struct {
         self.html_len = 0;
         self.html_ready = false;
         self.html_link_count = 0;
+        self.render_html_view();
+        self.prefer_html();
         self.body_loaded = true;
         self.wrapped = .{};
         self.needs_render = true;
@@ -843,6 +846,12 @@ pub const Session = struct {
         const rendered = core.html.render(part, &self.html_text, &self.html_links);
         self.html_len = @intCast(rendered.text.len);
         self.html_link_count = rendered.links.len;
+    }
+
+    /// Opens on the view a mail client would show: HTML when the message has
+    /// one, text when it does not.
+    fn prefer_html(self: *Session) void {
+        self.html_view = self.html_len > 0;
     }
 
     /// The text the reader is showing right now.
@@ -3231,7 +3240,7 @@ test "clicking a link in the body opens it" {
     try testing.expectEqual(@as(u8, 1), sink.opened);
 }
 
-test "H reads the HTML as text, and only when asked" {
+test "mail with an HTML part opens as HTML, and H goes back to the text" {
     const raw =
         \\Content-Type: multipart/alternative; boundary="b"
         \\
@@ -3255,50 +3264,50 @@ test "H reads the HTML as text, and only when asked" {
     rig.session.state.opened = MessageId.from_int(1);
     rig.session.set_raw(raw);
 
-    // Plain text is what the reader shows; the HTML is not touched until asked.
-    try testing.expectEqualStrings("plain version", rig.session.reader_text());
-    try testing.expect(!rig.session.html_ready);
-    try testing.expectEqual(@as(u32, 0), rig.session.html_len);
-
-    rig.send("H");
-    try testing.expect(rig.session.html_ready);
+    // What a mail client shows: the HTML part, laid out.
     try testing.expect(rig.session.html_view);
     try testing.expectEqualStrings(
         "Read the docs (https://example.com/a)",
-        rig.session.html_text[0..rig.session.html_len],
+        rig.session.reader_text(),
     );
-    try testing.expectEqualStrings("HTML view", rig.session.state.status.slice());
 
+    // H shows the text/plain alternative.
     rig.send("H");
     try testing.expect(!rig.session.html_view);
     try testing.expectEqualStrings("plain version", rig.session.reader_text());
+    try testing.expectEqualStrings("Plain text", rig.session.state.status.slice());
+
+    // And back.
+    rig.send("H");
+    try testing.expect(rig.session.html_view);
 }
 
-test "the HTML view says so when the message has none" {
+test "mail with no HTML part stays on its text" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
     rig.session.state.view = .reader;
-    rig.session.body_loaded = true;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw("Content-Type: text/plain\n\njust words");
 
-    // No HTML part: say so, stay in the text view.
-    rig.session.html_len = 0;
-    rig.session.html_ready = true;
-    rig.send("H");
     try testing.expect(!rig.session.html_view);
-    try testing.expectEqualStrings("This message has no HTML version", rig.session.state.status.slice());
+    try testing.expectEqualStrings("just words", rig.session.reader_text());
+}
 
-    // With one, the reader switches and comes back.
-    const rendered = "Hello\n\nRead the docs (https://example.com/a)";
-    @memcpy(rig.session.html_text[0..rendered.len], rendered);
-    rig.session.html_len = rendered.len;
-    rig.session.state.reader_scroll = 3;
+test "H on a text-only message says there is no HTML" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw("Content-Type: text/plain\n\njust words");
+
     rig.send("H");
-    try testing.expect(rig.session.html_view);
-    try testing.expectEqualStrings(rendered, rig.session.reader_text());
-    try testing.expectEqual(@as(u32, 0), rig.session.state.reader_scroll);
-    rig.send("H");
+    try testing.expectEqualStrings("This message has no HTML version", rig.session.state.status.slice());
     try testing.expect(!rig.session.html_view);
 }
 
@@ -3321,11 +3330,16 @@ test "a message with an HTML part renders both views from one fetch" {
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
+    rig.session.state.view = .reader;
     rig.session.set_raw(raw);
 
+    // Both views come from the same fetch, and HTML is the one shown first.
+    try testing.expectEqualStrings(
+        "Read the docs (https://example.com/a)",
+        rig.session.reader_text(),
+    );
+    rig.send("H");
     try testing.expectEqualStrings("plain version", rig.session.reader_text());
-    // The HTML view is rendered when it is asked for, not before.
-    rig.session.render_html_view();
     try testing.expectEqualStrings(
         "Read the docs (https://example.com/a)",
         rig.session.html_text[0..rig.session.html_len],
