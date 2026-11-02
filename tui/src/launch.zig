@@ -151,6 +151,9 @@ fn run_session(
 
 /// Clicking a link hands it to whatever opens browsers on this machine.
 const Browser = struct {
+    /// Pictures the terminal already holds, so scrolling does not resend them.
+    sent: [16]u32 = @splat(0),
+    sent_len: u8 = 0,
     io: std.Io,
     /// Where a rendered page and its picture are written before being shown.
     cache_dir: []const u8 = "",
@@ -192,12 +195,23 @@ fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 
 fn drawImageThunk(
     context: *anyopaque,
     png_bytes: []const u8,
+    id: u32,
     x: u16,
     y: u16,
     columns: u16,
     rows: u16,
 ) bool {
     const self: *Browser = @ptrCast(@alignCast(context));
+
+    // The picture at full resolution when the terminal speaks kitty. It is
+    // transmitted once per message and only placed afterwards: sending it again
+    // on every scroll is what made the reader stutter.
+    if (graphics.supported()) {
+        if (!isTransmitted(self, id)) {
+            if (graphics.transmit(self.system, png_bytes, id)) rememberTransmitted(self, id);
+        }
+        if (graphics.place(self.system, id, x, y, columns, rows)) return true;
+    }
 
     // The picture at full resolution when the terminal speaks kitty: it scales
     // it itself, with a real resampler, which is why it does not look blocky.
@@ -215,11 +229,21 @@ fn drawImageThunk(
     return halfblocks.draw(self.system, image, x, y, columns, rows);
 }
 
+fn isTransmitted(self: *Browser, id: u32) bool {
+    return std.mem.indexOfScalar(u32, self.sent[0..self.sent_len], id) != null;
+}
+
+fn rememberTransmitted(self: *Browser, id: u32) void {
+    if (self.sent_len >= self.sent.len) return;
+    self.sent[self.sent_len] = id;
+    self.sent_len += 1;
+}
+
 fn clearImagesThunk(context: *anyopaque) void {
     const self: *Browser = @ptrCast(@alignCast(context));
-    // Half blocks belong to the text and are covered by the next frame; kitty
-    // pictures are a layer of their own and have to be taken away.
-    if (graphics.supported()) graphics.clear(self.system);
+    // Only the placements go: the terminal keeps the pictures for the next
+    // frame, which is the whole point of transmitting them once.
+    if (graphics.supported()) graphics.clear_placements(self.system);
 }
 
 fn openUrlThunk(context: *anyopaque, url: []const u8) void {

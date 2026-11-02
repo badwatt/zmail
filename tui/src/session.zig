@@ -107,6 +107,7 @@ pub const Deps = struct {
     draw_image: ?*const fn (
         context: *anyopaque,
         png: []const u8,
+        id: u32,
         x: u16,
         y: u16,
         columns: u16,
@@ -143,8 +144,20 @@ const cell_height: u32 = 18;
 /// An image taller than this is scaled down: a reader scrolls, it does not zoom.
 const max_image_rows: u32 = 12;
 
+const ImageSlot = struct {
+    key: core.text.Text(128) = .{},
+    bytes: [96 * 1024]u8 = undefined,
+    len: u32 = 0,
+};
+
 const ImageSize = struct { width: u32, height: u32 };
 const ImageCells = struct { columns: u16, rows: u16 };
+
+/// A stable id for a picture, so the terminal can keep its copy between frames.
+fn image_id(key: []const u8) u32 {
+    const hash = std.hash.Wyhash.hash(0, key);
+    return @intCast((hash & 0x7fffffff) | 1);
+}
 
 /// The marker a numbered network image gets: "r0", "r1", …
 fn is_remote_marker(key: []const u8) bool {
@@ -226,6 +239,9 @@ pub const Session = struct {
     /// Room for one decoded image, and the pixels-per-cell arithmetic that
     /// turns it into a place on screen.
     image_buffer: [core.limits.body_max]u8 = undefined,
+    /// Every picture of this message, decoded or downloaded once.
+    image_slots: [max_images_drawn]ImageSlot = @splat(.{}),
+    image_slot_count: u8 = 0,
     /// How many rows each wrapped line hides behind a picture.
     cover_rows: [wrap.max_lines]u8 = @splat(0),
     cover_len: u32 = 0,
@@ -951,6 +967,7 @@ pub const Session = struct {
             self.raw_len = 0;
             self.body_len = 0;
             self.shown_len = 0;
+            self.image_slot_count = 0;
             self.html_len = 0;
             self.body_loaded = true;
             self.wrapped = .{};
@@ -1603,12 +1620,33 @@ pub const Session = struct {
     /// The bytes of the picture behind a marker: a part of the message, or one
     /// downloaded from its address.
     fn image_png(self: *Session, key: []const u8) ?[]const u8 {
-        if (is_remote_marker(key)) {
-            const url = self.remote_source(key[1..]) orelse return null;
-            return self.remote_image(url);
+        for (self.image_slots[0..self.image_slot_count]) |*slot| {
+            if (!std.mem.eql(u8, slot.key.slice(), key)) continue;
+            return if (slot.len > 0) slot.bytes[0..slot.len] else null;
         }
-        if (!is_local_image(key)) return null;
-        return core.mime.image_body(self.raw[0..self.raw_len], key, &self.image_buffer);
+        if (self.image_slot_count >= self.image_slots.len) return null;
+
+        // Decoded or downloaded once per message: doing either inside a frame
+        // is what made scrolling take a second.
+        // "r3" is a picture with an address; anything else names a part of the
+        // message. Checking the other way round treats "r3" as a content id.
+        var decoded: ?[]const u8 = null;
+        if (is_remote_marker(key)) {
+            if (self.remote_source(key[1..])) |url| decoded = self.remote_image(url);
+        } else if (is_local_image(key)) {
+            decoded = core.mime.image_body(self.raw[0..self.raw_len], key, &self.image_buffer);
+        }
+
+        const slot = &self.image_slots[self.image_slot_count];
+        slot.key.set(key);
+        slot.len = 0;
+        if (decoded) |png| {
+            const length = @min(png.len, slot.bytes.len);
+            @memcpy(slot.bytes[0..length], png[0..length]);
+            slot.len = @intCast(length);
+        }
+        self.image_slot_count += 1;
+        return if (slot.len > 0) slot.bytes[0..slot.len] else null;
     }
 
     /// How many rows a picture needs, which is how many rows of text it hides.
@@ -1692,7 +1730,8 @@ pub const Session = struct {
             const marker = std.mem.indexOf(u8, line, "[IMG:") orelse continue;
             const rest = line[marker + 5 ..];
             const close = std.mem.indexOfScalar(u8, rest, ']') orelse continue;
-            const png = self.image_png(rest[0..close]) orelse continue;
+            const key = rest[0..close];
+            const png = self.image_png(key) orelse continue;
             const size = png_size(png) orelse continue;
             const cells = image_cells(size);
             if (cells.columns == 0 or cells.rows == 0) continue;
@@ -1706,6 +1745,7 @@ pub const Session = struct {
             _ = draw(
                 self.deps.draw_image_context,
                 png,
+                image_id(key),
                 column,
                 lay.reader_body_y + row,
                 @min(width, lay.columns -| column),
@@ -3955,13 +3995,14 @@ const ImageSink = struct {
     fn draw(
         context: *anyopaque,
         png: []const u8,
+        id: u32,
         x: u16,
         y: u16,
         columns: u16,
         rows: u16,
     ) bool {
         const self: *ImageSink = @ptrCast(@alignCast(context));
-        _ = .{ x, y };
+        _ = .{ id, x, y };
         self.calls += 1;
         self.bytes = png.len;
         self.columns = columns;
@@ -4065,13 +4106,14 @@ const RemoteSink = struct {
     fn draw(
         context: *anyopaque,
         png: []const u8,
+        id: u32,
         x: u16,
         y: u16,
         columns: u16,
         rows: u16,
     ) bool {
         const self: *RemoteSink = @ptrCast(@alignCast(context));
-        _ = .{ png, x, y, columns, rows };
+        _ = .{ png, id, x, y, columns, rows };
         self.calls += 1;
         return true;
     }

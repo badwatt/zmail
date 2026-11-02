@@ -39,6 +39,61 @@ pub const Env = struct {
     }
 };
 
+/// Sends a picture to the terminal once, under `id`. Placing it afterwards is
+/// a few dozen bytes: that is the difference between a reader that scrolls and
+/// one that stutters.
+pub fn transmit(system: System, png: []const u8, id: u32) bool {
+    if (png.len == 0 or id == 0) return false;
+
+    var encoded: [chunk_max]u8 = undefined;
+    var offset: usize = 0;
+    var first = true;
+    while (offset < png.len) {
+        const take = @min(raw_chunk_max, png.len - offset);
+        const base64 = std.base64.standard.Encoder.encode(&encoded, png[offset..][0..take]);
+        const more = offset + take < png.len;
+        offset += take;
+
+        var header: [64]u8 = undefined;
+        const text = if (first)
+            std.fmt.bufPrint(&header, "\x1b_Ga=t,f=100,i={d},m={d};", .{ id, @intFromBool(more) }) catch
+                return false
+        else
+            std.fmt.bufPrint(&header, "\x1b_Gm={d};", .{@intFromBool(more)}) catch return false;
+        first = false;
+
+        system.write(text) catch return false;
+        system.write(base64) catch return false;
+        system.write("\x1b\\") catch return false;
+    }
+    return true;
+}
+
+/// Puts an already transmitted picture at a cell.
+pub fn place(system: System, id: u32, x: u16, y: u16, columns: u16, rows: u16) bool {
+    var position: [32]u8 = undefined;
+    const at = std.fmt.bufPrint(&position, "\x1b[{d};{d}H", .{ y + 1, x + 1 }) catch return false;
+    system.write(at) catch return false;
+
+    var escape: [96]u8 = undefined;
+    const placed = std.fmt.bufPrint(&escape, "\x1b_Ga=p,i={d},c={d},r={d}\x1b\\", .{
+        id, columns, rows,
+    }) catch return false;
+    system.write(placed) catch return false;
+    return true;
+}
+
+/// Removes the placements and keeps the pictures: scrolling must not pay for
+/// transmitting them again.
+pub fn clear_placements(system: System) void {
+    system.write("\x1b_Ga=d,d=p\x1b\\") catch {};
+}
+
+/// Forgets every picture: another message, another set.
+pub fn clear_all(system: System) void {
+    system.write("\x1b_Ga=d\x1b\\") catch {};
+}
+
 /// Paints `png` with its top-left corner at (x, y), `columns` by `rows` cells.
 /// Returns false when the terminal refused it, so the caller can fall back.
 pub fn draw(system: System, png: []const u8, x: u16, y: u16, columns: u16, rows: u16) bool {
