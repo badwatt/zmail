@@ -191,6 +191,19 @@ Pushing code without touching the manifest runs the CI and nothing else. A
 release that failed halfway can be retried with **Run workflow**
 (`workflow_dispatch`) without changing the version again.
 
+## CI
+
+`ci` runs on every push to `main` and every pull request: formatting,
+`docs:check` (the manifest is the only place the name, version and toolchain
+live), the whole test suite including the end-to-end PTY test, and a
+`ReleaseSafe` build. Line coverage is reported as a second job.
+
+`release` only starts when `build.zig.zon` changes; see [Releasing](#releasing).
+
+CodeQL is not here on purpose: the repository is private without code scanning
+enabled, and Zig is not one of its languages — it would only ever read the
+workflows themselves.
+
 ## Status
 
 Early, honest, and tested: the vertical slice works end to end offline. Live
