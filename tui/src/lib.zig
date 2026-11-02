@@ -25,7 +25,6 @@ pub const os = @import("os.zig");
 pub const session = @import("session.zig");
 pub const refresh = @import("refresh.zig");
 pub const setup_session = @import("setup_session.zig");
-pub const graphics = @import("graphics.zig");
 pub const launch = @import("launch.zig");
 pub const run = @import("run.zig");
 
@@ -41,7 +40,6 @@ test {
     _ = @import("system.zig");
     _ = @import("os.zig");
     _ = @import("session.zig");
-    _ = @import("graphics.zig");
     _ = @import("setup_session.zig");
     _ = @import("run.zig");
 }

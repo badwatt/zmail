@@ -659,8 +659,7 @@ const list_hints = [_]Hint{
 const reader_hints = [_]Hint{
     .{ .keys = "j/k", .action = "scroll" },
     .{ .keys = "Space", .action = "page" },
-    .{ .keys = "H", .action = "html in browser" },
-    .{ .keys = "h", .action = "html as text" },
+    .{ .keys = "H", .action = "html" },
     .{ .keys = "click", .action = "open link" },
     .{ .keys = "r", .action = "reply" },
     .{ .keys = "q", .action = "back" },

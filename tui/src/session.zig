@@ -94,20 +94,6 @@ pub const Deps = struct {
     /// opener: clicking a link then does nothing rather than lying.
     open_url: ?*const fn (context: *anyopaque, url: []const u8) void = null,
     open_url_context: *anyopaque = undefined,
-    /// Renders the HTML part into the reader's area, in the terminal. Returns
-    /// false when this terminal or this machine cannot: the text view is the
-    /// fallback. `clear_html` takes the picture away again.
-    render_html: ?*const fn (
-        context: *anyopaque,
-        html: []const u8,
-        x: u16,
-        y: u16,
-        columns: u16,
-        rows: u16,
-    ) bool = null,
-    render_html_context: *anyopaque = undefined,
-    clear_html: ?*const fn (context: *anyopaque) void = null,
-    clear_html_context: *anyopaque = undefined,
 };
 
 pub const Session = struct {
@@ -132,15 +118,13 @@ pub const Session = struct {
     raw_len: u32 = 0,
     /// The HTML part, and the reading view made from it.
     html_part: [core.limits.body_max]u8 = undefined,
-    html_part_len: u32 = 0,
     html_text: [core.limits.body_max]u8 = undefined,
     html_len: u32 = 0,
     /// Which view the reader is showing. HTML only when the message has it.
     html_view: bool = false,
-    /// Set when a picture of the mail is on screen: the next key takes it away.
-    image_shown: bool = false,
-    /// Set by `H`: the next frame paints, then the picture goes over it.
-    want_image: bool = false,
+    /// Whether the HTML part has already been rendered to text. Only `H` asks
+    /// for it: a message nobody opens as HTML costs nothing.
+    html_ready: bool = false,
     html_links: [core.links.max_links]core.links.Link = undefined,
     html_link_count: usize = 0,
     text_links: [core.links.max_links]core.links.Link = undefined,
@@ -495,15 +479,9 @@ pub const Session = struct {
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
-        // A picture is not the screen: the first key takes it away.
-        if (self.image_shown) {
-            self.dismiss_image();
-            return true;
-        }
         // Views are not commands: the core has no opinion about them.
-        if (key == .char and self.state.view == .reader) {
-            if (key.char == 'H') return self.open_html();
-            if (key.char == 'h') return self.toggle_html();
+        if (key == .char and key.char == 'H' and self.state.view == .reader) {
+            return self.toggle_html();
         }
         const command = keymap.translate(key, .{ .mode = self.state.mode, .view = self.state.view }) orelse return false;
         return self.apply(command);
@@ -538,58 +516,11 @@ pub const Session = struct {
 
     /// The real thing: the HTML part, in the browser, with its white background
     /// and its images, exactly as another mail client would show it.
-    fn open_html(self: *Session) bool {
-        if (!self.body_loaded) return false;
-        if (self.html_part_len == 0) {
-            self.state.set_status("This message has no HTML version", .{});
-            self.needs_render = true;
-            return true;
-        }
-        if (self.deps.render_html == null) {
-            // No way to paint it here: keep the text rendering, and say so.
-            self.state.set_status("This terminal cannot show the HTML; h reads it as text", .{});
-            self.needs_render = true;
-            return true;
-        }
-        // The frame goes down first; the picture goes over it (see render).
-        self.want_image = true;
-        self.state.set_status("HTML · any key goes back", .{});
-        self.needs_render = true;
-        return true;
-    }
-
-    /// Paints the picture of the mail over the reader's body area.
-    fn paint_image(self: *Session, lay: layout_mod.Layout) void {
-        const draw = self.deps.render_html orelse return;
-        self.want_image = false;
-        // The whole screen, not just the body: a mail client shows the whole
-        // message and the page needs the room.
-        const drawn = draw(
-            self.deps.render_html_context,
-            self.html_part[0..self.html_part_len],
-            0,
-            0,
-            lay.columns,
-            lay.rows,
-        );
-        if (drawn) {
-            self.image_shown = true;
-        } else {
-            self.state.set_status("Could not draw the HTML; h reads it as text", .{});
-        }
-    }
-
-    /// Takes the picture away and repaints the text underneath it.
-    fn dismiss_image(self: *Session) void {
-        self.image_shown = false;
-        if (self.deps.clear_html) |clear| clear(self.deps.clear_html_context);
-        self.invalidate_screen();
-        self.state.set_status("", .{});
-    }
-
-    /// The terminal approximation: the HTML part read as text.
+    /// The HTML part, read as text: structure kept, nothing fetched, nothing
+    /// executed. Rendered on first use and kept for this message.
     fn toggle_html(self: *Session) bool {
         if (!self.body_loaded) return false;
+        if (!self.html_ready) self.render_html_view();
         if (self.html_len == 0) {
             self.state.set_status("This message has no HTML version", .{});
             self.needs_render = true;
@@ -771,17 +702,23 @@ pub const Session = struct {
         self.text_link_count = core.links.scan(text, &self.text_links);
 
         self.html_len = 0;
-        self.html_part_len = 0;
+        self.html_ready = false;
         self.html_link_count = 0;
-        if (core.mime.html_body(message, &self.html_part, &self.scratch_bytes)) |part| {
-            self.html_part_len = @intCast(part.len);
-            const rendered = core.html.render(part, &self.html_text, &self.html_links);
-            self.html_len = @intCast(rendered.text.len);
-            self.html_link_count = rendered.links.len;
-        }
         self.body_loaded = true;
         self.wrapped = .{};
         self.needs_render = true;
+    }
+
+    /// Renders the HTML part, once, when the reader asks for it.
+    fn render_html_view(self: *Session) void {
+        self.html_ready = true;
+        self.html_len = 0;
+        self.html_link_count = 0;
+        const message = self.raw[0..self.raw_len];
+        const part = core.mime.html_body(message, &self.html_part, &self.scratch_bytes) orelse return;
+        const rendered = core.html.render(part, &self.html_text, &self.html_links);
+        self.html_len = @intCast(rendered.text.len);
+        self.html_link_count = rendered.links.len;
     }
 
     /// The text the reader is showing right now.
@@ -1308,7 +1245,6 @@ pub const Session = struct {
 
         self.flush();
         self.needs_render = false;
-        if (self.want_image) self.paint_image(lay);
     }
 
     fn flush(self: *Session) void {
@@ -3161,34 +3097,21 @@ test "clicking a link in the body opens it" {
     try testing.expectEqual(@as(u8, 1), sink.opened);
 }
 
-const HtmlSink = struct {
-    calls: u8 = 0,
-    length: usize = 0,
-    cleared: u8 = 0,
-    accept: bool = true,
+test "H reads the HTML as text, and only when asked" {
+    const raw =
+        \\Content-Type: multipart/alternative; boundary="b"
+        \\
+        \\--b
+        \\Content-Type: text/plain
+        \\
+        \\plain version
+        \\--b
+        \\Content-Type: text/html
+        \\
+        \\<p>Read <a href="https://example.com/a">the docs</a></p>
+        \\--b--
+    ;
 
-    fn draw(
-        context: *anyopaque,
-        html: []const u8,
-        x: u16,
-        y: u16,
-        columns: u16,
-        rows: u16,
-    ) bool {
-        const self: *HtmlSink = @ptrCast(@alignCast(context));
-        _ = .{ x, y, columns, rows };
-        self.calls += 1;
-        self.length = html.len;
-        return self.accept;
-    }
-
-    fn clear(context: *anyopaque) void {
-        const self: *HtmlSink = @ptrCast(@alignCast(context));
-        self.cleared += 1;
-    }
-};
-
-test "H paints the HTML in the terminal, and a key takes it away" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -3196,43 +3119,28 @@ test "H paints the HTML in the terminal, and a key takes it away" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.body_loaded = true;
+    rig.session.set_raw(raw);
 
-    var sink: HtmlSink = .{};
-    rig.session.deps.render_html = HtmlSink.draw;
-    rig.session.deps.render_html_context = &sink;
-    rig.session.deps.clear_html = HtmlSink.clear;
-    rig.session.deps.clear_html_context = &sink;
+    // Plain text is what the reader shows; the HTML is not touched until asked.
+    try testing.expectEqualStrings("plain version", rig.session.reader_text());
+    try testing.expect(!rig.session.html_ready);
+    try testing.expectEqual(@as(u32, 0), rig.session.html_len);
 
-    // Nothing to render: say so, draw nothing.
-    rig.session.html_part_len = 0;
     rig.send("H");
-    try testing.expectEqual(@as(u8, 0), sink.calls);
-    try testing.expectEqualStrings("This message has no HTML version", rig.session.state.status.slice());
+    try testing.expect(rig.session.html_ready);
+    try testing.expect(rig.session.html_view);
+    try testing.expectEqualStrings(
+        "Read the docs (https://example.com/a)",
+        rig.session.html_text[0..rig.session.html_len],
+    );
+    try testing.expectEqualStrings("HTML view", rig.session.state.status.slice());
 
-    const part = "<p>Read <a href=\"https://example.com/a\">the docs</a></p>";
-    @memcpy(rig.session.html_part[0..part.len], part);
-    rig.session.html_part_len = part.len;
     rig.send("H");
-    // The frame goes down, then the picture over it.
-    try testing.expectEqual(@as(u8, 1), sink.calls);
-    try testing.expectEqual(part.len, sink.length);
-    try testing.expect(rig.session.image_shown);
-
-    // Any key removes the picture and repaints.
-    rig.send("j");
-    try testing.expectEqual(@as(u8, 1), sink.cleared);
-    try testing.expect(!rig.session.image_shown);
-
-    // A terminal that cannot draw it says so instead of pretending.
-    sink.accept = false;
-    rig.send("H");
-    try testing.expectEqual(@as(u8, 2), sink.calls);
-    try testing.expect(!rig.session.image_shown);
-    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Could not draw") != null);
+    try testing.expect(!rig.session.html_view);
+    try testing.expectEqualStrings("plain version", rig.session.reader_text());
 }
 
-test "h switches to the HTML view only when there is one" {
+test "the HTML view says so when the message has none" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -3242,7 +3150,8 @@ test "h switches to the HTML view only when there is one" {
 
     // No HTML part: say so, stay in the text view.
     rig.session.html_len = 0;
-    rig.send("h");
+    rig.session.html_ready = true;
+    rig.send("H");
     try testing.expect(!rig.session.html_view);
     try testing.expectEqualStrings("This message has no HTML version", rig.session.state.status.slice());
 
@@ -3251,11 +3160,11 @@ test "h switches to the HTML view only when there is one" {
     @memcpy(rig.session.html_text[0..rendered.len], rendered);
     rig.session.html_len = rendered.len;
     rig.session.state.reader_scroll = 3;
-    rig.send("h");
+    rig.send("H");
     try testing.expect(rig.session.html_view);
     try testing.expectEqualStrings(rendered, rig.session.reader_text());
     try testing.expectEqual(@as(u32, 0), rig.session.state.reader_scroll);
-    rig.send("h");
+    rig.send("H");
     try testing.expect(!rig.session.html_view);
 }
 
@@ -3281,6 +3190,8 @@ test "a message with an HTML part renders both views from one fetch" {
     rig.session.set_raw(raw);
 
     try testing.expectEqualStrings("plain version", rig.session.reader_text());
+    // The HTML view is rendered when it is asked for, not before.
+    rig.session.render_html_view();
     try testing.expectEqualStrings(
         "Read the docs (https://example.com/a)",
         rig.session.html_text[0..rig.session.html_len],

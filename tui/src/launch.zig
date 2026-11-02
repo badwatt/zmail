@@ -8,7 +8,6 @@ const core = @import("core");
 const net = @import("net");
 
 const cli = @import("cli.zig");
-const graphics = @import("graphics.zig");
 const os = @import("os.zig");
 const session_mod = @import("session.zig");
 const setup_session = @import("setup_session.zig");
@@ -110,9 +109,7 @@ fn run_session(
 ) ?Failure {
     // The session owns megabytes of bounded buffers; keeping it on the stack
     // next to the adapters overflows it.
-    var dir_buffer: [512]u8 = undefined;
-    const cache_dir = cli.default_cache_dir(&dir_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
-    var browser = Browser{ .io = io, .cache_dir = cache_dir, .system = system, .gpa = gpa };
+    var browser = Browser{ .io = io };
     const session = gpa.create(session_mod.Session) catch
         return .{ .message = "Not enough memory to start" };
     defer gpa.destroy(session);
@@ -129,10 +126,6 @@ fn run_session(
         .now = os.now_unix,
         .open_url = openUrlThunk,
         .open_url_context = &browser,
-        .render_html = renderHtmlThunk,
-        .render_html_context = &browser,
-        .clear_html = clearHtmlThunk,
-        .clear_html_context = &browser,
     }) catch return .{ .message = "Not enough memory to start" };
     defer session.deinit();
 
@@ -143,108 +136,11 @@ fn run_session(
 /// Clicking a link hands it to whatever opens browsers on this machine.
 const Browser = struct {
     io: std.Io,
-    /// Where the rendered page and its picture are written.
-    cache_dir: []const u8 = "",
-    /// The terminal, for the graphics escapes.
-    system: SessionSystem = undefined,
-    gpa: std.mem.Allocator = undefined,
-
-    fn depsSystem(self: *Browser) SessionSystem {
-        return self.system;
-    }
 };
-
-/// Screenshots are pictures of mail, not archives: a huge one is refused.
-const max_screenshot: u64 = 12 * 1024 * 1024;
 
 fn openUrlThunk(context: *anyopaque, url: []const u8) void {
     const self: *Browser = @ptrCast(@alignCast(context));
     net.oauth_flow.open_in_browser(self.io, url);
-}
-
-/// Renders the HTML part into the reader: a headless browser turns it into a
-/// PNG, and the terminal paints that PNG over the body area. Nothing leaves the
-/// machine and no window opens.
-fn renderHtmlThunk(
-    context: *anyopaque,
-    html: []const u8,
-    x: u16,
-    y: u16,
-    columns: u16,
-    rows: u16,
-) bool {
-    const self: *Browser = @ptrCast(@alignCast(context));
-    if (self.cache_dir.len == 0 or !graphics.supported()) return false;
-
-    var html_path_buffer: [512]u8 = undefined;
-    const html_path = std.fmt.bufPrint(&html_path_buffer, "{s}/amail/view.html", .{self.cache_dir}) catch
-        return false;
-    var png_path_buffer: [512]u8 = undefined;
-    const png_path = std.fmt.bufPrint(&png_path_buffer, "{s}/amail/view.png", .{self.cache_dir}) catch
-        return false;
-
-    const dir = cli.parent_dir(html_path);
-    if (dir.len > 0) {
-        _ = std.Io.Dir.cwd().createDirPathStatus(self.io, dir, directory_mode) catch .existing;
-    }
-    const file = std.Io.Dir.cwd().createFile(self.io, html_path, .{ .permissions = file_mode }) catch
-        return false;
-    // White paper: the rendering should look like mail, not like a text dump.
-    file.writeStreamingAll(self.io, "<!doctype html><meta charset=utf-8>" ++
-        "<style>body{background:#fff;color:#111;font-family:sans-serif;margin:16px}" ++
-        "img{max-width:100%}</style>") catch {};
-    file.writeStreamingAll(self.io, html) catch {};
-    file.close(self.io);
-
-    // A cell is about 9x18 pixels: ask the browser for that many.
-    var size_buffer: [64]u8 = undefined;
-    const size = std.fmt.bufPrint(&size_buffer, "--window-size={d},{d}", .{
-        @as(u32, columns) * 9,
-        @as(u32, rows) * 18,
-    }) catch return false;
-    var shot_buffer: [600]u8 = undefined;
-    const shot = std.fmt.bufPrint(&shot_buffer, "--screenshot={s}", .{png_path}) catch return false;
-    var url_buffer: [600]u8 = undefined;
-    const url = std.fmt.bufPrint(&url_buffer, "file://{s}", .{html_path}) catch return false;
-
-    var child = std.process.spawn(self.io, .{
-        .argv = &.{ "firefox", "--headless", "--new-instance", size, shot, url },
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch return false;
-    _ = child.wait(self.io) catch return false;
-
-    const png_file = std.Io.Dir.cwd().openFile(self.io, png_path, .{}) catch return false;
-    defer png_file.close(self.io);
-    const stat = png_file.stat(self.io) catch return false;
-    if (stat.size == 0 or stat.size > max_screenshot) return false;
-
-    const bytes = self.gpa.alloc(u8, @intCast(stat.size)) catch return false;
-    defer self.gpa.free(bytes);
-    const read = png_file.readPositionalAll(self.io, bytes, 0) catch return false;
-    if (read == 0) return false;
-
-    return graphics.draw(self.depsSystem(), bytes[0..read], x, y, columns, rows);
-}
-
-/// The picture is a layer the terminal owns; removing it leaves the frame.
-fn clearHtmlThunk(context: *anyopaque) void {
-    const self: *Browser = @ptrCast(@alignCast(context));
-    graphics.clear(self.depsSystem());
-}
-
-fn percent_encode_all(text: []const u8, out: []u8) []const u8 {
-    const digits = "0123456789ABCDEF";
-    var length: usize = 0;
-    for (text) |byte| {
-        if (length + 3 > out.len) break;
-        out[length] = '%';
-        out[length + 1] = digits[byte >> 4];
-        out[length + 2] = digits[byte & 0x0f];
-        length += 3;
-    }
-    return out[0..length];
 }
 
 const max_accounts = core.config.max_accounts;

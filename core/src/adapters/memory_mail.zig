@@ -185,8 +185,8 @@ const html_message =
     "A short note with a link: https://example.com/doc/plan\n" ++
     "\n" ++
     "The plain-text part of this message is what the reader shows by default, so\n" ++
-    "pressing h switches to the HTML read as text and H draws the page itself in\n" ++
-    "the terminal.\n" ++
+    "pressing H reads the HTML version instead: headings, lists and links, all\n" ++
+    "in the terminal.\n" ++
     "\n" ++
     "Nothing in this demo leaves the machine: the mail lives in memory and the\n" ++
     "rendering happens from that copy.\n" ++
@@ -197,8 +197,8 @@ const html_message =
     "<h2>Plan</h2><p>A short note with a <a href=\"https://example.com/doc/plan\">link</a>.</p>" ++
     "<ul><li>ship the simple version</li><li>then the fancy one</li></ul>" ++
     "<p>The plain-text part of this message is what the reader shows by default, " ++
-    "so pressing h switches to the HTML read as text and H draws the page " ++
-    "itself in the terminal.</p>" ++
+    "so pressing H reads the HTML version instead: headings, lists and links, " ++
+    "all in the terminal.</p>" ++
     "<p>Nothing in this demo leaves the machine: the mail lives in memory and " ++
     "the rendering happens from that copy.</p>\n" ++
     "--demo--\n";

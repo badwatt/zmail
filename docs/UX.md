@@ -258,9 +258,11 @@ mail, not more surface area.
 
 ## Reading
 
-`j`/`k` scroll, `Space` pages, `q` goes back. A message that has an HTML part
-can be read that way with `H`: paragraphs, lists, quotes and headings keep
-their shape, and every link is written out after its text, underlined.
+`j`/`k` scroll, `Space` pages, `q` goes back. Text is what the reader shows by
+default, always. A message that has an HTML part can be read that way with `H`:
+paragraphs, lists, quotes and headings keep their shape, and every link is
+written out after its text, underlined. Nothing is fetched or executed to draw
+it: no browser, no images, no scripts — the HTML is read, not run.
 
 Links are clickable in either view. A click on a URL hands it to the browser
 (`xdg-open`, `gio open`, `sensible-browser`, `open`, or `wslview`, whichever
