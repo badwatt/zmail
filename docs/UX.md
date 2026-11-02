@@ -274,4 +274,6 @@ Links are clickable in either view. A click on a URL hands it to the browser
 exists); a click on the words around it does nothing.
 
 The accounts overlay (`A`) lists "All accounts" first and then your accounts by
-name, whatever order the config file uses.
+name, whatever order the config file uses. The choice is remembered in
+`~/.config/amail/scope`, so the next start opens on the same account — or on all
+of them, if that is what you picked last.

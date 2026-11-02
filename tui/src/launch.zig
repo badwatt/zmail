@@ -92,7 +92,7 @@ fn run_demo(gpa: std.mem.Allocator, io: std.Io, system: SessionSystem) ?Failure 
     demo.outboxes[0] = .{ .id = core.id.AccountId.from_int(1), .outbox = demo.outbox[0].outbox() };
     demo.outboxes[1] = .{ .id = core.id.AccountId.from_int(2), .outbox = demo.outbox[1].outbox() };
 
-    return run_session(gpa, io, system, &demo.sources, &demo.outboxes, null, null, null, false, null);
+    return run_session(gpa, io, system, &demo.sources, &demo.outboxes, null, null, null, null, false, null);
 }
 
 fn run_session(
@@ -104,6 +104,7 @@ fn run_session(
     cache: ?core.cache_port.Cache,
     bodies: ?core.bodies_port.BodyCache,
     accounts_file: ?core.accounts_port.Accounts,
+    scope: ?core.scope_port.Scope,
     splash: bool,
     notice: ?[]const u8,
 ) ?Failure {
@@ -119,6 +120,7 @@ fn run_session(
         .cache = cache,
         .bodies = bodies,
         .accounts_file = accounts_file,
+        .scope = scope,
         .notice = notice,
         .splash = splash,
         .system = system,
@@ -142,6 +144,46 @@ fn openUrlThunk(context: *anyopaque, url: []const u8) void {
     const self: *Browser = @ptrCast(@alignCast(context));
     net.oauth_flow.open_in_browser(self.io, url);
 }
+
+/// The chosen scope, in a one-line file next to the config. Not a secret: a
+/// label the user picked, so it needs no sealing.
+const FileScope = struct {
+    io: std.Io,
+    config_path: []const u8,
+
+    fn scope(self: *FileScope) core.scope_port.Scope {
+        return .{ .context = self, .vtable = &.{ .load = loadThunk, .save = saveThunk } };
+    }
+
+    fn file_path(self: *FileScope, buffer: []u8) []const u8 {
+        const dir = cli.parent_dir(self.config_path);
+        if (dir.len == 0) return "";
+        return std.fmt.bufPrint(buffer, "{s}/scope", .{dir}) catch "";
+    }
+
+    fn loadThunk(context: *anyopaque, out: *core.text.Text(core.limits.label_max)) bool {
+        const self: *FileScope = @ptrCast(@alignCast(context));
+        var path_buffer: [512]u8 = undefined;
+        const scope_path = self.file_path(&path_buffer);
+        if (scope_path.len == 0) return false;
+
+        var buffer: [core.limits.label_max + 8]u8 = undefined;
+        const text = read_file(self.io, scope_path, &buffer) catch return false;
+        const trimmed = std.mem.trim(u8, text, " \t\r\n");
+        if (trimmed.len == 0) return false;
+        out.set(trimmed);
+        return true;
+    }
+
+    fn saveThunk(context: *anyopaque, label: []const u8) core.scope_port.Error!void {
+        const self: *FileScope = @ptrCast(@alignCast(context));
+        var path_buffer: [512]u8 = undefined;
+        const scope_path = self.file_path(&path_buffer);
+        if (scope_path.len == 0) return error.Unavailable;
+        write_file(self.io, scope_path, std.mem.trim(u8, label, " \t\r\n")) catch
+            return error.Unavailable;
+    }
+};
 
 const max_accounts = core.config.max_accounts;
 
@@ -386,7 +428,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
     // accounts and say what is wrong, so the file can be fixed in another
     // window and the client restarted.
     const file = core.config.parse(config_text) catch |err| {
-        return run_session(gpa, io, system, &.{}, &.{}, null, null, null, true, config_message(err));
+        return run_session(gpa, io, system, &.{}, &.{}, null, null, null, null, true, config_message(err));
     };
     if (file.len == 0) return .{ .message = "The config has no accounts" };
 
@@ -472,6 +514,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
     }
 
     var accounts_file = FileAccounts{ .io = io, .path = path, .system = system, .gpa = gpa };
+    var preference = FileScope{ .io = io, .config_path = path };
     const account_port: ?core.accounts_port.Accounts = if (live.len > 0) accounts_file.accounts() else null;
 
     const outcome = run_session(
@@ -483,6 +526,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         cache,
         bodies,
         account_port,
+        preference.scope(),
         true,
         missing_password,
     );

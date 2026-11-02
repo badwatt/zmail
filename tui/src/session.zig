@@ -82,6 +82,8 @@ pub const Deps = struct {
     /// Adding and removing accounts writes the config: a port, so the core
     /// still never touches the filesystem.
     accounts_file: ?core.accounts_port.Accounts = null,
+    /// What the reader left selected: one account's label, or empty for all.
+    scope: ?core.scope_port.Scope = null,
     /// Something the user must know at start (a broken config, for instance).
     notice: ?[]const u8 = null,
     /// Paint the spinner while an effect runs, and keep it up this long (ms) so
@@ -194,6 +196,7 @@ pub const Session = struct {
         self.source_count = 0;
         self.source_text = @splat(.{});
         for (deps.accounts) |source| self.add_source(source);
+        self.restore_scope();
         if (deps.notice) |notice| self.state.set_alert("{s}", .{notice});
         self.parser = .{};
         self.body_loaded = false;
@@ -206,6 +209,24 @@ pub const Session = struct {
         // Cache only: the first frame must not wait for a socket. Anything the
         // cache cannot serve is fetched by `boot`, after that frame is painted.
         self.load_cached(self.state.mailbox, true);
+    }
+
+    /// Reopens on the account the reader left selected, if it is still there.
+    fn restore_scope(self: *Session) void {
+        const scope = self.deps.scope orelse return;
+        var label: core.text.Text(core.limits.label_max) = .{};
+        if (!scope.load(&label)) return;
+
+        var index: u8 = 0;
+        while (index < self.state.accounts.len) : (index += 1) {
+            const account = self.state.accounts.at(index) orelse continue;
+            if (!std.mem.eql(u8, account.label.slice(), label.slice())) continue;
+            self.state.account_filter = account.id;
+            self.state.rebuild(&self.store);
+            return;
+        }
+        // The account was removed or renamed: forget it, and start on all.
+        scope.save("") catch {};
     }
 
     /// Copies one account into the session's own list and registers it.
@@ -641,7 +662,18 @@ pub const Session = struct {
         const effects = core.update.apply(&self.state, &self.store, command);
         self.run_effects(effects.slice());
         self.needs_render = true;
+        // A scope is a preference: the next start should open where this one is.
+        if (command == .accounts_select) self.remember_scope();
         return true;
+    }
+
+    fn remember_scope(self: *Session) void {
+        const scope = self.deps.scope orelse return;
+        const label = if (self.state.account_filter) |id|
+            self.state.accounts.label_for(id)
+        else
+            "";
+        scope.save(label) catch {};
     }
 
     /// Test hook: run effects the way the loop does.
@@ -3361,4 +3393,60 @@ test "a click without dragging still opens the link" {
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .press, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .release, .button = .left });
     try testing.expectEqual(@as(u8, 1), sink.opened);
+}
+
+test "the account picked last time is the one the reader opens on" {
+    var rig: Rig = .{};
+    var scope: core.scope_port.Memory = .{};
+    // Two accounts, so the scope has something to choose between.
+    try scope.scope().save("home");
+
+    const second_source = MailSource{
+        .id = core.id.AccountId.from_int(2),
+        .label = "home",
+        .from = core.address.Address.init("me@home.example") catch .{},
+        .mail = rig.fake_mail.mail(),
+    };
+    var sources = [_]MailSource{ undefined, undefined };
+    try rig.seed();
+    sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "work",
+        .from = core.address.Address.init("me@work.example") catch .{},
+        .mail = rig.fake_mail.mail(),
+    };
+    sources[1] = second_source;
+    try rig.session.init(testing.allocator, .{
+        .accounts = &sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .loading_ms = 0,
+        .scope = scope.scope(),
+    });
+    defer rig.session.deinit();
+
+    // Opened on "home", not on every account.
+    try testing.expectEqual(core.id.AccountId.from_int(2), rig.session.state.account_filter.?);
+}
+
+test "picking all accounts is remembered too" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var scope: core.scope_port.Memory = .{};
+    rig.session.deps.scope = scope.scope();
+
+    // Choose the account (row 1), then all of them (row 0).
+    rig.send("A");
+    rig.send("j");
+    _ = rig.session.apply(.accounts_select);
+    try testing.expectEqualStrings("account", scope.remembered.slice());
+
+    rig.send("A");
+    _ = rig.session.apply(.accounts_select);
+    try testing.expect(scope.remembered.is_empty());
+    try testing.expectEqual(@as(u32, 2), scope.save_calls);
 }
