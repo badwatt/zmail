@@ -19,23 +19,12 @@ const raw_chunk_max: usize = chunk_max / 4 * 3;
 
 /// Whether this terminal speaks the kitty graphics protocol.
 pub fn supported() bool {
-    // The escape hatch, for setups that know what they are doing.
-    if (Env.get("AMAIL_IMAGES")) |value| {
-        if (std.mem.eql(u8, value, "blocks")) return false;
-        if (std.mem.eql(u8, value, "kitty")) return true;
-    }
-    // Inside a multiplexer the sequences belong to the multiplexer, and what it
-    // makes of them is its business: half blocks never break there.
-    if (Env.get("TMUX") != null or Env.get("STY") != null) return false;
-    if (Env.get("KITTY_WINDOW_ID")) |_| return true;
-    const term = Env.get("TERM") orelse "";
-    if (std.mem.indexOf(u8, term, "kitty") != null) return true;
-    if (std.mem.indexOf(u8, term, "ghostty") != null) return true;
-    if (Env.get("TERM_PROGRAM")) |program| {
-        if (std.mem.indexOf(u8, program, "ghostty") != null) return true;
-        if (std.mem.indexOf(u8, program, "WezTerm") != null) return true;
-    }
-    return false;
+    // Off unless asked for. The protocol draws a layer the terminal owns, and
+    // that layer has to be placed, moved and deleted by hand: when any of that
+    // goes wrong the reader shows pictures over the wrong screen. Blocks are
+    // cells, and cells cannot go wrong.
+    const value = Env.get("AMAIL_IMAGES") orelse return false;
+    return std.mem.eql(u8, value, "kitty");
 }
 
 /// The environment, behind a name so tests can replace it.
@@ -91,13 +80,8 @@ pub fn place(system: System, id: u32, x: u16, y: u16, columns: u16, rows: u16) b
     return true;
 }
 
-/// Removes the placements and keeps the pictures: scrolling must not pay for
-/// transmitting them again.
-pub fn clear_placements(system: System) void {
-    system.write("\x1b_Ga=d,d=p\x1b\\") catch {};
-}
-
-/// Forgets every picture: another message, another set.
+/// Deletes every picture the terminal is holding. `d=p` needs a placement id
+/// and is ignored without one, so this asks for all of it.
 pub fn clear_all(system: System) void {
     system.write("\x1b_Ga=d\x1b\\") catch {};
 }
@@ -162,45 +146,23 @@ fn fakeGet(name: [:0]const u8) ?[]const u8 {
     return null;
 }
 
-test "supported: the terminals that know the protocol, and the rest" {
+test "pictures by protocol are opt-in, and only with the word kitty" {
     const previous = Env.get;
     Env.get = fakeGet;
     defer Env.get = previous;
 
-    fake_kitty = false;
-    fake_term = "xterm-256color";
-    fake_program = "";
-    fake_tmux = false;
-    try testing.expect(!supported());
-
-    // Inside tmux the protocol is the multiplexer's problem.
-    fake_tmux = true;
-    try testing.expect(!supported());
-    fake_tmux = false;
-
-    // And the override settles it either way.
     fake_kitty = true;
+    fake_term = "xterm-ghostty";
+    fake_program = "ghostty";
+    fake_images = "";
+    // A terminal that supports it perfectly is still not asked unless told.
+    try testing.expect(!supported());
+
     fake_images = "blocks";
     try testing.expect(!supported());
-    fake_images = "";
-    fake_kitty = false;
 
-    fake_kitty = true;
+    fake_images = "kitty";
     try testing.expect(supported());
-
-    fake_kitty = false;
-    fake_term = "xterm-kitty";
-    try testing.expect(supported());
-
-    fake_term = "xterm-ghostty";
-    try testing.expect(supported());
-
-    fake_term = "xterm-256color";
-    fake_program = "ghostty";
-    try testing.expect(supported());
-
-    fake_program = "Apple_Terminal";
-    try testing.expect(!supported());
 }
 
 test "draw streams one image in chunks, then clears it" {
