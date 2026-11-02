@@ -171,7 +171,7 @@ fn template(id: MessageId) []const u8 {
     const templates = [_][]const u8{
         "Thanks for the note. Short answer: yes, and I think it is the right\n" ++
             "call for now. I left the details in the doc so we can revisit them\n" ++
-            "next week with fresh eyes.",
+            "next week with fresh eyes: https://example.com/doc/plan\n",
         "A couple of thoughts before we commit to this:\n\n" ++
             "  1. The simplest version ships this week.\n" ++
             "  2. The fancy version ships next month.\n" ++
