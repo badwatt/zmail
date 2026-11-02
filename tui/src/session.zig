@@ -153,10 +153,15 @@ const ImageSlot = struct {
 const ImageSize = struct { width: u32, height: u32 };
 const ImageCells = struct { columns: u16, rows: u16 };
 
-/// A stable id for a picture, so the terminal can keep its copy between frames.
-fn image_id(key: []const u8) u32 {
-    const hash = std.hash.Wyhash.hash(0, key);
-    return @intCast((hash & 0x7fffffff) | 1);
+/// A picture's id in the terminal. It has to be unique per message as well as
+/// per marker: a terminal ignores a transmission for an id it already holds, so
+/// "r0" in another mail would quietly show the previous logo.
+fn image_id(account: core.id.AccountId, message: core.id.MessageId, key: []const u8) u32 {
+    var hash = std.hash.Wyhash.init(0xa5a5);
+    hash.update(std.mem.asBytes(&account));
+    hash.update(std.mem.asBytes(&message));
+    hash.update(key);
+    return @intCast((hash.final() & 0x7fffffff) | 1);
 }
 
 /// The marker a numbered network image gets: "r0", "r1", …
@@ -1754,7 +1759,7 @@ pub const Session = struct {
             _ = draw(
                 self.deps.draw_image_context,
                 png,
-                image_id(key),
+                image_id(self.state.opened_account, self.state.opened, key),
                 column,
                 lay.reader_body_y + row,
                 @min(width, lay.columns -| column),
@@ -4195,4 +4200,17 @@ test "clicking a reference number opens the address it points at" {
 
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/a", sink.last[0..sink.last_len]);
+}
+
+test "the same marker in another message gets another picture id" {
+    const account = core.id.AccountId.from_int(1);
+    const first = image_id(account, MessageId.from_int(10), "r0");
+    const second = image_id(account, MessageId.from_int(11), "r0");
+
+    // A terminal keeps one picture per id: two messages cannot share one.
+    try testing.expect(first != second);
+    try testing.expect(first != 0);
+    try testing.expect(image_id(account, MessageId.from_int(10), "r0") == first);
+    try testing.expect(image_id(account, MessageId.from_int(10), "r1") != first);
+    try testing.expect(image_id(core.id.AccountId.from_int(2), MessageId.from_int(10), "r0") != first);
 }
