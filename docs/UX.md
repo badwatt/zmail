@@ -235,11 +235,11 @@ because hovering is part of how a link is opened.
   the “did I open the wrong message?” feeling.
 - Wheel scrolls the list and the reader.
 - Releases and non-left buttons are ignored.
-- A click that lands on a link and does not drag opens it (Ctrl does the same,
-  for terminals that pass the modifier). Moving the pointer over a link makes it
-  bold and underlined; links are otherwise drawn in the accent colour without an
-  underline, so a body full of them is still readable. The status line says
-  "Opening … in the browser" before the browser starts, so a click has an answer.
+- **Ctrl + click** opens a link; a plain click never opens anything, so a click
+  meant for the text cannot launch a browser. Holding Ctrl and moving over a link
+  underlines it and shows its address in a box at the bottom of the body. Links
+  are drawn in the accent colour, without an underline. The status line says
+  "Opening … in the browser" before the browser starts, so the click has an answer.
 
 ## States
 
@@ -279,10 +279,10 @@ while you drag, and on release the text goes to the clipboard and the primary
 selection through OSC 52, so no `xclip` or `wl-copy` is needed. A click without a
 drag does nothing, so a click meant for the text never launches a browser.
 
-Links are opened with a click on them (or Ctrl+click), in either view. In the HTML
-view the words of a link carry its address, so clicking "read more" goes where
-"read more" goes; the address is also written after the words so it can be read
-and copied. A Ctrl+click on a URL hands it to
+Links are opened with Ctrl+click, in either view. In the HTML view the words of a
+link carry its address, so Ctrl+clicking "read more" goes where "read more" goes,
+and Ctrl+hovering it shows the address it points at. Nothing is written after the
+words: a paragraph with three links reads like a paragraph, not like a log. A Ctrl+click on a URL hands it to
 the browser (`xdg-open`, `gio open`, `sensible-browser`, `open`, or `wslview`,
 whichever exists); a Ctrl+click on the words around it does nothing.
 

@@ -897,11 +897,10 @@ pub const Session = struct {
         if (self.body_cell(lay, mouse)) |cell| active.dragTo(cell);
 
         if (!active.isDrag()) {
-            // A click that never moved and landed on a link opens it. Ctrl does
-            // the same, but a terminal may keep the modifier to itself, and a
-            // link that ignores a click is worse than one that opens.
+            // A click that never moved opens nothing: opening a link takes ctrl,
+            // so a click meant for the text never launches a browser.
             self.needs_render = true;
-            return self.click_link(lay, mouse);
+            return true;
         }
 
         const text = selection_mod.extract(
@@ -3883,12 +3882,11 @@ test "a click on a link opens it exactly once" {
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("Opened https://example.com/a", rig.session.state.status.slice());
 
-    // A plain click on the same cell also opens it, once: the press starts a
-    // selection, and the release without a drag is the click.
+    // The same click without ctrl opens nothing: ctrl is the key to the browser.
     sink.opened = 0;
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .press, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .release, .button = .left });
-    try testing.expectEqual(@as(u8, 1), sink.opened);
+    try testing.expectEqual(@as(u8, 0), sink.opened);
 }
 
 test "the account picked last time is the one the reader opens on" {
@@ -4389,11 +4387,16 @@ test "in the HTML view, clicking the words of a link opens its address" {
         break;
     }
     const y = lay.reader_body_y + row;
-    _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .press, .button = .left });
-    _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .release, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .press, .button = .left, .ctrl = true });
 
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/x", sink.last[0..sink.last_len]);
+
+    // Without ctrl the same click on the same words opens nothing.
+    sink.opened = 0;
+    _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .press, .button = .left });
+    _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .release, .button = .left });
+    try testing.expectEqual(@as(u8, 0), sink.opened);
 }
 
 test "in the HTML view the pointer lights up the words of a link" {

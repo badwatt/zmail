@@ -944,7 +944,6 @@ const help_rows = [_]Hint{
     .{ .keys = "H", .action = "HTML view, or the plain text one" },
     .{ .keys = "o", .action = "open the mail in a browser" },
     .{ .keys = "Ctrl+click", .action = "open the link under the pointer" },
-    .{ .keys = "click", .action = "open a link; on plain text, nothing" },
     .{ .keys = "drag", .action = "select, then copy (and the primary selection)" },
     .{ .keys = "", .action = "-- writing" },
     .{ .keys = "Tab / Shift+Tab", .action = "next / previous field" },
