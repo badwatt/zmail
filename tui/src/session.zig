@@ -94,10 +94,20 @@ pub const Deps = struct {
     /// opener: clicking a link then does nothing rather than lying.
     open_url: ?*const fn (context: *anyopaque, url: []const u8) void = null,
     open_url_context: *anyopaque = undefined,
-    /// Shows a message the way a mail client would: the HTML part written out
-    /// and handed to the browser, images and all.
-    open_html: ?*const fn (context: *anyopaque, html: []const u8, title: []const u8) void = null,
-    open_html_context: *anyopaque = undefined,
+    /// Renders the HTML part into the reader's area, in the terminal. Returns
+    /// false when this terminal or this machine cannot: the text view is the
+    /// fallback. `clear_html` takes the picture away again.
+    render_html: ?*const fn (
+        context: *anyopaque,
+        html: []const u8,
+        x: u16,
+        y: u16,
+        columns: u16,
+        rows: u16,
+    ) bool = null,
+    render_html_context: *anyopaque = undefined,
+    clear_html: ?*const fn (context: *anyopaque) void = null,
+    clear_html_context: *anyopaque = undefined,
 };
 
 pub const Session = struct {
@@ -127,6 +137,10 @@ pub const Session = struct {
     html_len: u32 = 0,
     /// Which view the reader is showing. HTML only when the message has it.
     html_view: bool = false,
+    /// Set when a picture of the mail is on screen: the next key takes it away.
+    image_shown: bool = false,
+    /// Set by `H`: the next frame paints, then the picture goes over it.
+    want_image: bool = false,
     html_links: [core.links.max_links]core.links.Link = undefined,
     html_link_count: usize = 0,
     text_links: [core.links.max_links]core.links.Link = undefined,
@@ -481,6 +495,11 @@ pub const Session = struct {
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
+        // A picture is not the screen: the first key takes it away.
+        if (self.image_shown) {
+            self.dismiss_image();
+            return true;
+        }
         // Views are not commands: the core has no opinion about them.
         if (key == .char and self.state.view == .reader) {
             if (key.char == 'H') return self.open_html();
@@ -526,18 +545,46 @@ pub const Session = struct {
             self.needs_render = true;
             return true;
         }
-        const open = self.deps.open_html orelse {
-            self.state.set_status("No browser to open HTML with; try h for the text version", .{});
+        if (self.deps.render_html == null) {
+            // No way to paint it here: keep the text rendering, and say so.
+            self.state.set_status("This terminal cannot show the HTML; h reads it as text", .{});
             self.needs_render = true;
             return true;
-        };
-        const account = self.state.opened_account;
-        const message = self.store.get_const(account, self.state.opened);
-        const title = if (message) |found| found.subject.slice() else "";
-        open(self.deps.open_html_context, self.html_part[0..self.html_part_len], title);
-        self.state.set_status("Opened the HTML in the browser", .{});
+        }
+        // The frame goes down first; the picture goes over it (see render).
+        self.want_image = true;
+        self.state.set_status("HTML · any key goes back", .{});
         self.needs_render = true;
         return true;
+    }
+
+    /// Paints the picture of the mail over the reader's body area.
+    fn paint_image(self: *Session, lay: layout_mod.Layout) void {
+        const draw = self.deps.render_html orelse return;
+        self.want_image = false;
+        // The whole screen, not just the body: a mail client shows the whole
+        // message and the page needs the room.
+        const drawn = draw(
+            self.deps.render_html_context,
+            self.html_part[0..self.html_part_len],
+            0,
+            0,
+            lay.columns,
+            lay.rows,
+        );
+        if (drawn) {
+            self.image_shown = true;
+        } else {
+            self.state.set_status("Could not draw the HTML; h reads it as text", .{});
+        }
+    }
+
+    /// Takes the picture away and repaints the text underneath it.
+    fn dismiss_image(self: *Session) void {
+        self.image_shown = false;
+        if (self.deps.clear_html) |clear| clear(self.deps.clear_html_context);
+        self.invalidate_screen();
+        self.state.set_status("", .{});
     }
 
     /// The terminal approximation: the HTML part read as text.
@@ -572,7 +619,9 @@ pub const Session = struct {
         const line = self.wrapped.at(index, text);
         const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
         const offset = line_start + (mouse.x - 1);
-        const url = core.links.at(text, offset) orelse return false;
+        const link = core.links.at(text, offset) orelse return false;
+        var url_buffer: [core.limits.url_max]u8 = undefined;
+        const url = link.url(text, &url_buffer);
         if (self.deps.open_url) |open| open(self.deps.open_url_context, url);
         self.state.set_status("Opened {s}", .{url});
         self.needs_render = true;
@@ -1259,6 +1308,7 @@ pub const Session = struct {
 
         self.flush();
         self.needs_render = false;
+        if (self.want_image) self.paint_image(lay);
     }
 
     fn flush(self: *Session) void {
@@ -3114,16 +3164,31 @@ test "clicking a link in the body opens it" {
 const HtmlSink = struct {
     calls: u8 = 0,
     length: usize = 0,
+    cleared: u8 = 0,
+    accept: bool = true,
 
-    fn open(context: *anyopaque, html: []const u8, title: []const u8) void {
+    fn draw(
+        context: *anyopaque,
+        html: []const u8,
+        x: u16,
+        y: u16,
+        columns: u16,
+        rows: u16,
+    ) bool {
         const self: *HtmlSink = @ptrCast(@alignCast(context));
+        _ = .{ x, y, columns, rows };
         self.calls += 1;
         self.length = html.len;
-        _ = title;
+        return self.accept;
+    }
+
+    fn clear(context: *anyopaque) void {
+        const self: *HtmlSink = @ptrCast(@alignCast(context));
+        self.cleared += 1;
     }
 };
 
-test "H hands the HTML part to the browser" {
+test "H paints the HTML in the terminal, and a key takes it away" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -3134,10 +3199,12 @@ test "H hands the HTML part to the browser" {
     rig.session.body_loaded = true;
 
     var sink: HtmlSink = .{};
-    rig.session.deps.open_html = HtmlSink.open;
-    rig.session.deps.open_html_context = &sink;
+    rig.session.deps.render_html = HtmlSink.draw;
+    rig.session.deps.render_html_context = &sink;
+    rig.session.deps.clear_html = HtmlSink.clear;
+    rig.session.deps.clear_html_context = &sink;
 
-    // Nothing to render: say so, open nothing.
+    // Nothing to render: say so, draw nothing.
     rig.session.html_part_len = 0;
     rig.send("H");
     try testing.expectEqual(@as(u8, 0), sink.calls);
@@ -3147,9 +3214,22 @@ test "H hands the HTML part to the browser" {
     @memcpy(rig.session.html_part[0..part.len], part);
     rig.session.html_part_len = part.len;
     rig.send("H");
+    // The frame goes down, then the picture over it.
     try testing.expectEqual(@as(u8, 1), sink.calls);
     try testing.expectEqual(part.len, sink.length);
-    try testing.expectEqualStrings("Opened the HTML in the browser", rig.session.state.status.slice());
+    try testing.expect(rig.session.image_shown);
+
+    // Any key removes the picture and repaints.
+    rig.send("j");
+    try testing.expectEqual(@as(u8, 1), sink.cleared);
+    try testing.expect(!rig.session.image_shown);
+
+    // A terminal that cannot draw it says so instead of pretending.
+    sink.accept = false;
+    rig.send("H");
+    try testing.expectEqual(@as(u8, 2), sink.calls);
+    try testing.expect(!rig.session.image_shown);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Could not draw") != null);
 }
 
 test "h switches to the HTML view only when there is one" {

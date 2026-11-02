@@ -136,6 +136,13 @@ pub const MemoryMail = struct {
 /// Builds a plausible plain-text body from the envelope. The demo has no real
 /// messages, and this keeps 64 kilobytes times 64 messages out of the binary.
 pub fn render_body(message: *const Message, out: []u8) []const u8 {
+    // The first message is a real MIME message with an HTML part.
+    if (message.id.to_int() == 1) {
+        const length = @min(html_message.len, out.len);
+        @memcpy(out[0..length], html_message[0..length]);
+        return out[0..length];
+    }
+
     var writer = std.Io.Writer.fixed(out);
     writer.print("From: ", .{}) catch return "";
     message.from.format(&writer) catch return "";
@@ -167,11 +174,40 @@ pub fn render_body(message: *const Message, out: []u8) []const u8 {
     return writer.buffered();
 }
 
+/// The first message arrives as a real MIME message with an HTML part, so the
+/// HTML view has something to render in the demo.
+const html_message =
+    "Content-Type: multipart/alternative; boundary=\"demo\"\n" ++
+    "\n" ++
+    "--demo\n" ++
+    "Content-Type: text/plain\n" ++
+    "\n" ++
+    "A short note with a link: https://example.com/doc/plan\n" ++
+    "\n" ++
+    "The plain-text part of this message is what the reader shows by default, so\n" ++
+    "pressing h switches to the HTML read as text and H draws the page itself in\n" ++
+    "the terminal.\n" ++
+    "\n" ++
+    "Nothing in this demo leaves the machine: the mail lives in memory and the\n" ++
+    "rendering happens from that copy.\n" ++
+    "\n" ++
+    "--demo\n" ++
+    "Content-Type: text/html\n" ++
+    "\n" ++
+    "<h2>Plan</h2><p>A short note with a <a href=\"https://example.com/doc/plan\">link</a>.</p>" ++
+    "<ul><li>ship the simple version</li><li>then the fancy one</li></ul>" ++
+    "<p>The plain-text part of this message is what the reader shows by default, " ++
+    "so pressing h switches to the HTML read as text and H draws the page " ++
+    "itself in the terminal.</p>" ++
+    "<p>Nothing in this demo leaves the machine: the mail lives in memory and " ++
+    "the rendering happens from that copy.</p>\n" ++
+    "--demo--\n";
+
 fn template(id: MessageId) []const u8 {
     const templates = [_][]const u8{
         "Thanks for the note. Short answer: yes, and I think it is the right\n" ++
             "call for now. I left the details in the doc so we can revisit them\n" ++
-            "next week with fresh eyes: https://example.com/doc/plan\n",
+            "next week with fresh eyes.\n",
         "A couple of thoughts before we commit to this:\n\n" ++
             "  1. The simplest version ships this week.\n" ++
             "  2. The fancy version ships next month.\n" ++
@@ -192,6 +228,7 @@ fn template(id: MessageId) []const u8 {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+const core_mime = @import("../mime.zig");
 
 fn seeded() !MemoryMail {
     var mail = MemoryMail.init();
@@ -344,12 +381,20 @@ test "render_body uses a rotating template so the demo is not repetitive" {
 
 test "render_body refuses a buffer that cannot hold the header" {
     var out: [4]u8 = undefined;
-    const message = Message{ .id = MessageId.from_int(1), .from = try Address.init("a@example.com") };
+    const message = Message{ .id = MessageId.from_int(2), .from = try Address.init("a@example.com") };
     try testing.expectEqualStrings("", render_body(&message, &out));
 }
 
 test "render_body refuses a buffer that fits the address but not the body" {
     var out: [24]u8 = undefined;
-    const message = Message{ .id = MessageId.from_int(1), .from = try Address.init("a@example.com") };
+    const message = Message{ .id = MessageId.from_int(2), .from = try Address.init("a@example.com") };
     try testing.expectEqualStrings("", render_body(&message, &out));
+}
+
+test "the first message is a MIME message with an HTML part" {
+    var out: [4096]u8 = undefined;
+    const message = Message{ .id = MessageId.from_int(1), .from = try Address.init("a@example.com") };
+    const raw = render_body(&message, &out);
+    try testing.expect(std.mem.indexOf(u8, raw, "multipart/alternative") != null);
+    try testing.expect(core_mime.html_body(raw, &out, &out) != null);
 }

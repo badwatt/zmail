@@ -5,6 +5,9 @@
 //! subject line must degrade to a truncated subject, never to an allocation
 //! failure or an unbounded copy.
 
+/// Longest address the reader will hand to a browser.
+pub const url_max: usize = 2048;
+
 /// Maximum number of messages cached from one account at a time.
 pub const messages_max: u32 = 4096;
 

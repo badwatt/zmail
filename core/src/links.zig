@@ -19,6 +19,21 @@ pub const Link = struct {
         assert(self.end <= source.len);
         return source[self.start..self.end];
     }
+
+    /// The address as one string: the line breaks the wrapper added are not
+    /// part of it.
+    pub fn url(self: Link, source: []const u8, out: []u8) []const u8 {
+        assert(self.start <= self.end);
+        assert(self.end <= source.len);
+        var length: usize = 0;
+        for (self.text(source)) |byte| {
+            if (byte == '\r' or byte == '\n') continue;
+            if (length == out.len) break;
+            out[length] = byte;
+            length += 1;
+        }
+        return out[0..length];
+    }
 };
 
 const prefixes = [_][]const u8{ "https://", "http://", "www.", "mailto:" };
@@ -71,11 +86,54 @@ fn next_link(text: []const u8, from: usize) ?Candidate {
             if (!std.ascii.startsWithIgnoreCase(text[index..], prefix)) continue;
             var end = index + prefix.len;
             while (end < text.len and is_url_byte(text[end])) end += 1;
+            // Mail wraps long addresses at the margin, and half the time it
+            // wraps them in the middle of the URL. If the line ends inside the
+            // address and the next one carries on with URL characters, it is
+            // still one address.
+            while (end < text.len) {
+                const step = continuation(text, index, end) orelse break;
+                end = step;
+                while (end < text.len and is_url_byte(text[end])) end += 1;
+            }
             return .{ .start = index, .end = end };
         }
     }
     return null;
 }
+
+/// Where the address picks up again after a line break, if it does.
+///
+/// Mail wraps long addresses at the margin, which splits them in the middle.
+/// The two things that tell that apart from ordinary prose are the margin
+/// (the line the address started on was full) and the next line having no word
+/// break near its start.
+fn continuation(text: []const u8, link_start: usize, end: usize) ?usize {
+    var index = end;
+    if (index < text.len and text[index] == '\r') index += 1;
+    if (index >= text.len or text[index] != '\n') return null;
+    index += 1;
+    if (index >= text.len or !is_url_byte(text[index])) return null;
+    // A fresh address on the next line is a new link, not a continuation.
+    if (std.mem.startsWith(u8, text[index..], "http://")) return null;
+    if (std.mem.startsWith(u8, text[index..], "https://")) return null;
+    if (std.mem.startsWith(u8, text[index..], "www.")) return null;
+
+    const line_start = std.mem.lastIndexOfScalar(u8, text[0..end], '\n') orelse 0;
+    const line_length = end - line_start;
+    if (line_length < wrapped_at) return null;
+
+    // Prose carries on with words; a wrapped address carries on without a
+    // space for a good while.
+    var next_space = index;
+    while (next_space < text.len and text[next_space] != ' ' and text[next_space] != '\n') next_space += 1;
+    if (next_space - index < 12 and next_space < text.len) return null;
+
+    _ = link_start;
+    return index;
+}
+
+/// A line this long was wrapped at a margin, not ended by a full stop.
+const wrapped_at: usize = 60;
 
 fn is_url_byte(byte: u8) bool {
     return switch (byte) {
@@ -96,12 +154,12 @@ fn excess_closings(candidate: []const u8) bool {
     return closing > opening;
 }
 
-/// True when `offset` falls inside one of the links on `text`.
-pub fn at(text: []const u8, offset: u32) ?[]const u8 {
+/// The link under `offset`, if any.
+pub fn at(text: []const u8, offset: u32) ?Link {
     var buffer: [max_links]Link = undefined;
     const count = scan(text, &buffer);
     for (buffer[0..count]) |link| {
-        if (offset >= link.start and offset < link.end) return link.text(text);
+        if (offset >= link.start and offset < link.end) return link;
     }
     return null;
 }
@@ -146,7 +204,45 @@ test "scan stops at the buffer limit instead of overflowing" {
 
 test "at reports the link under an offset" {
     const text = "go to https://example.com now";
-    try testing.expectEqualStrings("https://example.com", at(text, 10).?);
+    var url_buffer: [64]u8 = undefined;
+    try testing.expectEqualStrings("https://example.com", at(text, 10).?.url(text, &url_buffer));
     try testing.expect(at(text, 3) == null);
     try testing.expect(at(text, text.len - 1) == null);
+}
+
+test "an address wrapped by the sender is still one address" {
+    // What a mailing list does at 76 columns: a newline in the middle.
+    // 66 columns of address, then the rest on the next line: what a mailing
+    // list does when it wraps at 76.
+    const text = "unsubscribe here:\n" ++
+        "https://www1.ema.rsys.net/u/nrd.php?p=0vDm90jZvy_1780192_7260070\n" ++
+        "l=1055472&d=MTM5M2E1MzU0OTM3&ems\n";
+    var buffer: [max_links]Link = undefined;
+    const count = scan(text, &buffer);
+    try testing.expectEqual(@as(usize, 1), count);
+
+    var url_buffer: [256]u8 = undefined;
+    const url = buffer[0].url(text, &url_buffer);
+    try testing.expectEqualStrings(
+        "https://www1.ema.rsys.net/u/nrd.php?p=0vDm90jZvy_1780192_7260070l=1055472&d=MTM5M2E1MzU0OTM3&ems",
+        url,
+    );
+
+    // A click anywhere on it, including the wrapped lines, finds the link.
+    try testing.expect(at(text, 40) != null);
+    try testing.expect(at(text, text.len - 6) != null);
+}
+
+test "prose on the next line is not swallowed by the link" {
+    var buffer: [max_links]Link = undefined;
+    // A short sentence ends well before the margin: the next line is prose.
+    const text = "see https://example.com/a\nThanks for reading";
+    try testing.expectEqual(@as(usize, 1), scan(text, &buffer));
+    try testing.expectEqualStrings("https://example.com/a", buffer[0].text(text));
+}
+
+test "a new address on the next line is a new link, not a continuation" {
+    var buffer: [max_links]Link = undefined;
+    const text = "https://a.example\nhttps://b.example";
+    try testing.expectEqual(@as(usize, 2), scan(text, &buffer));
 }
