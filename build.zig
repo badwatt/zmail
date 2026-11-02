@@ -10,12 +10,26 @@
 //! Steps: `build`, `run`, `test`, `coverage`, `fmt`, `fmt:check`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zon = @import("build.zig.zon");
 
 /// Single source of truth, compiled from `build.zig.zon`.
 pub const app_name = @tagName(zon.name);
 pub const app_version = std.SemanticVersion.parse(zon.version) catch
     @panic("build.zig.zon: version is not valid semver");
+
+/// The toolchain the manifest asks for. Builds refuse to start on an older
+/// compiler with a message that names the manifest, instead of failing somewhere
+/// deep in the standard library.
+const minimum_zig = std.SemanticVersion.parse(zon.minimum_zig_version) catch
+    @panic("build.zig.zon: minimum_zig_version is not valid semver");
+
+comptime {
+    if (builtin.zig_version.order(minimum_zig) == .lt) {
+        @compileError("this build needs Zig " ++ zon.minimum_zig_version ++
+            " or newer (see build.zig.zon); this is " ++ builtin.zig_version_string);
+    }
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -30,6 +44,7 @@ pub fn build(b: *std.Build) void {
     addTest(b, target, optimize, core, exe, install_test_bins);
     addCoverage(b, target, optimize, core);
     addFmt(b);
+    addDocsCheck(b);
 }
 
 /// `build.zig.zon` as a Zig module, so the source trees read the app metadata
@@ -117,7 +132,7 @@ fn addTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         .target = target,
         .optimize = optimize,
     });
-    addUnitTest(b, test_step, helpers, "amail-build-test", install_test_bins);
+    addUnitTest(b, test_step, helpers, b.fmt("{s}-build-test", .{app_name}), install_test_bins);
 
     addE2eTest(b, target, optimize, core, exe, test_step);
 }
@@ -151,7 +166,7 @@ fn addE2eTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     mod.addImport("core", core);
 
     const compile = b.addTest(.{
-        .name = "amail-e2e",
+        .name = b.fmt("{s}-e2e", .{app_name}),
         .root_module = mod,
         .use_llvm = true,
     });
@@ -172,12 +187,12 @@ fn addE2eTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 /// project dependency (zero dependencies, apart from the Zig toolchain).
 fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) void {
     const core_tests = b.addTest(.{
-        .name = "amail-core-coverage",
+        .name = b.fmt("{s}-core-coverage", .{app_name}),
         .root_module = coreModule(b, target, optimize),
         .use_llvm = true,
     });
     const tui_tests = b.addTest(.{
-        .name = "amail-tui-coverage",
+        .name = b.fmt("{s}-tui-coverage", .{app_name}),
         .root_module = tuiModule(b, target, optimize, core),
         .use_llvm = true,
     });
@@ -187,7 +202,7 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .target = target,
         .optimize = optimize,
     });
-    const report = b.addExecutable(.{ .name = "coverage-report", .root_module = report_mod });
+    const report = b.addExecutable(.{ .name = b.fmt("{s}-coverage-report", .{app_name}), .root_module = report_mod });
 
     const kcov = b.addSystemCommand(&.{ "sh", "-c" });
     kcov.addArg(
@@ -211,11 +226,28 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         \\fi
         \\exec "$REPORT_BIN" coverage
     );
-    kcov.addArg("amail-coverage"); // $0
+    kcov.addArg(b.fmt("{s}-coverage", .{app_name})); // $0
     kcov.addArtifactArg2(core_tests, .{}); // $1
     kcov.addArtifactArg2(tui_tests, .{}); // $2
     kcov.addArtifactArg2(report, .{}); // $3
     b.step("coverage", "Run tests under kcov, fail below 100% line coverage").dependOn(&kcov.step);
+}
+
+/// Fails when the docs quote a Zig version, a version, or a product name that the
+/// manifest no longer says, and when a literal "amail appears in the Zig trees:
+/// the name lives in `build.zig.zon`, and nothing else may spell it out.
+fn addDocsCheck(b: *std.Build) void {
+    const check = b.addSystemCommand(&.{ "sh", "-c" });
+    check.addArg(b.fmt(
+        \\set -e
+        \\grep -q "Zig {s}" README.md AGENTS.md
+        \\if grep -rn --include=*.zig -e '"amail' core tui build tests | grep -v 'amail-cache'; then
+        \\  echo "the product name is a literal; read it from build.zig.zon" >&2
+        \\  exit 1
+        \\fi
+    , .{zon.minimum_zig_version}));
+    b.step("docs:check", "Fail if the docs quote a stale name, version or toolchain")
+        .dependOn(&check.step);
 }
 
 fn addFmt(b: *std.Build) void {

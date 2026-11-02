@@ -32,7 +32,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
     if (options.oauth) {
         const failure = run_oauth(gpa, io, options, system);
         if (failure) |problem| {
-            std.debug.print("amail: {s}\n", .{problem.message});
+            std.debug.print("{s}: {s}\n", .{ core.meta.name, problem.message });
             return problem.code;
         }
         return 0;
@@ -50,7 +50,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
     system.leave_raw() catch {};
 
     if (failure) |problem| {
-        std.debug.print("amail: {s}\n", .{problem.message});
+        std.debug.print("{s}: {s}\n", .{ core.meta.name, problem.message });
         return problem.code;
     }
     return 0;
@@ -89,7 +89,7 @@ fn run_demo(gpa: std.mem.Allocator, io: std.Io, system: SessionSystem) ?Failure 
     demo.outbox[0] = core.memory_outbox.MemoryOutbox.init(&demo.mail[0], now);
     demo.outbox[1] = core.memory_outbox.MemoryOutbox.init(&demo.mail[1], now);
 
-    const personal = core.address.Address.init("Me <me@amail.local>") catch core.address.Address{};
+    const personal = core.address.Address.init("Me <me@" ++ core.meta.name ++ ".local>") catch core.address.Address{};
     const work = core.address.Address.init("Me <me@work.example>") catch core.address.Address{};
 
     demo.sources[0] = .{ .id = core.id.AccountId.from_int(1), .label = "personal", .from = personal, .mail = demo.mail[0].mail() };
@@ -149,6 +149,9 @@ fn run_session(
     session.loop();
     return null;
 }
+
+/// Said once, used everywhere a config file turns out to be missing.
+const no_config = "No config yet: run " ++ core.meta.name ++ " once to create one";
 
 /// The Browser behind a Thunk's opaque context.
 fn browser_of(context: *anyopaque) *Browser {
@@ -282,7 +285,7 @@ fn writeHtmlFile(
     offset_px: u32,
 ) ?[]const u8 {
     if (self.cache_dir.len == 0) return null;
-    const path = std.fmt.bufPrint(path_buffer, "{s}/amail/message.html", .{self.cache_dir}) catch
+    const path = std.fmt.bufPrint(path_buffer, "{s}/{s}/message.html", .{ self.cache_dir, core.meta.name }) catch
         return null;
 
     const dir = cli.parent_dir(path);
@@ -296,7 +299,7 @@ fn writeHtmlFile(
     var style_buffer: [256]u8 = undefined;
     const style = std.fmt.bufPrint(&style_buffer, "<!doctype html><meta charset=utf-8>" ++
         "<style>body{{background:#fff;color:#111;font-family:sans-serif;margin:16px}}" ++
-        "img{{max-width:100%}}#amail{{position:relative;top:-{d}px}}</style><div id=\"amail\">", .{offset_px}) catch
+        "img{{max-width:100%}}#mail{{position:relative;top:-{d}px}}</style><div id=\"mail\">", .{offset_px}) catch
         return null;
     file.writeStreamingAll(self.io, style) catch {};
     file.writeStreamingAll(self.io, html) catch {};
@@ -612,7 +615,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         } else |_| {}
         // An OAuth account lives on its token: a missing password is expected.
         if (!account.password_ready and account.token.access.is_empty() and missing_password == null) {
-            missing_password = "No password for an account: set AMAIL_PASSWORD or run amail --add-account";
+            missing_password = "No password for an account: set AMAIL_PASSWORD or run the add-account command";
         }
 
         live.add(account);
@@ -860,7 +863,7 @@ fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Se
 
     var buffer: [8193]u8 = undefined;
     const text = read_file(io, path, &buffer) catch
-        return .{ .message = "No config yet: run amail once to create one" };
+        return .{ .message = no_config };
     const file = core.config.parse(text) catch |err| return .{ .message = config_message(err) };
     if (file.len == 0) return .{ .message = "The config has no accounts" };
 
@@ -919,7 +922,7 @@ fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Se
 
     write_token(io, path, entry.label.slice(), &token) catch
         return .{ .message = "Could not save the token" };
-    std.debug.print("amail: signed in {s}\n", .{entry.label.slice()});
+    std.debug.print("{s}: signed in {s}\n", .{ core.meta.name, entry.label.slice() });
     return null;
 }
 
@@ -936,7 +939,7 @@ fn run_set_password(io: std.Io, options: cli.Launch, system: SessionSystem) ?Fai
 
     var config_buffer: [8193]u8 = undefined;
     const text = read_file(io, path, &config_buffer) catch
-        return .{ .message = "No config yet: run amail once to create one" };
+        return .{ .message = no_config };
     const file = core.config.parse(text) catch |err| return .{ .message = config_message(err) };
     if (file.len == 0) return .{ .message = "The config has no accounts" };
     const label = file.items()[0].label.slice();
@@ -974,7 +977,7 @@ fn run_set_password(io: std.Io, options: cli.Launch, system: SessionSystem) ?Fai
 
     write_sealed_credential(io, path, &secret, label) catch
         return .{ .message = "Could not write the password file" };
-    std.debug.print("amail: password saved for {s}\n", .{label});
+    std.debug.print("{s}: password saved for {s}\n", .{ core.meta.name, label });
     return null;
 }
 
@@ -1347,7 +1350,7 @@ fn run_add_account(io: std.Io, options: cli.Launch, system: SessionSystem) ?Fail
 
     var config_buffer: [8193]u8 = undefined;
     const existing = read_file(io, path, &config_buffer) catch |err| switch (err) {
-        error.FileNotFound => return .{ .message = "No config yet: run amail once to create one" },
+        error.FileNotFound => return .{ .message = no_config },
         else => return .{ .message = "Could not read the config file" },
     };
     _ = core.config.parse(existing) catch |err| return .{ .message = config_message(err) };
@@ -1372,7 +1375,7 @@ fn run_add_account(io: std.Io, options: cli.Launch, system: SessionSystem) ?Fail
     write_credential(io, path, &saved) catch
         return .{ .message = "Could not write the password file" };
 
-    std.debug.print("amail: added account \"{s}\"\n", .{saved.label.slice()});
+    std.debug.print("{s}: added account \"{s}\"\n", .{ core.meta.name, saved.label.slice() });
     return null;
 }
 

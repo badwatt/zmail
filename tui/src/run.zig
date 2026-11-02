@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !u8 {
 pub fn main_with(context: Context, hooks: Hooks, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !u8 {
     var arg_buffer: [cli.args_max][]const u8 = undefined;
     const args = cli.collect_args(context.args, &arg_buffer) catch {
-        try stderr.writeAll("amail: too many arguments\n");
+        try stderr.print("{s}: too many arguments\n", .{meta.name});
         return 2;
     };
 
@@ -78,7 +78,7 @@ pub fn main_with(context: Context, hooks: Hooks, stdout: *std.Io.Writer, stderr:
             // A full-screen client on a pipe is a mistake, not a crash: say so
             // once instead of printing a stack trace.
             error.NotATerminal => {
-                try stderr.writeAll("amail: this client needs a terminal\n");
+                try stderr.print("{s}: this client needs a terminal\n", .{meta.name});
                 return 1;
             },
             else => return err,
@@ -95,7 +95,7 @@ const testing = std.testing;
 test "decide: --version prints the version and exits 0" {
     var out: [1024]u8 = undefined;
     var err: [256]u8 = undefined;
-    const outcome = decide(&[_][]const u8{ "amail", "--version" }, &out, &err);
+    const outcome = decide(&[_][]const u8{ meta.name, "--version" }, &out, &err);
     var expected_buffer: [64]u8 = undefined;
     const expected = std.fmt.bufPrint(&expected_buffer, "{s} {s}\n", .{
         meta.name, meta.version,
@@ -106,7 +106,7 @@ test "decide: --version prints the version and exits 0" {
 test "decide: --help prints usage" {
     var out: [1024]u8 = undefined;
     var err: [256]u8 = undefined;
-    const outcome = decide(&[_][]const u8{ "amail", "--help" }, &out, &err);
+    const outcome = decide(&[_][]const u8{ meta.name, "--help" }, &out, &err);
     var expected_buffer: [64]u8 = undefined;
     const expected = std.fmt.bufPrint(&expected_buffer, "{s} {s}", .{
         meta.name, meta.version,
@@ -117,7 +117,7 @@ test "decide: --help prints usage" {
 test "decide: a bad flag prints to stderr and exits 2" {
     var out: [1024]u8 = undefined;
     var err: [256]u8 = undefined;
-    const outcome = decide(&[_][]const u8{ "amail", "--nope" }, &out, &err);
+    const outcome = decide(&[_][]const u8{ meta.name, "--nope" }, &out, &err);
     try testing.expectEqual(@as(u8, 2), outcome.print_stderr.exit);
     try testing.expect(std.mem.indexOf(u8, outcome.print_stderr.text, "--nope") != null);
 }
@@ -125,7 +125,7 @@ test "decide: a bad flag prints to stderr and exits 2" {
 test "decide: no arguments launches the client" {
     var out: [1024]u8 = undefined;
     var err: [256]u8 = undefined;
-    const outcome = decide(&[_][]const u8{"amail"}, &out, &err);
+    const outcome = decide(&[_][]const u8{meta.name}, &out, &err);
     try testing.expectEqual(cli.Mode.live, outcome.launch.mode);
 }
 
@@ -144,7 +144,7 @@ test "main_with reports a missing terminal without a stack trace" {
     var out = std.Io.Writer.fixed(&out_buffer);
     var err = std.Io.Writer.fixed(&err_buffer);
 
-    const args = [_][*:0]const u8{"amail"};
+    const args = [_][*:0]const u8{meta.name ++ "\x00"};
     const code = try main_with(.{
         .gpa = testing.allocator,
         .io = testing.io,
@@ -152,7 +152,7 @@ test "main_with reports a missing terminal without a stack trace" {
     }, .{ .launch = stub_no_terminal }, &out, &err);
 
     try testing.expectEqual(@as(u8, 1), code);
-    try testing.expectEqualStrings("amail: this client needs a terminal\n", err.buffered());
+    try testing.expectEqualStrings(meta.name ++ ": this client needs a terminal\n", err.buffered());
 
     // Anything else keeps propagating: this is not a catch-all.
     out = std.Io.Writer.fixed(&out_buffer);
@@ -181,7 +181,7 @@ test "main_with routes every outcome, including launch" {
     var err_buffer: [256]u8 = undefined;
 
     // No arguments means live, which is the default.
-    const live_args = [_][*:0]const u8{"amail"};
+    const live_args = [_][*:0]const u8{meta.name ++ "\x00"};
     var out = std.Io.Writer.fixed(&out_buffer);
     var err = std.Io.Writer.fixed(&err_buffer);
     const launched = try main_with(.{
@@ -191,7 +191,7 @@ test "main_with routes every outcome, including launch" {
     }, .{ .launch = stub_launch }, &out, &err);
     try testing.expectEqual(@as(u8, 8), launched);
 
-    const demo_args = [_][*:0]const u8{ "amail", "--demo" };
+    const demo_args = [_][*:0]const u8{ meta.name ++ "\x00", "--demo" };
     out = std.Io.Writer.fixed(&out_buffer);
     err = std.Io.Writer.fixed(&err_buffer);
     try testing.expectEqual(@as(u8, 7), try main_with(.{
@@ -200,7 +200,7 @@ test "main_with routes every outcome, including launch" {
         .args = .{ .vector = &demo_args },
     }, .{ .launch = stub_launch }, &out, &err));
 
-    const version_args = [_][*:0]const u8{ "amail", "--version" };
+    const version_args = [_][*:0]const u8{ meta.name ++ "\x00", "--version" };
     out = std.Io.Writer.fixed(&out_buffer);
     err = std.Io.Writer.fixed(&err_buffer);
     try testing.expectEqual(@as(u8, 0), try main_with(.{
@@ -214,7 +214,7 @@ test "main_with routes every outcome, including launch" {
     }) catch unreachable;
     try testing.expectEqualStrings(version_text, out.buffered());
 
-    const bad_args = [_][*:0]const u8{ "amail", "--nope" };
+    const bad_args = [_][*:0]const u8{ meta.name ++ "\x00", "--nope" };
     out = std.Io.Writer.fixed(&out_buffer);
     err = std.Io.Writer.fixed(&err_buffer);
     try testing.expectEqual(@as(u8, 2), try main_with(.{
@@ -242,5 +242,5 @@ test "main_with rejects too many arguments" {
         .io = io,
         .args = .{ .vector = &vector },
     }, .{ .launch = stub_launch }, &out, &err));
-    try testing.expectEqualStrings("amail: too many arguments\n", err.buffered());
+    try testing.expectEqualStrings(meta.name ++ ": too many arguments\n", err.buffered());
 }

@@ -417,11 +417,11 @@ test "render_usage_error degrades to empty output when the buffer cannot hold it
 }
 
 test "collect_args copies the process vector into plain slices" {
-    const vector = [_][*:0]const u8{ "amail", "--version" };
+    const vector = [_][*:0]const u8{ core.meta.name ++ "\x00", "--version" };
     var buffer: [args_max][]const u8 = undefined;
     const args = try collect_args(.{ .vector = &vector }, &buffer);
     try testing.expectEqual(@as(usize, 2), args.len);
-    try testing.expectEqualStrings("amail", args[0]);
+    try testing.expectEqualStrings(core.meta.name, args[0]);
     try testing.expectEqualStrings("--version", args[1]);
 }
 

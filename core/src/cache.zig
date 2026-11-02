@@ -6,6 +6,7 @@
 //! clean miss instead of garbage in the list.
 
 const std = @import("std");
+const meta = @import("meta.zig");
 const assert = std.debug.assert;
 
 const limits = @import("limits.zig");
@@ -15,7 +16,7 @@ const AccountId = @import("domain/id.zig").AccountId;
 const Mailbox = @import("domain/mailbox.zig").Mailbox;
 const Flags = @import("domain/message.zig").Flags;
 
-pub const header = "amail-cache 1";
+pub const header = meta.cache_header;
 
 pub const Error = error{
     WrongVersion,
@@ -173,7 +174,7 @@ test "cache: stops at the output capacity" {
 }
 
 test "cache: a different version is a clean miss" {
-    try testing.expectError(error.WrongVersion, decode("amail-cache 2\n", &.{}));
+    try testing.expectError(error.WrongVersion, decode(meta.name ++ "-cache 2\n", &.{}));
     try testing.expectError(error.WrongVersion, decode("", &.{}));
     try testing.expectError(error.WrongVersion, decode("garbage\n", &.{}));
 }

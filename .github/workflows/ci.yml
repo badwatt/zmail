@@ -23,6 +23,10 @@ jobs:
       - uses: mlugg/setup-zig@v2
       - name: Formatting
         run: zig build fmt:check
+      # Docs and sources must not spell out a name, version or toolchain that the
+      # manifest already carries.
+      - name: Manifest is the only source
+        run: zig build docs:check
       # Unit tests for core and the TUI, plus the end-to-end test that drives the
       # real binary through a pseudo-terminal.
       - name: Tests

@@ -109,7 +109,9 @@ pub fn render(setup: *const core.setup.Setup, theme: theme_mod.Theme, config_pat
     // Each step draws on a blank canvas: a stale cell from the previous step is
     // how a form ends up with two carets and text where it does not belong.
     out.clear();
-    _ = out.put_text(1, 0, "amail setup", 16, theme.accent.with_bold());
+    var title_buffer: [64]u8 = undefined;
+    const title = std.fmt.bufPrint(&title_buffer, "{s} setup", .{core.meta.name}) catch core.meta.name;
+    _ = out.put_text(1, 0, title, out.columns -| 2, theme.accent.with_bold());
     var progress_buffer: [16]u8 = undefined;
     const progress = std.fmt.bufPrint(&progress_buffer, "step {d}/{d}", .{ setup.step.number(), core.setup.Step.count() }) catch "";
     put_right(out, out.columns -| 2, 0, progress, theme.dim);

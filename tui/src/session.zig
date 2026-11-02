@@ -2080,7 +2080,7 @@ test "session paints the list before it touches the network" {
     rig.session.boot();
     rig.session.settle_refresh_for_test();
     try testing.expectEqual(@as(u32, 2), rig.session.store.len);
-    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "amail") != null);
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), core.meta.name) != null);
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Inbox") != null);
 }
 

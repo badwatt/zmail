@@ -2,6 +2,7 @@
 //! mailbox, so composing works offline and visibly.
 
 const std = @import("std");
+const meta = @import("../meta.zig");
 const assert = std.debug.assert;
 
 const Outgoing = @import("../domain/outgoing.zig").Outgoing;
@@ -53,7 +54,7 @@ pub const MemoryOutbox = struct {
         stored.subject.set(message.subject.slice());
         const line = first_line(message.body);
         stored.snippet.set(line[0..@min(line.len, limits.snippet_max)]);
-        if (stored.from.local.is_empty()) stored.from = Address.from_parts("", "me", "amail.local");
+        if (stored.from.local.is_empty()) stored.from = Address.from_parts("", "me", meta.name ++ ".local");
 
         self.mail.seed(&stored) catch return error.Unavailable;
     }

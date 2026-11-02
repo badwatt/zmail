@@ -7,7 +7,12 @@ on:
   push:
     branches:
       - main
-  # A release can be cut by hand from any commit on main.
+    # Actions cannot read a file to decide whether to run: the closest thing is
+    # to watch the manifest. A push that does not touch build.zig.zon cannot be
+    # a release, so it does not start this workflow at all.
+    paths:
+      - "build.zig.zon"
+  # A failed release can be retried by hand without touching the manifest.
   workflow_dispatch:
 
 jobs:
@@ -20,8 +25,10 @@ jobs:
       - run: zig build fmt:check
       - run: zig build test --summary all
 
-  # The tag is the version in build.zig.zon: bumping it is what cuts a release,
-  # and a version that already has a tag is not tagged twice.
+  # The tag is the version in build.zig.zon. The `paths` filter above starts this
+  # workflow when the manifest is touched; this job is what turns "touched" into
+  # "changed": editing a comment in the manifest, or re-running a push, finds the
+  # tag already there and does nothing.
   tag:
     needs: test
     runs-on: ubuntu-latest
@@ -60,12 +67,13 @@ jobs:
       - uses: mlugg/setup-zig@v2
       - name: Build
         run: |
+          NAME=$(awk '/\.name/{gsub(/[",.]/, "", $3); print $3}' build.zig.zon)
           zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux --prefix zig-out-x86_64 &
           zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux --prefix zig-out-aarch64 &
           wait
           mkdir -p zig-out/bin
-          mv zig-out-x86_64/bin/amail zig-out/bin/amail-x86_64-linux
-          mv zig-out-aarch64/bin/amail zig-out/bin/amail-aarch64-linux
+          mv "zig-out-x86_64/bin/$NAME" "zig-out/bin/$NAME-x86_64-linux"
+          mv "zig-out-aarch64/bin/$NAME" "zig-out/bin/$NAME-aarch64-linux"
           rm -rf zig-out-x86_64 zig-out-aarch64
       - name: Get previous tag
         id: prev
@@ -142,11 +150,11 @@ jobs:
       - name: Generate checksums
         run: |
           cd zig-out/bin
-          sha256sum amail-* > SHA256SUMS
+          sha256sum ./* > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.tag.outputs.version }}
           files: |
-            zig-out/bin/amail-*
+            zig-out/bin/*
             zig-out/bin/SHA256SUMS
           body: ${{ steps.build_changelog.outputs.changelog }}

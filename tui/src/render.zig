@@ -1258,7 +1258,7 @@ test "frame draws the app name, tabs with unread counts, and mail rows" {
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
 
-    try row_contains(&out, 0, "amail");
+    try row_contains(&out, 0, core.meta.name);
     try row_contains(&out, 0, "Inbox 2");
     try row_contains(&out, 2, "Alice Rivera");
     try row_contains(&out, 2, "Re: design tokens review");
@@ -1732,7 +1732,7 @@ test "a narrow terminal keeps one mailbox title and hides tabs" {
     var out = Screen.init(60, 24);
     frame(f.inputs(60, 24), &out);
 
-    try row_contains(&out, 0, "amail");
+    try row_contains(&out, 0, core.meta.name);
     try row_contains(&out, 0, "Inbox 2");
 }
 

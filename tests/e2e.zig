@@ -124,13 +124,13 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
         const count = std.posix.read(terminal.master, frame[total..]) catch 0;
         if (count == 0) break;
         total += count;
-        if (std.mem.indexOf(u8, frame[0..total], "amail") != null) break;
+        if (std.mem.indexOf(u8, frame[0..total], meta.name) != null) break;
     }
     if (total == 0) {
         child.kill(io);
         return error.TestExpectedFrame;
     }
-    try testing.expect(std.mem.indexOf(u8, frame[0..total], "amail") != null);
+    try testing.expect(std.mem.indexOf(u8, frame[0..total], meta.name) != null);
     try testing.expect(std.mem.indexOf(u8, frame[0..total], "Inbox") != null);
 
     // Ctrl+Q at the top level quits; the process must exit cleanly.
@@ -140,7 +140,7 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
 }
 
 test "the product name and version come from the same source of truth" {
-    try testing.expectEqualStrings("amail", meta.name);
+    try testing.expect(meta.name.len > 0);
     var expected: [32]u8 = undefined;
     const version_line = try std.fmt.bufPrint(&expected, "{s} {s}\n", .{ meta.name, meta.version });
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
