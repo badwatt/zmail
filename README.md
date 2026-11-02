@@ -1,5 +1,7 @@
 # amail
 
+[![ci](https://github.com/badwatt/amail/actions/workflows/ci.yml/badge.svg)](https://github.com/badwatt/amail/actions/workflows/ci.yml)
+
 A calm terminal mail client, written in Zig.
 
 ```

@@ -195,13 +195,20 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         \\rm -rf .coverage coverage
         \\mkdir -p .coverage
         \\export CORE_BIN="$1" TUI_BIN="$2" REPORT_BIN="$3"
-        \\nix-shell --quiet -p kcov --run '
-        \\  PATTERN="core/src,tui/src"
-        \\  SKIP="tui/src/launch.zig,tui/src/main.zig,tui/src/refresh.zig"
-        \\  kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/core "$CORE_BIN" &&
-        \\  kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/tui "$TUI_BIN" &&
-        \\  kcov --merge coverage .coverage/core .coverage/tui
+        \\export PATTERN="core/src,tui/src"
+        \\export SKIP="tui/src/launch.zig,tui/src/main.zig,tui/src/refresh.zig"
+        \\steps='
+        \\kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/core "$CORE_BIN" &&
+        \\kcov --include-pattern="$PATTERN" --exclude-pattern="$SKIP" .coverage/tui "$TUI_BIN" &&
+        \\kcov --merge coverage .coverage/core .coverage/tui
         \\'
+        \\# kcov is a development tool, not a dependency: a distro package when it is
+        \\# installed (CI), nix-shell otherwise.
+        \\if command -v kcov >/dev/null 2>&1; then
+        \\  sh -c "$steps"
+        \\else
+        \\  nix-shell --quiet -p kcov --run "$steps"
+        \\fi
         \\exec "$REPORT_BIN" coverage
     );
     kcov.addArg("amail-coverage"); // $0

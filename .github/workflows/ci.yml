@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+# Least privilege: these jobs only read the repository to build and test it.
+permissions:
+  contents: read
+
+# A new push to the same branch makes the previous run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # setup-zig reads .minimum_zig_version from build.zig.zon.
+      - uses: mlugg/setup-zig@v2
+      - name: Formatting
+        run: zig build fmt:check
+      # Unit tests for core and the TUI, plus the end-to-end test that drives the
+      # real binary through a pseudo-terminal.
+      - name: Tests
+        run: zig build test --summary all
+      # A debug build is what tests use; this is the one that ships.
+      - name: Release build
+        run: zig build -Doptimize=ReleaseSafe
+
+  coverage:
+    runs-on: ubuntu-latest
+    # The gate asks for 100% of core/src and tui/src. It is reported, not
+    # enforced, while the kcov line attribution of the newer modules (html,
+    # links, png, halfblocks) is being brought back to 100%. Flip this to
+    # false once `zig build coverage` is green.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - uses: mlugg/setup-zig@v2
+      - name: Install kcov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y kcov
+      - name: Line coverage
+        run: zig build coverage
