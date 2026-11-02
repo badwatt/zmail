@@ -137,6 +137,7 @@ fn run_session(
         .render_html_context = &browser,
         .clear_html = clearHtmlThunk,
         .clear_html_context = &browser,
+        .can_draw = canDrawThunk,
     }) catch return .{ .message = "Not enough memory to start" };
     defer session.deinit();
 
@@ -280,7 +281,24 @@ fn renderHtmlThunk(
         ran = true;
         break;
     }
-    if (!ran) return false;
+    if (!ran) {
+        // Nix keeps Chromium in the store as a dependency but not on the path:
+        // the engine is there, it just is not installed.
+        var found_buffer: [512]u8 = undefined;
+        const engine = find_engine_in_store(self, &found_buffer) orelse return false;
+        var child = std.process.spawn(self.io, .{
+            .argv = &.{
+                engine,              "--headless",
+                "--disable-gpu",     "--no-sandbox",
+                "--hide-scrollbars", size,
+                shot,                url,
+            },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch return false;
+        _ = child.wait(self.io) catch {};
+    }
 
     const file = std.Io.Dir.cwd().openFile(self.io, png_path, .{}) catch return false;
     defer file.close(self.io);
@@ -292,6 +310,37 @@ fn renderHtmlThunk(
     const read = file.readPositionalAll(self.io, bytes, 0) catch return false;
     if (read == 0) return false;
     return graphics.draw(self.system, bytes[0..read], 0, 0, columns, rows);
+}
+
+/// A Chromium that is in the Nix store but not on the path. Bounded: a few
+/// dozen candidates at most, and the first that has a binary wins.
+fn find_engine_in_store(self: *Browser, buffer: []u8) ?[]const u8 {
+    var dir = std.Io.Dir.cwd().openDir(self.io, "/nix/store", .{ .iterate = true }) catch
+        return null;
+    defer dir.close(self.io);
+
+    var iterator = dir.iterate();
+    var seen: u32 = 0;
+    while (iterator.next(self.io) catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        if (std.mem.indexOf(u8, entry.name, "chromium-") == null) continue;
+        if (std.mem.indexOf(u8, entry.name, ".drv") != null) continue;
+        seen += 1;
+        if (seen > 64) break;
+
+        const path = std.fmt.bufPrint(buffer, "/nix/store/{s}/bin/chromium", .{entry.name}) catch
+            return null;
+        const file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch continue;
+        file.close(self.io);
+        return path;
+    }
+    return null;
+}
+
+/// Whether this terminal can show a picture at all: the reader says which of
+/// the two things is missing instead of blaming the engine for both.
+fn canDrawThunk() bool {
+    return graphics.supported();
 }
 
 fn clearHtmlThunk(context: *anyopaque) void {

@@ -113,6 +113,9 @@ pub const Deps = struct {
     render_html_context: *anyopaque = undefined,
     clear_html: ?*const fn (context: *anyopaque) void = null,
     clear_html_context: *anyopaque = undefined,
+    /// Whether this terminal can show pictures at all, so the reader can say
+    /// which of the two things is missing.
+    can_draw: ?*const fn () bool = null,
 };
 
 pub const Session = struct {
@@ -633,8 +636,14 @@ pub const Session = struct {
             self.needs_render = true;
             return true;
         }
-        if (self.deps.render_html == null) {
-            self.state.set_status("This terminal cannot draw the mail; o opens it elsewhere", .{});
+        if (self.deps.can_draw) |can| {
+            if (!can()) {
+                self.state.set_status("This terminal cannot show pictures (ghostty or kitty can)", .{});
+                self.needs_render = true;
+                return true;
+            }
+        } else if (self.deps.render_html == null) {
+            self.state.set_status("This terminal cannot show pictures; o opens it elsewhere", .{});
             self.needs_render = true;
             return true;
         }
