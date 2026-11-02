@@ -141,7 +141,9 @@ const LiveAccount = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     id: core.id.AccountId = .unknown,
-    label: []const u8 = "",
+    /// Owned, not borrowed: the config text outlives neither the loop nor the
+    /// temporary entry it was parsed into.
+    label: core.text.Text(core.limits.label_max) = .{},
     from: core.address.Address = .{},
     host: core.text.Text(core.limits.host_max) = .{},
     port: u16 = 0,
@@ -245,6 +247,10 @@ const LiveAccount = struct {
     }
 };
 
+// A `Live` is only a table of owned copies plus borrowed slices: the test below
+// is what keeps those slices from pointing at a loop variable.
+const testing = std.testing;
+
 const Live = struct {
     accounts: [max_accounts]LiveAccount = undefined,
     len: u8 = 0,
@@ -270,7 +276,7 @@ const Live = struct {
         };
         self.sources[self.mail_count] = .{
             .id = account.id,
-            .label = stored.label,
+            .label = stored.label.slice(),
             .from = account.from,
             .mail = self.lazy_mail[index].mail(),
             .imap_host = stored.host.slice(),
@@ -389,11 +395,11 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
             .gpa = gpa,
             .io = io,
             .id = core.id.AccountId.from_int(index + 1),
-            .label = entry.label.slice(),
             .from = entry.account.address,
             .port = entry.account.imap.port,
             .smtp_enabled = entry.smtp != null,
         };
+        account.label.set(entry.label.slice());
         account.host.set(entry.account.imap.host.slice());
         account.username.set(entry.account.username.slice());
         if (entry.smtp) |smtp| {
@@ -425,11 +431,15 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
 
     // On-disk cache: startup and mailbox switches read from here, so the first
     // frame never waits for the network. `R` refreshes from the server.
+    // Owned copies: a slice into the loop variable is stack memory the next
+    // iteration overwrites, and every cache would read the last account's.
+    var label_text: [max_accounts]core.text.Text(core.limits.label_max) = @splat(.{});
     var labels: [max_accounts]net.cache_file.Label = undefined;
     for (file.items(), 0..) |entry, index| {
+        label_text[index].set(entry.label.slice());
         labels[index] = .{
             .id = core.id.AccountId.from_int(@intCast(index + 1)),
-            .label = entry.label.slice(),
+            .label = label_text[index].slice(),
         };
     }
 
@@ -1330,4 +1340,25 @@ fn theme_for_environment() theme_mod.Theme {
         if (std.mem.eql(u8, term, "dumb")) return theme_mod.Theme.mono();
     }
     return theme_mod.Theme.dark();
+}
+
+test "Live keeps one label per account, not the last one parsed" {
+    var live: Live = .{};
+    defer live.close();
+
+    // Exactly what run_live does: parse into a temporary, add, then reuse it.
+    for ([_][]const u8{ "work", "home" }, 0..) |wanted, index| {
+        var entry_label: core.text.Text(core.limits.label_max) = .{};
+        entry_label.set(wanted);
+        var account = LiveAccount{
+            .gpa = testing.allocator,
+            .io = undefined,
+            .id = core.id.AccountId.from_int(@intCast(index + 1)),
+        };
+        account.label.set(entry_label.slice());
+        live.add(account);
+    }
+
+    try testing.expectEqualStrings("work", live.sources[0].label);
+    try testing.expectEqualStrings("home", live.sources[1].label);
 }
