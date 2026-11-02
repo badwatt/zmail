@@ -150,6 +150,11 @@ fn run_session(
     return null;
 }
 
+/// The Browser behind a Thunk's opaque context.
+fn browser_of(context: *anyopaque) *Browser {
+    return @ptrCast(@alignCast(context));
+}
+
 /// Clicking a link hands it to whatever opens browsers on this machine.
 const Browser = struct {
     io: std.Io,
@@ -161,24 +166,10 @@ const Browser = struct {
 
 /// Writes the page a second time with each anchor's address in the text, for
 /// the browsers whose dump prints no references.
-fn inlineAnchors(self: *Browser, html: []const u8, buffer: []u8) ?[]const u8 {
-    const inlined = self.gpa.alloc(u8, core.limits.body_max * 2) catch return null;
-    defer self.gpa.free(inlined);
-    const document = core.html.inline_anchor_targets(html, inlined);
-
-    const path = std.fmt.bufPrint(buffer, "{s}/amail/message-inline.html", .{self.cache_dir}) catch
-        return null;
-    const file = std.Io.Dir.cwd().createFile(self.io, path, .{ .permissions = file_mode }) catch
-        return null;
-    file.writeStreamingAll(self.io, document) catch {};
-    file.close(self.io);
-    return path;
-}
-
 /// Downloads one picture the message points at. Only what can be painted is
 /// kept: a PNG that fits, from an https address.
 fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 {
-    const self: *Browser = @ptrCast(@alignCast(context));
+    const self = browser_of(context);
     const rest = if (std.mem.startsWith(u8, url, "https://")) url["https://".len..] else return null;
     const host_end = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
     const host = rest[0..host_end];
@@ -199,7 +190,7 @@ fn drawImageThunk(
     columns: u16,
     rows: u16,
 ) bool {
-    const self: *Browser = @ptrCast(@alignCast(context));
+    const self = browser_of(context);
 
     // Full resolution when the terminal speaks the protocol: it scales the
     // picture itself with a real resampler, which is why it does not look
@@ -220,12 +211,12 @@ fn drawImageThunk(
 }
 
 fn clearImagesThunk(context: *anyopaque) void {
-    const self: *Browser = @ptrCast(@alignCast(context));
+    const self = browser_of(context);
     if (graphics.supported()) graphics.clear_all(self.system);
 }
 
 fn openUrlThunk(context: *anyopaque, url: []const u8) void {
-    const self: *Browser = @ptrCast(@alignCast(context));
+    const self = browser_of(context);
     net.oauth_flow.open_in_browser(self.io, url);
 }
 
@@ -271,7 +262,7 @@ const FileScope = struct {
 
 /// Hands the message to whatever shows pages on this machine.
 fn openExternalThunk(context: *anyopaque, html: []const u8, link: []const u8) void {
-    const self: *Browser = @ptrCast(@alignCast(context));
+    const self = browser_of(context);
     if (html.len > 0) {
         var path_buffer: [512]u8 = undefined;
         const path = writeHtmlFile(self, html, &path_buffer, 0) orelse return;
@@ -312,12 +303,6 @@ fn writeHtmlFile(
     file.writeStreamingAll(self.io, "</div>") catch {};
     file.close(self.io);
     return path;
-}
-
-fn trim_lines(text: []u8) []const u8 {
-    var end = text.len;
-    while (end > 0 and (text[end - 1] == '\n' or text[end - 1] == ' ' or text[end - 1] == '\r')) end -= 1;
-    return text[0..end];
 }
 
 const max_accounts = core.config.max_accounts;
@@ -1024,13 +1009,7 @@ fn write_token(io: std.Io, config_path: []const u8, label: []const u8, token: *c
     const path = token_path(config_path, label, &path_buffer);
     if (path.len == 0) return error.NameTooLong;
 
-    const dir = cli.parent_dir(path);
-    if (dir.len > 0) {
-        std.Io.Dir.cwd().createDir(io, dir, directory_mode) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-    }
+    try make_parent(io, path);
 
     var text_buffer: [core.oauth.token_max * 2 + 64]u8 = undefined;
     const text = std.fmt.bufPrint(&text_buffer, "{s}\n{s}\n{d}", .{
@@ -1412,20 +1391,15 @@ fn append_file(io: std.Io, path: []const u8, text: []const u8) !void {
     try file.writePositionalAll(io, text, size.size + separator.len);
 }
 
-/// The password file is sealed with the cache key (0600), so no secret is ever
-/// written in the clear. The key file is the trust boundary: see docs/SECURITY.
-fn write_credential(io: std.Io, config_path: []const u8, saved: *const setup_session.Saved) !void {
+/// The password, sealed with the cache key, in the credential file beside the
+/// config (0600). No secret is ever written in the clear: the key file is the
+/// trust boundary, see docs/SECURITY.
+fn seal_credential(io: std.Io, config_path: []const u8, label: []const u8, password: []const u8) !void {
     var credential_buffer: [512]u8 = undefined;
-    const credential = cli.credential_path(config_path, saved.label.slice(), &credential_buffer);
+    const credential = cli.credential_path(config_path, label, &credential_buffer);
     if (credential.len == 0) return error.NameTooLong;
+    try make_parent(io, credential);
 
-    const dir = cli.parent_dir(credential);
-    if (dir.len > 0) {
-        std.Io.Dir.cwd().createDir(io, dir, directory_mode) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-    }
     var cache_buffer: [512]u8 = undefined;
     const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
     if (cache_dir.len == 0) return error.NameTooLong;
@@ -1436,44 +1410,28 @@ fn write_credential(io: std.Io, config_path: []const u8, saved: *const setup_ses
     var sealed_buffer: [core.limits.secret_max + core.sealed.overhead]u8 = undefined;
     var nonce: core.sealed.Nonce = undefined;
     io.random(&nonce);
-    const sealed_password = try core.sealed.seal(key, nonce, saved.password.expose(), &sealed_buffer);
+    const sealed_password = try core.sealed.seal(key, nonce, password, &sealed_buffer);
     try write_file(io, credential, sealed_password);
 }
 
+fn write_credential(io: std.Io, config_path: []const u8, saved: *const setup_session.Saved) !void {
+    try seal_credential(io, config_path, saved.label.slice(), saved.password.expose());
+}
+
 fn write_setup_files(io: std.Io, config_path: []const u8, saved: *const setup_session.Saved) !void {
-    const dir = cli.parent_dir(config_path);
-    if (dir.len > 0) {
-        std.Io.Dir.cwd().createDir(io, dir, directory_mode) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-    }
-
+    try make_parent(io, config_path);
     try write_file(io, config_path, saved.config_text());
+    try seal_credential(io, config_path, saved.label.slice(), saved.password.expose());
+}
 
-    var credential_buffer: [512]u8 = undefined;
-    const credential = cli.credential_path(config_path, saved.label.slice(), &credential_buffer);
-    if (credential.len == 0) return error.NameTooLong;
-
-    const credential_dir = cli.parent_dir(credential);
-    if (credential_dir.len > 0) {
-        std.Io.Dir.cwd().createDir(io, credential_dir, directory_mode) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-    }
-    var cache_buffer: [512]u8 = undefined;
-    const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
-    if (cache_dir.len == 0) return error.NameTooLong;
-
-    var keys = net.keyfile.KeyFile.init(undefined, io, cache_dir);
-    const key = keys.get() orelse return error.NameTooLong;
-
-    var sealed_buffer: [core.limits.secret_max + core.sealed.overhead]u8 = undefined;
-    var nonce: core.sealed.Nonce = undefined;
-    io.random(&nonce);
-    const sealed_password = try core.sealed.seal(key, nonce, saved.password.expose(), &sealed_buffer);
-    try write_file(io, credential, sealed_password);
+/// Creates the directory a path lives in, if it is not there already.
+fn make_parent(io: std.Io, path: []const u8) !void {
+    const dir = cli.parent_dir(path);
+    if (dir.len == 0) return;
+    std.Io.Dir.cwd().createDir(io, dir, directory_mode) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
 }
 
 fn write_file(io: std.Io, path: []const u8, bytes: []const u8) !void {

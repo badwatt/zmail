@@ -347,7 +347,7 @@ pub const Session = struct {
         self.body_loaded = false;
         self.body_len = 0;
         self.wrapped = .{};
-        self.needs_render = true;
+        self.repaint();
         self.now_unix = deps.now();
         self.size = deps.system.size() catch system_mod.Size{};
         self.screen.resize(self.size.columns, self.size.rows);
@@ -438,13 +438,13 @@ pub const Session = struct {
         }
 
         self.state.rebuild(&self.store);
-        self.needs_render = true;
+        self.repaint();
     }
 
     /// Leaves the splash on screen only while there is something to wait for.
     fn stop_splash(self: *Session) void {
         self.state.booting = false;
-        self.needs_render = true;
+        self.repaint();
     }
 
     /// Runs once, right after the first frame: opens the connections the cache
@@ -469,7 +469,7 @@ pub const Session = struct {
         self.state.booting = self.deps.splash;
         self.reload(self.state.mailbox);
         self.state.booting = false;
-        self.needs_render = true;
+        self.repaint();
     }
 
     pub fn deinit(self: *Session) void {
@@ -504,7 +504,7 @@ pub const Session = struct {
                 return false;
             }
             self.state.set_alert("Terminal error", .{});
-            self.needs_render = true;
+            self.repaint();
         }
 
         self.sync_size();
@@ -562,7 +562,7 @@ pub const Session = struct {
         self.refresh_job.start(self.refresh_sources[0..count], self.refresh_mailbox, self.refresh_scratch);
         self.refreshing = true;
         self.state.refreshing = true;
-        self.needs_render = true;
+        self.repaint();
     }
 
     fn poll_refresh(self: *Session) void {
@@ -597,7 +597,7 @@ pub const Session = struct {
         self.refreshing = false;
         self.state.refreshing = false;
         self.state.rebuild(&self.store);
-        self.needs_render = true;
+        self.repaint();
 
         if (failures > 0) {
             self.state.set_alert("Could not refresh {s}", .{self.refresh_mailbox.title()});
@@ -627,7 +627,7 @@ pub const Session = struct {
     /// diff against our last frame is meaningless: repaint everything.
     fn invalidate_screen(self: *Session) void {
         self.screen.pristine = true;
-        self.needs_render = true;
+        self.repaint();
     }
 
     /// Paints `frames` splash frames with a short pause between them, so the
@@ -648,7 +648,7 @@ pub const Session = struct {
         }
         self.size = size;
         self.screen.resize(size.columns, size.rows);
-        self.needs_render = true;
+        self.repaint();
     }
 
     fn handle_bytes(self: *Session, bytes: []const u8) void {
@@ -719,9 +719,7 @@ pub const Session = struct {
     fn open_external_message(self: *Session) bool {
         if (!self.body_loaded) return false;
         const open = self.deps.open_external orelse {
-            self.state.set_status("No way to open it from here", .{});
-            self.needs_render = true;
-            return true;
+            return self.say("No way to open it from here", .{});
         };
         if (self.html_part_len > 0) {
             // The part itself: a browser that is handed our text rendering sees
@@ -736,7 +734,7 @@ pub const Session = struct {
         } else {
             self.state.set_status("This message has nothing to open", .{});
         }
-        self.needs_render = true;
+        self.repaint();
         return true;
     }
 
@@ -750,16 +748,12 @@ pub const Session = struct {
         if (!self.body_loaded) return false;
         if (!self.html_ready) self.render_html_view();
         if (self.html_len == 0) {
-            self.state.set_status("This message has no HTML version", .{});
-            self.needs_render = true;
-            return true;
+            return self.say("This message has no HTML version", .{});
         }
         self.html_view = !self.html_view;
         self.wrapped = .{};
         self.state.reader_scroll = 0;
-        self.state.set_status("{s}", .{if (self.html_view) "HTML view" else "Plain text"});
-        self.needs_render = true;
-        return true;
+        return self.say("{s}", .{if (self.html_view) "HTML view" else "Plain text"});
     }
 
     /// A click inside the body that lands on a link opens it. The scan is the
@@ -810,7 +804,7 @@ pub const Session = struct {
         if (found != null and self.hovered != null and found.?.start == self.hovered.?.start) return false;
         self.hovered = found;
         if (target == null) self.hover_url.clear();
-        self.needs_render = true;
+        self.repaint();
         return true;
     }
 
@@ -851,13 +845,10 @@ pub const Session = struct {
 
         // Say it before the browser starts: opening one takes a moment, and a
         // click with no answer feels broken. The frame goes out first.
-        self.state.set_status("Opening {s} in the browser…", .{url});
-        self.needs_render = true;
+        _ = self.say("Opening {s} in the browser…", .{url});
         self.render();
         if (self.deps.open_url) |open| open(self.deps.open_url_context, url);
-        self.state.set_status("Opened {s}", .{url});
-        self.needs_render = true;
-        return true;
+        return self.say("Opened {s}", .{url});
     }
 
     /// The cell under a mouse report, in the reader's coordinates.
@@ -884,7 +875,7 @@ pub const Session = struct {
         const cell = self.body_cell(lay, mouse) orelse return false;
         active.dragTo(cell);
         self.selection = active;
-        self.needs_render = true;
+        self.repaint();
         return true;
     }
 
@@ -899,7 +890,7 @@ pub const Session = struct {
         if (!active.isDrag()) {
             // A click that never moved opens nothing: opening a link takes ctrl,
             // so a click meant for the text never launches a browser.
-            self.needs_render = true;
+            self.repaint();
             return true;
         }
 
@@ -910,9 +901,7 @@ pub const Session = struct {
             &self.clip_text,
         );
         const copied = clipboard_mod.copy(self.deps.system, text, &self.clip_encoded);
-        self.state.set_status("Copied {d} characters", .{copied});
-        self.needs_render = true;
-        return true;
+        return self.say("Copied {d} characters", .{copied});
     }
 
     fn click_row(self: *Session, lay: layout_mod.Layout, y: u16) bool {
@@ -927,14 +916,14 @@ pub const Session = struct {
         }
         self.state.cursor = index;
         self.state.scroll_into_view();
-        self.needs_render = true;
+        self.repaint();
         return true;
     }
 
     fn apply(self: *Session, command: core.command.Command) bool {
         const effects = core.update.apply(&self.state, &self.store, command);
         self.run_effects(effects.slice());
-        self.needs_render = true;
+        self.repaint();
         // A scope is a preference, however it was changed: the picker or the
         // `a` key both end up here, and the next start opens where this one is.
         switch (command) {
@@ -976,7 +965,7 @@ pub const Session = struct {
             if (elapsed < minimum) os.sleep_ms(@intCast(minimum - elapsed));
         }
         self.state.loading = false;
-        self.needs_render = true;
+        self.repaint();
     }
 
     fn run_effects(self: *Session, effects: []const core.effect.Effect) void {
@@ -1031,6 +1020,18 @@ pub const Session = struct {
         return null;
     }
 
+    /// Repaints, keeping whatever the status line says.
+    fn repaint(self: *Session) void {
+        self.needs_render = true;
+    }
+
+    /// Says something in the status line and repaints: the shape most keys have.
+    fn say(self: *Session, comptime format: []const u8, args: anytype) bool {
+        self.state.set_status(format, args);
+        self.repaint();
+        return true;
+    }
+
     fn fetch_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
         // The local copy first: opening a message you have read is instant.
         if (self.deps.bodies) |bodies| {
@@ -1052,7 +1053,7 @@ pub const Session = struct {
             self.html_len = 0;
             self.body_loaded = true;
             self.wrapped = .{};
-            self.needs_render = true;
+            self.repaint();
             self.state.set_alert("Could not load this message", .{});
             return;
         };
@@ -1096,7 +1097,7 @@ pub const Session = struct {
         self.prefer_html();
         self.body_loaded = true;
         self.wrapped = .{};
-        self.needs_render = true;
+        self.repaint();
     }
 
     /// Renders the HTML part, once, when the reader asks for it.
@@ -1320,8 +1321,7 @@ pub const Session = struct {
 
         self.settings = form;
         self.state.view = .accounts;
-        self.state.set_status("", .{});
-        self.needs_render = true;
+        self.repaint();
     }
 
     /// A one-line rename prompt: the label is the only thing that changes.
@@ -1335,29 +1335,28 @@ pub const Session = struct {
         self.renaming = .{ .account = account };
         self.renaming.?.text.set(self.state.accounts.items[index].label.slice());
         self.state.view = .accounts;
-        self.needs_render = true;
+        self.repaint();
     }
 
     fn rename_key(self: *Session, rename: *Rename, key: input.Key) bool {
         switch (key) {
             .char => |codepoint| {
                 if (codepoint >= 0x20 and codepoint != 0x7f) rename.text.append_codepoint(codepoint);
-                self.needs_render = true;
+                self.repaint();
             },
             .backspace => {
                 rename.text.pop_codepoint();
-                self.needs_render = true;
+                self.repaint();
             },
             .escape => {
                 self.renaming = null;
-                self.state.set_status("", .{});
-                self.needs_render = true;
+                self.repaint();
             },
             .enter => self.commit_rename(rename),
             .ctrl => |letter| switch (letter) {
                 'u' => {
                     rename.text.clear();
-                    self.needs_render = true;
+                    self.repaint();
                 },
                 'c', 'q' => self.state.quit = true,
                 else => {},
@@ -1388,13 +1387,13 @@ pub const Session = struct {
         }
         self.state.set_status("{s} renamed · restart to apply", .{rename.text.slice()});
         self.renaming = null;
-        self.needs_render = true;
+        self.repaint();
     }
 
     fn settings_key(self: *Session, form: *Settings, key: input.Key) bool {
         // The model routes by step, so point it at the field being edited.
         form.setup.step = form.field.step();
-        self.needs_render = true;
+        self.repaint();
 
         switch (key) {
             .char => |codepoint| switch (form.field) {
@@ -1474,15 +1473,14 @@ pub const Session = struct {
         }
         form.field = @fromBackingInt(@intCast(@as(u8, @intCast(next))));
         form.setup.step = form.field.step();
-        self.needs_render = true;
+        self.repaint();
     }
 
     fn close_settings(self: *Session) void {
         if (self.settings) |*form| form.setup.deinit();
         self.settings = null;
         self.state.view = .accounts;
-        self.state.set_status("", .{});
-        self.needs_render = true;
+        self.repaint();
     }
 
     fn save_settings(self: *Session, form: *Settings) void {
@@ -1490,7 +1488,7 @@ pub const Session = struct {
         // fields they just typed. The reason goes inside the card.
         const accounts = self.deps.accounts_file orelse {
             form.setup.problem.set("Accounts cannot be changed here");
-            self.needs_render = true;
+            self.repaint();
             return;
         };
 
@@ -1500,7 +1498,7 @@ pub const Session = struct {
         if (!form.setup.done) {
             // Keep the cursor where it is; the problem line explains what is wrong.
             form.setup.step = form.field.step();
-            self.needs_render = true;
+            self.repaint();
             return;
         }
 
@@ -1534,7 +1532,7 @@ pub const Session = struct {
             } else {
                 form.setup.problem.set("Could not write the config or the credential file");
             }
-            self.needs_render = true;
+            self.repaint();
             return;
         };
 
@@ -1593,7 +1591,7 @@ pub const Session = struct {
             return;
         };
         _ = core.update.apply(&self.state, &self.store, .send_succeeded);
-        self.needs_render = true;
+        self.repaint();
     }
 
     /// Boot only: the first load, synchronous, with the splash on screen. A
@@ -1629,7 +1627,7 @@ pub const Session = struct {
                 self.state.set_alert("Could not load {s}", .{mailbox.title()});
             }
         }
-        self.needs_render = true;
+        self.repaint();
     }
 
     fn render(self: *Session) void {
@@ -2012,6 +2010,23 @@ const Rig = struct {
 
     fn deinit(self: *Rig) void {
         self.session.deinit();
+    }
+
+    /// A started session whose link opens go to `sink`.
+    fn start_with_links(self: *Rig, sink: *LinkSink) !void {
+        try self.start();
+        self.session.deps.open_url = LinkSink.open;
+        self.session.deps.open_url_context = sink;
+    }
+
+    /// Puts `raw` in the reader, without going through the network.
+    fn open_reader(self: *Rig, raw: []const u8) !void {
+        self.session.set_raw(raw);
+        self.session.state.view = .reader;
+        self.session.state.opened_account = core.id.AccountId.from_int(1);
+        self.session.state.opened = MessageId.from_int(1);
+        self.session.needs_render = true;
+        _ = self.session.step();
     }
 
     fn rejecting_mail(self: *Rig) core.mail_port.Mail {
@@ -3646,21 +3661,13 @@ const LinkSink = struct {
 
 test "clicking a link in the body opens it" {
     var rig: Rig = .{};
-    try rig.start();
     defer rig.deinit();
-    _ = rig.session.step();
-
     var sink: LinkSink = .{};
-    rig.session.deps.open_url = LinkSink.open;
-    rig.session.deps.open_url_context = &sink;
+    try rig.start_with_links(&sink);
 
     const body = "See https://example.com/a for details";
     // A plain message with no HTML: the text view is what the reader shows.
-    rig.session.set_raw(body);
-    rig.session.state.view = .reader;
-    rig.session.state.opened = MessageId.from_int(1);
-    rig.session.needs_render = true;
-    _ = rig.session.step();
+    try rig.open_reader(body);
     try testing.expect(rig.session.wrapped.len > 0);
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
@@ -3670,7 +3677,6 @@ test "clicking a link in the body opens it" {
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/a", sink.last[0..sink.last_len]);
 
-    // A click on the words around it opens nothing.
     // A click on the words around it opens nothing, with or without ctrl.
     _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .press, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .release, .button = .left });
@@ -3785,13 +3791,9 @@ test "a message with an HTML part renders both views from one fetch" {
 
 test "a link split by the wrap is still one link, and clicks anywhere on it" {
     var rig: Rig = .{};
-    try rig.start();
     defer rig.deinit();
-    _ = rig.session.step();
-
     var sink: LinkSink = .{};
-    rig.session.deps.open_url = LinkSink.open;
-    rig.session.deps.open_url_context = &sink;
+    try rig.start_with_links(&sink);
 
     const body = "see https://example.com/a/really/long/path here";
     rig.session.set_raw(body);
@@ -3835,12 +3837,7 @@ test "a drag in the reader copies the text to the clipboard" {
     _ = rig.session.step();
 
     const body = "alpha beta\ngamma delta";
-    rig.session.set_raw(body);
-    rig.session.state.view = .reader;
-    rig.session.state.opened_account = core.id.AccountId.from_int(1);
-    rig.session.state.opened = MessageId.from_int(1);
-    rig.session.needs_render = true;
-    _ = rig.session.step();
+    try rig.open_reader(body);
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     rig.fake_system.output_len = 0;
@@ -3861,21 +3858,12 @@ test "a drag in the reader copies the text to the clipboard" {
 
 test "a click on a link opens it exactly once" {
     var rig: Rig = .{};
-    try rig.start();
     defer rig.deinit();
-    _ = rig.session.step();
-
     var sink: LinkSink = .{};
-    rig.session.deps.open_url = LinkSink.open;
-    rig.session.deps.open_url_context = &sink;
+    try rig.start_with_links(&sink);
 
     const body = "see https://example.com/a";
-    rig.session.set_raw(body);
-    rig.session.state.view = .reader;
-    rig.session.state.opened_account = core.id.AccountId.from_int(1);
-    rig.session.state.opened = MessageId.from_int(1);
-    rig.session.needs_render = true;
-    _ = rig.session.step();
+    try rig.open_reader(body);
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     const y = lay.reader_body_y;
@@ -3956,13 +3944,9 @@ test "a message whose sender wrapped the address shows one whole link" {
         "l=1055472&d=MTM5M2E1MzU0OTM3MDc1M2FhNDY2YWNlYjNj&esuh=11\n";
 
     var rig: Rig = .{};
-    try rig.start();
     defer rig.deinit();
-    _ = rig.session.step();
-
     var sink: LinkSink = .{};
-    rig.session.deps.open_url = LinkSink.open;
-    rig.session.deps.open_url_context = &sink;
+    try rig.start_with_links(&sink);
 
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
@@ -4226,13 +4210,9 @@ test "a picture with an address is downloaded once and painted" {
 
 test "clicking a reference number opens the address it points at" {
     var rig: Rig = .{};
-    try rig.start();
     defer rig.deinit();
-    _ = rig.session.step();
-
     var sink: LinkSink = .{};
-    rig.session.deps.open_url = LinkSink.open;
-    rig.session.deps.open_url_context = &sink;
+    try rig.start_with_links(&sink);
 
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
@@ -4304,11 +4284,7 @@ test "the pointer lights a link up, and the light goes when it leaves" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    rig.session.set_raw("go to https://example.com/a now");
-    rig.session.state.view = .reader;
-    rig.session.state.opened = MessageId.from_int(1);
-    rig.session.needs_render = true;
-    _ = rig.session.step();
+    try rig.open_reader("go to https://example.com/a now");
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     // Column 6 sits inside the address.
@@ -4332,19 +4308,11 @@ test "the pointer lights a link up, and the light goes when it leaves" {
 
 test "a ctrl click reported by the terminal reaches the link" {
     var rig: Rig = .{};
-    try rig.start();
     defer rig.deinit();
-    _ = rig.session.step();
-
     var sink: LinkSink = .{};
-    rig.session.deps.open_url = LinkSink.open;
-    rig.session.deps.open_url_context = &sink;
+    try rig.start_with_links(&sink);
 
-    rig.session.set_raw("see https://example.com/a here");
-    rig.session.state.view = .reader;
-    rig.session.state.opened = MessageId.from_int(1);
-    rig.session.needs_render = true;
-    _ = rig.session.step();
+    try rig.open_reader("see https://example.com/a here");
 
     // The bytes a terminal sends for ctrl+left press: 16 is ctrl, 1-based cells.
     const lay = layout_mod.Layout.compute(100, 24, 0);
@@ -4356,21 +4324,13 @@ test "a ctrl click reported by the terminal reaches the link" {
 
 test "in the HTML view, clicking the words of a link opens its address" {
     var rig: Rig = .{};
-    try rig.start();
     defer rig.deinit();
-    _ = rig.session.step();
-
     var sink: LinkSink = .{};
-    rig.session.deps.open_url = LinkSink.open;
-    rig.session.deps.open_url_context = &sink;
+    try rig.start_with_links(&sink);
 
-    rig.session.set_raw(
+    try rig.open_reader(
         "Content-Type: text/html\r\n\r\n<p>See <a href=\"https://example.com/x\">the notes</a> now</p>",
     );
-    rig.session.state.view = .reader;
-    rig.session.state.opened = MessageId.from_int(1);
-    rig.session.needs_render = true;
-    _ = rig.session.step();
     try testing.expect(rig.session.html_view);
     try testing.expectEqual(@as(usize, 1), rig.session.html_anchor_count);
 
@@ -4408,13 +4368,9 @@ test "in the HTML view the pointer lights up the words of a link" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    rig.session.set_raw(
+    try rig.open_reader(
         "Content-Type: text/html\r\n\r\n<p>See <a href=\"https://example.com/x\">the notes</a> now</p>",
     );
-    rig.session.state.view = .reader;
-    rig.session.state.opened = MessageId.from_int(1);
-    rig.session.needs_render = true;
-    _ = rig.session.step();
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     const text = rig.session.reader_text();

@@ -268,6 +268,12 @@ pub const Screen = struct {
         }
     }
 
+    /// A card: an empty panel with a rounded border, ready for a title.
+    pub fn card(self: *Screen, rect: Rect, fill: Style, border: Style) void {
+        self.fill_rect(rect, ' ', fill);
+        self.box(rect, border);
+    }
+
     /// Rounded box, drawn inside `rect`.
     pub fn box(self: *Screen, rect: Rect, style: Style) void {
         if (rect.width < 2) return;

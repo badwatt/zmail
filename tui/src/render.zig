@@ -91,8 +91,7 @@ pub fn settings(
         .height = card_height,
     };
 
-    out.fill_rect(rect, ' ', theme.text);
-    out.box(rect, theme.border);
+    out.card(rect, theme.text, theme.border);
     _ = out.put_text(rect.x + 2, rect.y, if (editing) " Edit account " else " New account ", card_width -| 4, theme.accent.with_bold());
 
     const labels = [_][]const u8{
@@ -659,8 +658,7 @@ fn render_hover_popup(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void
         .width = width,
         .height = height,
     };
-    out.fill_rect(rect, ' ', inputs.theme.text);
-    out.box(rect, inputs.theme.accent);
+    out.card(rect, inputs.theme.text, inputs.theme.accent);
     _ = out.put_text(rect.x + 2, rect.y + 1, url, inner, inputs.theme.accent);
 }
 
@@ -1007,8 +1005,7 @@ fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         .height = card_height,
     };
 
-    out.fill_rect(rect, ' ', inputs.theme.text);
-    out.box(rect, inputs.theme.border);
+    out.card(rect, inputs.theme.text, inputs.theme.border);
     _ = out.put_text(rect.x + 2, rect.y, " Accounts ", card_width -| 4, inputs.theme.accent.with_bold());
 
     var index: u8 = 0;
@@ -1063,8 +1060,7 @@ fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         .height = card_height,
     };
 
-    out.fill_rect(rect, ' ', inputs.theme.text);
-    out.box(rect, inputs.theme.border);
+    out.card(rect, inputs.theme.text, inputs.theme.border);
     _ = out.put_text(rect.x + 2, rect.y, " Keys ", card_width - 4, inputs.theme.accent.with_bold());
     render_help_filter(inputs, rect, out);
 

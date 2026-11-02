@@ -409,64 +409,51 @@ pub const max_remote_images = 8;
 /// The addresses of the images the message does not carry, in the order they
 /// appear. Their markers in the text are `[IMG:r0]`, `[IMG:r1]`, … so the URL
 /// never has to be printed in the body to be found again.
+/// A tag of the document: where it sits, and what is inside the angle brackets.
+const Tag = struct {
+    start: usize,
+    end: usize,
+    body: []const u8,
+
+    /// The tag's name, lower than the attributes: "img", "a", "/p".
+    fn name(self: Tag) []const u8 {
+        const name_end = std.mem.indexOfAny(u8, self.body, " \t\r\n/") orelse self.body.len;
+        return self.body[0..name_end];
+    }
+
+    fn is(self: Tag, wanted: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(self.name(), wanted);
+    }
+};
+
+/// Walks the tags of a document, in order. Text between them is the caller's.
+const Tags = struct {
+    html: []const u8,
+    index: usize = 0,
+
+    fn next(self: *Tags) ?Tag {
+        while (self.index < self.html.len) {
+            const start = std.mem.indexOfScalarPos(u8, self.html, self.index, '<') orelse return null;
+            const end = std.mem.indexOfScalarPos(u8, self.html, start, '>') orelse return null;
+            self.index = end + 1;
+            return .{ .start = start, .end = end, .body = self.html[start + 1 .. end] };
+        }
+        return null;
+    }
+};
+
 pub fn remote_images(html: []const u8, out: *[max_remote_images][]const u8) usize {
     var count: usize = 0;
-    var index: usize = 0;
-    while (index < html.len and count < out.len) {
-        const start = std.mem.indexOfScalarPos(u8, html, index, '<') orelse break;
-        const end = std.mem.indexOfScalarPos(u8, html, start, '>') orelse break;
-        const tag = html[start + 1 .. end];
-        index = end + 1;
-
-        const name_end = std.mem.indexOfAny(u8, tag, " \t\r\n/") orelse tag.len;
-        if (!std.ascii.eqlIgnoreCase(tag[0..name_end], "img")) continue;
-        const source = attribute(tag, "src");
+    var tags = Tags{ .html = html };
+    while (count < out.len) {
+        const tag = tags.next() orelse break;
+        if (!tag.is("img")) continue;
+        const source = attribute(tag.body, "src");
         if (source.len == 0 or std.ascii.startsWithIgnoreCase(source, "cid:")) continue;
         out[count] = source;
         count += 1;
     }
     return count;
-}
-
-/// The document with every anchor's address written after its text, for the
-/// browsers whose dump does not list link targets (chawan prints the words and
-/// no address at all, so the reader would have nothing to open).
-pub fn inline_anchor_targets(html: []const u8, out: []u8) []const u8 {
-    var writer = std.Io.Writer.fixed(out);
-    var index: usize = 0;
-    var open: ?[]const u8 = null;
-
-    while (index < html.len) {
-        const start = std.mem.indexOfScalarPos(u8, html, index, '<') orelse {
-            writer.writeAll(html[index..]) catch {};
-            break;
-        };
-        writer.writeAll(html[index..start]) catch {};
-        const end = std.mem.indexOfScalarPos(u8, html, start, '>') orelse {
-            writer.writeAll(html[start..]) catch {};
-            break;
-        };
-        const inside = html[start + 1 .. end];
-        index = end + 1;
-
-        const closing = inside.len > 0 and inside[0] == '/';
-        const body = if (closing) inside[1..] else inside;
-        const name_end = std.mem.indexOfAny(u8, body, " \t\r\n/") orelse body.len;
-        const name = body[0..name_end];
-        if (!std.ascii.eqlIgnoreCase(name, "a")) {
-            writer.writeAll(html[start .. end + 1]) catch {};
-            continue;
-        }
-        if (!closing) {
-            open = href_of(body);
-            continue;
-        }
-        if (open) |target| {
-            if (target.len > 0) writer.print(" ({s})", .{target}) catch {};
-        }
-        open = null;
-    }
-    return writer.buffered();
 }
 
 /// Drops the entities a text browser does not know, which it would otherwise
@@ -639,27 +626,18 @@ pub fn mark_images(html: []const u8, out: []u8) []const u8 {
     var index: usize = 0;
     var remote: usize = 0;
 
-    while (index < html.len) {
-        const start = std.mem.indexOfScalarPos(u8, html, index, '<') orelse {
-            writer.writeAll(html[index..]) catch {};
-            break;
-        };
-        writer.writeAll(html[index..start]) catch {};
-        const end = std.mem.indexOfScalarPos(u8, html, start, '>') orelse {
-            writer.writeAll(html[start..]) catch {};
-            break;
-        };
-        const tag = html[start + 1 .. end];
-        index = end + 1;
+    var tags = Tags{ .html = html };
+    while (tags.next()) |tag| {
+        writer.writeAll(html[index..tag.start]) catch {};
+        index = tag.end + 1;
 
-        const name_end = std.mem.indexOfAny(u8, tag, " \t\r\n/") orelse tag.len;
-        if (!std.ascii.eqlIgnoreCase(tag[0..name_end], "img")) {
-            writer.writeAll(html[start .. end + 1]) catch {};
+        if (!tag.is("img")) {
+            writer.writeAll(html[tag.start .. tag.end + 1]) catch {};
             continue;
         }
 
-        const source = attribute(tag, "src");
-        const alt = attribute(tag, "alt");
+        const source = attribute(tag.body, "src");
+        const alt = attribute(tag.body, "alt");
 
         // An image inside the message gets a marker the reader can paint over.
         // One from the network cannot be drawn here; it is named, not fetched.
@@ -678,6 +656,8 @@ pub fn mark_images(html: []const u8, out: []u8) []const u8 {
             writer.writeAll("[imagen]") catch {};
         }
     }
+    // Whatever follows the last tag is text too.
+    if (index < html.len) writer.writeAll(html[index..]) catch {};
     return writer.buffered();
 }
 
@@ -793,15 +773,6 @@ test "an anchor whose text is the address stays one span" {
     const rendered = render(html, &out, &link_buffer, &.{}, &anchor_buffer);
     try testing.expectEqualStrings("https://example.com/", rendered.text);
     try testing.expectEqualStrings("https://example.com/", rendered.links[0].text(rendered.text));
-}
-
-test "a browser that prints no references gets the addresses inline" {
-    var out: [256]u8 = undefined;
-    // The other tags are left alone: this only rewrites anchors.
-    try testing.expectEqualStrings(
-        "<p>Read the docs (https://example.com/a) today.</p>",
-        inline_anchor_targets("<p>Read <a href=\"https://example.com/a\">the docs</a> today.</p>", &out),
-    );
 }
 
 test "entities a text browser would print raw are cleaned first" {

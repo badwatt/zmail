@@ -215,16 +215,21 @@ pub fn unique_label(text: []const u8, wanted: []const u8, buffer: []u8) []const 
     return "";
 }
 
+/// The label of an `[account <label>]` header line, if that is what it is.
+fn section_label(line: []const u8) ?[]const u8 {
+    if (line.len < 2 or line[0] != '[') return null;
+    const inside = std.mem.trim(u8, line[1..], " \t]");
+    if (!std.mem.startsWith(u8, inside, "account ")) return null;
+    return std.mem.trim(u8, inside["account ".len..], " \t");
+}
+
 pub fn rename_label(text: []const u8, old: []const u8, new: []const u8, buffer: []u8) []const u8 {
     var writer = std.Io.Writer.fixed(buffer);
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
         const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len > 1 and line[0] == '[') {
-            const inside = std.mem.trim(u8, line[1..], " \t]");
-            if (std.mem.startsWith(u8, inside, "account ") and
-                std.mem.eql(u8, std.mem.trim(u8, inside["account ".len..], " \t"), old))
-            {
+        if (section_label(line)) |label| {
+            if (std.mem.eql(u8, label, old)) {
                 writer.print("[account {s}]\n", .{new}) catch return "";
                 continue;
             }
@@ -244,13 +249,10 @@ pub fn without(text: []const u8, label: []const u8, buffer: []u8) []const u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw_line| {
         const line = std.mem.trim(u8, raw_line, " \t\r");
-        if (line.len > 0 and line[0] == '[') {
+        if (section_label(line)) |name| {
             saw_section = true;
-            const inside = std.mem.trim(u8, line[1..], " \t]");
-            const matches = std.mem.startsWith(u8, inside, "account ") and
-                std.mem.eql(u8, std.mem.trim(u8, inside["account ".len..], " \t"), label);
-            skipping = matches;
-            if (matches) continue;
+            skipping = std.mem.eql(u8, name, label);
+            if (skipping) continue;
         }
         if (skipping) continue;
         writer.print("{s}\n", .{raw_line}) catch return "";

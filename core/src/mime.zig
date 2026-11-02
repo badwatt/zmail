@@ -693,26 +693,6 @@ fn indexOfIgnoreCase(haystack: []const u8, start: usize, needle: []const u8) ?us
     return null;
 }
 
-const Entity = struct {
-    text: []const u8,
-    consumed: usize,
-};
-
-fn decode_entity(input: []const u8, start: usize) ?Entity {
-    const end = std.mem.indexOfScalarPos(u8, input, start, ';') orelse return null;
-    if (end > start + 10) return null;
-    const body = input[start + 1 .. end];
-    const consumed = end - start + 1;
-
-    if (std.mem.eql(u8, body, "amp")) return .{ .text = "&", .consumed = consumed };
-    if (std.mem.eql(u8, body, "lt")) return .{ .text = "<", .consumed = consumed };
-    if (std.mem.eql(u8, body, "gt")) return .{ .text = ">", .consumed = consumed };
-    if (std.mem.eql(u8, body, "quot")) return .{ .text = "\"", .consumed = consumed };
-    if (std.mem.eql(u8, body, "apos")) return .{ .text = "'", .consumed = consumed };
-    if (std.mem.eql(u8, body, "nbsp")) return .{ .text = " ", .consumed = consumed };
-    return null;
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
