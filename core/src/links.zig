@@ -30,9 +30,10 @@ pub const Link = struct {
         assert(self.end <= source.len);
         var length: usize = 0;
         for (self.text(source)) |byte| {
-            // A line break inside an address is not part of it. (A space never
-            // is: flowed text is unfolded before it gets here.)
-            if (byte == '\r' or byte == '\n') continue;
+            // Neither a line break nor the spaces a wrap left behind are part
+            // of an address: flowed text is unfolded before it gets here, and
+            // senders that break long addresses keep the space in the middle.
+            if (byte == '\r' or byte == '\n' or byte == ' ') continue;
             if (length == out.len) break;
             out[length] = byte;
             length += 1;
@@ -96,6 +97,11 @@ fn next_link(text: []const u8, from: usize) ?Candidate {
             // address and the next one carries on with URL characters, it is
             // still one address.
             while (end < text.len) {
+                if (spacedContinuation(text, index, end)) |step| {
+                    end = step;
+                    while (end < text.len and is_url_byte(text[end])) end += 1;
+                    continue;
+                }
                 if (continuation(text, index, end)) |step| {
                     end = step;
                     while (end < text.len and is_url_byte(text[end])) end += 1;
@@ -143,6 +149,63 @@ fn continuation(text: []const u8, link_start: usize, end: usize) ?usize {
 /// A line this long was wrapped at a margin, not ended by a full stop.
 const wrapped_at: usize = 60;
 
+/// Where the address picks up after the spaces a sender left at a wrap point.
+/// Mailing lists break long addresses and keep the space, so the text reads
+/// "…XYLL  HCfTe…": the space is not part of the address, it is the break.
+///
+/// Prose after an address looks the same to a scanner, so two things must hold:
+/// the address is already long (it was wrapped, not written), and what follows
+/// is a run of long, unpunctuated tokens — a wrapped address is a chain of them,
+/// while a sentence continues with ordinary words.
+fn spacedContinuation(text: []const u8, link_start: usize, end: usize) ?usize {
+    if (end - link_start < wrapped_at) return null;
+    var index = end;
+    var spaces: u8 = 0;
+    while (index < text.len and text[index] == ' ' and spaces < 2) : (spaces += 1) index += 1;
+    if (spaces == 0) return null;
+    if (index >= text.len or !is_url_byte(text[index])) return null;
+    if (std.mem.startsWith(u8, text[index..], "http://")) return null;
+    if (std.mem.startsWith(u8, text[index..], "https://")) return null;
+    if (std.mem.startsWith(u8, text[index..], "www.")) return null;
+
+    // The token here, and the one after it: a wrapped address keeps producing
+    // long tokens, a sentence does not.
+    const first = token_end(text, index);
+    if (first - index < 8 or !is_url_token(text[index..first])) return null;
+    if (first == text.len) return index;
+    if (text[first] != ' ' and text[first] != '\n') return null;
+
+    var next = first;
+    while (next < text.len and text[next] == ' ') next += 1;
+    if (next >= text.len) return index;
+    if (text[next] == '\n') return index;
+
+    const second = token_end(text, next);
+    if (second - next < 8) return null;
+    if (!is_url_token(text[next..second])) return null;
+    return index;
+}
+
+/// End of the run of URL bytes starting at `start`.
+fn token_end(text: []const u8, start: usize) usize {
+    var index = start;
+    while (index < text.len and is_url_byte(text[index])) index += 1;
+    return index;
+}
+
+/// Only the characters an address is made of. A word with a full stop or a
+/// comma in it is prose.
+fn is_url_token(token: []const u8) bool {
+    for (token) |byte| {
+        const ok = std.ascii.isAlphanumeric(byte) or switch (byte) {
+            '%', '&', '=', '+', '/', '_', '-', '~', '.', '?', '#', ':', '@', '!', '$', '\'' => true,
+            else => false,
+        };
+        if (!ok) return false;
+    }
+    return true;
+}
+
 fn is_url_byte(byte: u8) bool {
     return switch (byte) {
         ' ', '\t', '\r', '\n', '<', '>', '"', '\'', '`', '|', '^', '{', '}' => false,
@@ -181,7 +244,8 @@ pub fn unwrap_urls(text: []const u8, out: []u8) []const u8 {
         writer.writeAll(text[cursor..link.start]) catch return writer.buffered();
         const url = link.text(text);
         for (url) |byte| {
-            if (byte == '\r' or byte == '\n') continue;
+            // The breaks a sender left inside the address are not part of it.
+            if (byte == '\r' or byte == '\n' or byte == ' ') continue;
             writer.writeByte(byte) catch return writer.buffered();
         }
         cursor = link.end;
@@ -288,6 +352,36 @@ test "prose on the next line is not swallowed by the link" {
     const text = "see https://example.com/a\nThanks for reading";
     try testing.expectEqual(@as(usize, 1), scan(text, &buffer));
     try testing.expectEqualStrings("https://example.com/a", buffer[0].text(text));
+}
+
+test "an address broken with spaces, the way mailing lists do it" {
+    const text = "Unsubscribe\n\n" ++
+        "https://unsubscribe.resend.com/?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ5IjoiZEdWemRDNWpiMjBp\n" ++
+        "J9.OMhLWsKF3hmlXYLL  HCfTeCMkde0KpicLd  N9Gel7DRw\n";
+
+    var buffer: [max_links]Link = undefined;
+    switch (scan(text, &buffer)) {
+        1 => {},
+        else => |count| {
+            std.debug.print("found {d}, last=[{s}]\n", .{ count, buffer[count - 1].text(text) });
+            return error.TooManyLinks;
+        },
+    }
+
+    var url_buffer: [512]u8 = undefined;
+    try testing.expectEqualStrings(
+        "https://unsubscribe.resend.com/?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ5IjoiZEdWemRDNWpiMjBp" ++
+            "J9.OMhLWsKF3hmlXYLLHCfTeCMkde0KpicLdN9Gel7DRw",
+        buffer[0].url(text, &url_buffer),
+    );
+}
+
+test "prose after an address is not swallowed" {
+    const text = "see https://example.com/a-really-long-address/that-keeps-going and documentation here";
+    var buffer: [max_links]Link = undefined;
+    const count = scan(text, &buffer);
+    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expectEqualStrings("https://example.com/a-really-long-address/that-keeps-going", buffer[0].text(text));
 }
 
 test "unwrap_urls joins a wrapped address and leaves the prose alone" {
