@@ -236,10 +236,19 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     put_centered(out, out.rows -| 1, "Esc never quits · Ctrl+Q quits", theme.border);
 }
 
+/// What the splash says it is connecting to: only the accounts in scope, since
+/// the others are not touched at all.
 fn account_labels(state: *const State, buffer: []u8) []const u8 {
     if (state.accounts.len == 0) return "mail";
+    if (state.account_filter) |filter| {
+        const label = state.accounts.label_for(filter);
+        if (label.len > 0) return label;
+    }
+
     var writer = std.Io.Writer.fixed(buffer);
-    for (state.accounts.items[0..state.accounts.len], 0..) |account, index| {
+    var index: u8 = 0;
+    while (index < state.accounts.len) : (index += 1) {
+        const account = state.accounts.at(index) orelse continue;
         if (index > 0) writer.writeAll(", ") catch break;
         writer.writeAll(account.label.slice()) catch break;
     }

@@ -114,6 +114,10 @@ pub const Session = struct {
 
     body: [core.limits.body_max]u8 = undefined,
     body_len: u32 = 0,
+    /// The same text with the line breaks inside addresses removed: what the
+    /// reader draws, and what the links are measured against.
+    shown: [core.limits.body_max]u8 = undefined,
+    shown_len: u32 = 0,
     body_loaded: bool = false,
     wrapped: wrap.Wrapped = .{},
     /// The message as it arrived, kept so both views can be rendered without a
@@ -153,6 +157,9 @@ pub const Session = struct {
     refresh_job: refresh_mod.Job = .{},
     refresh_scratch: []Message = undefined,
     refresh_sources: [core.state.accounts_max]refresh_mod.Source = undefined,
+    /// Which of the session's sources each job slot came from, and how many.
+    refresh_index: [core.state.accounts_max]u8 = undefined,
+    refresh_count: u8 = 0,
     refresh_mailbox: Mailbox = .inbox,
     /// The live account list: a copy of what the launcher built, plus anything
     /// added from the TUI (and minus anything removed).
@@ -209,6 +216,12 @@ pub const Session = struct {
         // Cache only: the first frame must not wait for a socket. Anything the
         // cache cannot serve is fetched by `boot`, after that frame is painted.
         self.load_cached(self.state.mailbox, true);
+    }
+
+    /// Whether this account is the one being looked at (or every one is).
+    fn in_scope(self: *const Session, account: core.id.AccountId) bool {
+        const filter = self.state.account_filter orelse return true;
+        return filter == account;
     }
 
     /// Reopens on the account the reader left selected, if it is still there.
@@ -391,12 +404,19 @@ pub const Session = struct {
 
     fn start_refresh(self: *Session) void {
         if (self.refreshing) return;
-        const count = self.source_count;
-        if (count == 0) return;
 
+        // The worker takes exactly the accounts in scope: refreshing never wakes
+        // an account the reader is not looking at.
+        var count: u8 = 0;
         for (self.live_sources(), 0..) |source, index| {
-            self.refresh_sources[index] = .{ .id = source.id, .mail = source.mail };
+            if (!self.in_scope(source.id)) continue;
+            self.refresh_sources[count] = .{ .id = source.id, .mail = source.mail };
+            self.refresh_index[count] = @intCast(index);
+            count += 1;
         }
+        if (count == 0) return;
+        self.refresh_count = count;
+
         // Paint what the cache has first: switching mailboxes stays instant.
         self.load_cached(self.state.mailbox, false);
 
@@ -416,12 +436,15 @@ pub const Session = struct {
     fn finish_refresh(self: *Session) void {
         self.refresh_job.join();
 
-        for (self.live_sources(), 0..) |source, index| {
+        var slot: u8 = 0;
+        while (slot < self.refresh_count) : (slot += 1) {
+            const index = self.refresh_index[slot];
+            const source = self.live_sources()[index];
             // A failed account keeps whatever the cache already showed.
-            if (!self.refresh_job.ok[index]) continue;
+            if (!self.refresh_job.ok[slot]) continue;
 
-            const offset = self.refresh_job.offsets[index];
-            const count = self.refresh_job.counts[index];
+            const offset = self.refresh_job.offsets[slot];
+            const count = self.refresh_job.counts[slot];
             const fetched = self.refresh_scratch[offset..][0..count];
 
             core.sync.replace_mailbox(&self.store, source.id, self.refresh_mailbox, fetched);
@@ -770,6 +793,7 @@ pub const Session = struct {
         const raw = mail.fetch_raw(mailbox, id, &self.raw) catch {
             self.raw_len = 0;
             self.body_len = 0;
+            self.shown_len = 0;
             self.html_len = 0;
             self.body_loaded = true;
             self.wrapped = .{};
@@ -792,8 +816,10 @@ pub const Session = struct {
 
         const text = core.mime.text_body(message, &self.body, &self.scratch_bytes);
         self.body_len = @intCast(text.len);
+        const joined = core.links.unwrap_urls(self.body[0..self.body_len], &self.shown);
+        self.shown_len = @intCast(joined.len);
 
-        self.text_link_count = core.links.scan(text, &self.text_links);
+        self.text_link_count = core.links.scan(self.shown[0..self.shown_len], &self.text_links);
 
         self.html_len = 0;
         self.html_ready = false;
@@ -818,7 +844,7 @@ pub const Session = struct {
     /// The text the reader is showing right now.
     fn reader_text(self: *const Session) []const u8 {
         if (self.html_view and self.html_len > 0) return self.html_text[0..self.html_len];
-        return self.body[0..self.body_len];
+        return self.shown[0..self.shown_len];
     }
 
     /// The links of the text the reader is showing, as ranges in that text.
@@ -1278,6 +1304,9 @@ pub const Session = struct {
         var login_failed = false;
 
         for (self.live_sources(), 0..) |source, index| {
+            // A single account in scope means the others are not opened at all:
+            // no socket, no login, nothing to wait for.
+            if (!self.in_scope(source.id)) continue;
             const count = source.mail.fetch(mailbox, self.scratch) catch |err| {
                 failed = true;
                 if (err == error.Rejected) login_failed = true;
@@ -1376,6 +1405,9 @@ const Fake = system_mod.Fake;
 /// A mail adapter that can fail on demand, to exercise every error branch.
 const FakeMail = struct {
     inner: MemoryMail = MemoryMail.init(),
+    /// How many times the session asked this account for mail: the way to see
+    /// that an account out of scope is never opened.
+    fetch_calls: u32 = 0,
     fail_fetch: bool = false,
     fail_body: bool = false,
     fail_flags: bool = false,
@@ -1395,6 +1427,7 @@ const FakeMail = struct {
 
     fn fetchThunk(context: *anyopaque, mailbox: Mailbox, out: []Message) core.mail_port.Error!u32 {
         const self: *FakeMail = @ptrCast(@alignCast(context));
+        self.fetch_calls += 1;
         if (self.fail_fetch) return error.Unavailable;
         return self.inner.mail().fetch(mailbox, out);
     }
@@ -3449,4 +3482,74 @@ test "picking all accounts is remembered too" {
     _ = rig.session.apply(.accounts_select);
     try testing.expect(scope.remembered.is_empty());
     try testing.expectEqual(@as(u32, 2), scope.save_calls);
+}
+
+test "a message whose sender wrapped the address shows one whole link" {
+    const raw = "Content-Type: text/plain; charset=utf-8\n" ++
+        "\n" ++
+        "unsubscribe here:\n" ++
+        "https://www1.ema.rsys.net/u/nrd.php?p=0vDm90jZvy_1780192_7260070_1_893&ems\n" ++
+        "l=1055472&d=MTM5M2E1MzU0OTM3MDc1M2FhNDY2YWNlYjNj&esuh=11\n";
+
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var sink: LinkSink = .{};
+    rig.session.deps.open_url = LinkSink.open;
+    rig.session.deps.open_url_context = &sink;
+
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw(raw);
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // The address is one link, and the reader shows it unbroken.
+    try testing.expectEqual(@as(usize, 1), rig.session.reader_links().len);
+    try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "&emsl=1055472") != null);
+
+    // A click on the second line of it opens the whole address.
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    _ = rig.session.handle_mouse(.{
+        .x = 6,
+        .y = lay.reader_body_y + 1,
+        .kind = .press,
+        .button = .left,
+    });
+    _ = rig.session.handle_mouse(.{
+        .x = 6,
+        .y = lay.reader_body_y + 1,
+        .kind = .release,
+        .button = .left,
+    });
+    try testing.expectEqual(@as(u8, 1), sink.opened);
+    try testing.expect(std.mem.indexOf(u8, sink.last[0..sink.last_len], "&emsl=1055472") != null);
+}
+
+test "an account out of scope is never connected" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // Two sources, the second one out of scope.
+    var second = FakeMail{};
+    _ = try rig.seed();
+    rig.session.sources[1] = .{
+        .id = core.id.AccountId.from_int(2),
+        .label = "other",
+        .from = core.address.Address.init("me@other.example") catch .{},
+        .mail = second.mail(),
+    };
+    rig.session.source_count = 2;
+    rig.session.state.account_filter = core.id.AccountId.from_int(1);
+
+    rig.fake_mail.fetch_calls = 0;
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    _ = rig.session.state.mailbox;
+    try testing.expectEqual(@as(u32, 1), rig.fake_mail.fetch_calls);
 }

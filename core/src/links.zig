@@ -159,6 +159,34 @@ fn excess_closings(candidate: []const u8) bool {
     return closing > opening;
 }
 
+/// Copies `text` with the line breaks inside addresses removed. Mail wraps at
+/// the margin and splits a long address in the middle; the reader then shows one
+/// unbroken address, so the highlight is continuous and a click anywhere opens
+/// the whole of it. Nothing else changes: prose keeps its line breaks.
+pub fn unwrap_urls(text: []const u8, out: []u8) []const u8 {
+    var buffer: [max_links]Link = undefined;
+    const count = scan(text, &buffer);
+    if (count == 0) {
+        const length = @min(text.len, out.len);
+        @memcpy(out[0..length], text[0..length]);
+        return out[0..length];
+    }
+
+    var writer = std.Io.Writer.fixed(out);
+    var cursor: usize = 0;
+    for (buffer[0..count]) |link| {
+        writer.writeAll(text[cursor..link.start]) catch return writer.buffered();
+        const url = link.text(text);
+        for (url) |byte| {
+            if (byte == '\r' or byte == '\n') continue;
+            writer.writeByte(byte) catch return writer.buffered();
+        }
+        cursor = link.end;
+    }
+    writer.writeAll(text[cursor..]) catch {};
+    return writer.buffered();
+}
+
 /// The link under `offset`, if any.
 pub fn at(text: []const u8, offset: u32) ?Link {
     var buffer: [max_links]Link = undefined;
@@ -244,6 +272,28 @@ test "prose on the next line is not swallowed by the link" {
     const text = "see https://example.com/a\nThanks for reading";
     try testing.expectEqual(@as(usize, 1), scan(text, &buffer));
     try testing.expectEqualStrings("https://example.com/a", buffer[0].text(text));
+}
+
+test "unwrap_urls joins a wrapped address and leaves the prose alone" {
+    const text = "unsubscribe here:\n" ++
+        "https://www1.ema.rsys.net/u/nrd.php?p=0vDm90jZvy_1780192_7260070\n" ++
+        "l=1055472&d=MTM5M2E1MzU0OTM3&ems\n" ++
+        "That is all.";
+    var out: [512]u8 = undefined;
+    const shown = unwrap_urls(text, &out);
+    try testing.expectEqualStrings(
+        "unsubscribe here:\nhttps://www1.ema.rsys.net/u/nrd.php?p=0vDm90jZvy_1780192_7260070l=1055472&d=MTM5M2E1MzU0OTM3&ems\nThat is all.",
+        shown,
+    );
+
+    // The address is now one link in the text the reader is given.
+    var buffer: [max_links]Link = undefined;
+    try testing.expectEqual(@as(usize, 1), scan(shown, &buffer));
+}
+
+test "unwrap_urls copies text with no links unchanged" {
+    var out: [64]u8 = undefined;
+    try testing.expectEqualStrings("just words\nhere", unwrap_urls("just words\nhere", &out));
 }
 
 test "a new address on the next line is a new link, not a continuation" {
