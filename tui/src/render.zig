@@ -45,6 +45,8 @@ pub const Inputs = struct {
     /// Rows hidden behind a picture: the reader leaves them empty so the image
     /// is not drawn over text.
     cover: []const u8 = &.{},
+    /// Set when the user asked for no motion: the splash draws its still frame.
+    reduced_motion: bool = false,
     now_unix: i64 = 0,
     columns: u16 = 80,
     rows: u16 = 24,
@@ -207,79 +209,89 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
 /// not be a second animation competing with the breath.
 const spinner_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
-/// How the breath reaches, one step per tick of its rising half. Hand tuned,
-/// because a linear ramp reads as a sawtooth and a lung does not do that: it
-/// fills slowly, holds at the top, and lets go. The loop wakes ten times a
-/// second, so one breath lasts two and a half seconds -- slower than a spinner,
-/// which is the whole point of not drawing one.
-const breath_ramp = [_]u16{ 1, 1, 2, 3, 4, 5, 7, 8, 10, 11, 12, 12 };
+/// The wordmark, drawn rather than typed: five rows, one-cell strokes, and air
+/// between the letters, so it reads as a masthead instead of as a fence. A
+/// terminal cannot set type, and this is the closest it gets.
+const wordmark = [_][]const u8{
+    "█████ █   █  ███  ▀ █",
+    "   ██ ██ ██ █   █   █",
+    "  ██  █ █ █ █████ █ █",
+    " ██   █   █ █   █ █ █",
+    "█████ █   █  ███  █ █",
+};
 
-/// The silhouette of a breath: empty at the edges, full at the middle. Indexed
-/// by height, so the shape carries the intensity and the color only adds the
-/// last bit of glow -- on a light terminal, or with no color at all, the breath
-/// still reads.
-const hill_glyphs = [_]u21{ ' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█' };
+/// Ticks a wave of light takes to cross the wordmark. The loop wakes ten times
+/// a second, so one crossing lasts about three seconds: slow enough to read as
+/// breathing rather than as a progress bar.
+const pulse_ticks: u16 = 32;
 
-/// How far the breath has reached at `tick`, in cells from the middle.
-fn breath_reach(tick: u16) u16 {
-    const period = breath_ramp.len * 2;
-    const phase = tick % period;
-    const index = if (phase < breath_ramp.len) phase else period - 1 - phase;
-    return breath_ramp[index];
+/// The accent, from slate to lit. The wordmark is always somewhere on this
+/// ramp, so no frame is dark: the light moves across it instead of blinking.
+const pulse_shades = [_]u8{ 64, 68, 74, 80 };
+
+/// Where a column of the wordmark sits on the ramp, one wave later than the
+/// column to its left. `tick` moves the whole ramp; nothing else on the screen
+/// moves at all.
+fn pulse_shade(tick: u16, column: u16, width: u16) u8 {
+    const steps = pulse_shades.len;
+    const travel = (@as(u32, tick % pulse_ticks)) * steps / pulse_ticks;
+    const across = @as(u32, column) * steps / @max(1, width);
+    return @intCast((travel + across) % steps);
 }
 
-/// The marker that swells with the breath, so the line under the wordmark moves
-/// in time with it instead of asking for attention of its own.
-fn breath_dot(tick: u16) []const u8 {
-    return switch (breath_reach(tick)) {
-        0...4 => "·",
-        5...8 => "•",
-        else => "●",
+fn pulse_style(theme: *const Theme, shade: u8) Style {
+    if (theme.colored) {
+        return (Style{}).with_fg(.{ .ansi256 = pulse_shades[@min(shade, pulse_shades.len - 1)] }).with_bold();
+    }
+    // No color: the ramp is carried by weight alone, which keeps the wave
+    // visible on a monochrome terminal instead of flattening it.
+    return switch (shade) {
+        0 => theme.accent.with_dim(),
+        pulse_shades.len - 1 => theme.accent.with_bold(),
+        else => theme.accent,
     };
 }
 
-/// One row of the breath: the shape a slow exhale makes, centred. Nothing else
-/// on the screen moves, so this is where the eye rests while the first
-/// connection blocks.
-fn draw_breath(out: *Screen, row: u16, tick: u16, theme: *const Theme) void {
-    const reach = breath_reach(tick);
-    const middle = out.columns / 2;
-    const start = middle -| reach;
+/// Draws the wordmark, one row at a time, shading each column by where the
+/// light has reached it.
+fn draw_wordmark(out: *Screen, top: u16, tick: u16, theme: *const Theme) void {
+    const width = screen.text_columns(wordmark[0]);
+    const left = (out.columns -| width) / 2;
 
-    var offset: u16 = 0;
-    while (offset <= reach) : (offset += 1) {
-        // Height at this column: full in the middle, nothing at the edge.
-        const level = @as(u32, reach - offset) * 8 / reach;
-        if (level == 0) continue;
-        const style = if (level >= 7) theme.accent.with_bold() else theme.accent;
-        const glyph = hill_glyphs[level];
+    for (wordmark, 0..) |line, index| {
+        const row = top +| @as(u16, @intCast(index));
+        if (row >= out.rows) return;
 
-        out.put(start + reach - offset, row, glyph, style);
-        if (offset > 0) out.put(start + reach + offset, row, glyph, style);
+        // Codepoints, not bytes: a block glyph is three bytes and one cell, and
+        // treating it as three cells smears the wordmark into noise.
+        var view = std.unicode.Utf8View.initUnchecked(line).iterator();
+        var column: u16 = 0;
+        while (view.nextCodepoint()) |codepoint| : (column += 1) {
+            if (codepoint == ' ') continue;
+            out.put(left +| column, row, codepoint, pulse_style(theme, pulse_shade(tick, column, width)));
+        }
     }
 }
 
-/// The welcome screen: a wordmark, a breath, and what is happening. It stays up
-/// while the first load blocks, so it has to look right frozen too: the breath
-/// is the only thing that moves.
+/// The welcome screen: the wordmark breathing, and what is happening. It stays
+/// up while the first connection blocks, so it is built to be looked at while
+/// still: the light is the only thing that moves, and a frozen frame of it is
+/// still a lit wordmark.
 fn render_splash(inputs: Inputs, out: *Screen) void {
     out.clear();
     const theme = inputs.theme;
-    const tick: u16 = @intCast(inputs.state.spinner);
     const middle = out.rows / 2;
+    const tick: u16 = if (inputs.reduced_motion) 0 else @intCast(inputs.state.spinner);
 
-    put_centered(out, middle -| 3, "z m a i l", theme.accent.with_bold());
-    draw_breath(out, middle -| 1, tick, theme);
+    draw_wordmark(out, middle -| 4, tick, theme);
 
     var label_buffer: [96]u8 = undefined;
     const labels = account_labels(inputs.state, &label_buffer);
-    const status_text = put_centered_marked(out, middle +| 2, breath_dot(tick), theme, labels);
+    const status_text = put_centered_marked(out, middle +| 3, inputs.state, theme, labels);
 
-    const address_row = middle +| 3;
-    const caption_row = @min(middle +| 5, out.rows -| 2);
-    // On a cramped screen the caption wins: it says why the wait is short, while
-    // the address is already in the account the line above names.
-    if (inputs.state.accounts.len == 1 and caption_row > address_row) {
+    const address_row = middle +| 4;
+    const footer_row = out.rows -| 1;
+    if (inputs.state.accounts.len == 1 and address_row < footer_row) {
         var address_buffer: [core.limits.address_max]u8 = undefined;
         const address = inputs.state.accounts.items[0].address.addr_spec(&address_buffer);
         if (address.len > 0) {
@@ -287,26 +299,37 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
             // unless it would run off the screen, where centred is the fallback.
             const width = screen.text_columns(address);
             const x = if (status_text + width <= out.columns) status_text else (out.columns -| width) / 2;
-            _ = out.put_text(x, address_row, address, out.columns -| x, theme.dim.with_dim());
+            _ = out.put_text(x, address_row, address, out.columns -| x, theme.dim);
         }
     }
 
-    put_centered(out, caption_row, "cached mail opens instantly · Ctrl+R refreshes", theme.dim.with_dim());
-    put_centered(out, out.rows -| 1, "Ctrl+Q quits", theme.border);
+    // Anchored to the two corners of the last row: a footer, not a caption
+    // floating in the middle of the page.
+    _ = out.put_text(1, footer_row, "cached mail opens instantly", out.columns -| 2, theme.border);
+    put_right(out, out.columns -| 2, footer_row, "Ctrl+Q quits", theme.border);
 }
 
-/// `marker connecting to <labels>`, centred, with the marker in the accent and
-/// the words quiet: the eye should find the mark, not read a sentence.
-fn put_centered_marked(out: *Screen, row: u16, marker: []const u8, theme: *const Theme, labels: []const u8) u16 {
+/// `connecting to <labels>`, centred, the words quiet and the account named in
+/// its own hue. Returns the column where the words start, so the address can
+/// line up under them.
+fn put_centered_marked(out: *Screen, row: u16, state: *const State, theme: *const Theme, labels: []const u8) u16 {
     var line_buffer: [160]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buffer, "{s}  connecting to {s}", .{ marker, labels }) catch return 0;
+    const line = std.fmt.bufPrint(&line_buffer, "connecting to {s}", .{labels}) catch return 0;
 
     const width = screen.text_columns(line);
     const start = (out.columns -| width) / 2;
-    _ = out.put_text(start, row, marker, out.columns -| start, theme.accent.with_bold());
-    const rest = start + screen.text_columns(marker);
-    _ = out.put_text(rest, row, line[marker.len..], out.columns -| rest, theme.dim);
-    return rest + 2;
+    _ = out.put_text(start, row, line[0.."connecting to ".len], out.columns -| start, theme.dim);
+
+    // The account being connected owns the hue, the way its rows do in the
+    // list: the splash and the mailbox agree about who is who.
+    const hue_index: usize = if (state.account_filter) |id| (state.accounts.index_of(id) orelse 0) else 0;
+    const labels_x = start +| @as(u16, "connecting to ".len);
+    const hue: Style = if (theme.colored)
+        (Style{}).with_fg(theme.account_colors[@min(hue_index, theme.account_colors.len - 1)]).with_bold()
+    else
+        theme.accent.with_bold();
+    _ = out.put_text(labels_x, row, labels, out.columns -| labels_x, hue);
+    return start;
 }
 
 /// What the splash says it is connecting to: only the accounts in scope, since
@@ -1314,6 +1337,10 @@ fn fixture() !Fixture {
     return .{ .store = store, .state = state, .theme = theme_mod.Theme.dark() };
 }
 
+fn startsWith(text: []const u8, prefix: []const u8) bool {
+    return text.len >= prefix.len and std.mem.eql(u8, text[0..prefix.len], prefix);
+}
+
 fn row_contains(out: *const Screen, y: u16, needle: []const u8) !void {
     var buffer: [512]u8 = undefined;
     const text = out.row_text(y, &buffer);
@@ -1736,7 +1763,7 @@ test "frame shows reader hints and a scroll percentage" {
     try row_contains(&out, 23, "75%");
 }
 
-test "the boot splash is a wordmark, a breath, and what is happening" {
+test "the boot splash is a wordmark, the account, and a footer" {
     var f = try fixture();
     defer f.deinit();
     f.state.booting = true;
@@ -1744,26 +1771,81 @@ test "the boot splash is a wordmark, a breath, and what is happening" {
 
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
-    // middle = 12: wordmark at 9, breath at 11, status at 14, address at 15.
-    try row_contains(&out, 9, "z m a i l");
-    try row_contains(&out, 14, "connecting to work");
-    try row_contains(&out, 15, "alice@example.com");
-
-    // The address sits under the words it belongs to, on one left edge.
-    var status_buffer: [512]u8 = undefined;
-    var address_buffer: [512]u8 = undefined;
-    const status = out.row_text(14, &status_buffer);
-    const address = out.row_text(15, &address_buffer);
-    // Columns, not bytes: the marker is two bytes and one cell.
-    const status_column = screen.text_columns(status[0..std.mem.indexOf(u8, status, "connecting").?]);
-    const address_column = screen.text_columns(address[0..std.mem.indexOf(u8, address, "alice@example.com").?]);
-    try testing.expectEqual(status_column, address_column);
-    try row_contains(&out, 17, "Ctrl+R refreshes");
-    try row_contains(&out, 23, "Ctrl+Q quits");
+    // middle = 12: wordmark on 8..12, status on 15, address on 16, footer on 23.
+    try row_contains(&out, 8, "█████ █   █  ███");
+    try row_contains(&out, 12, "█████ █   █  ███");
+    try row_contains(&out, 15, "connecting to work");
+    try row_contains(&out, 16, "alice@example.com");
+    var footer_buffer: [512]u8 = undefined;
+    const footer = std.mem.trim(u8, out.row_text(23, &footer_buffer), " ");
+    try testing.expect(startsWith(footer, "cached mail opens instantly"));
+    try testing.expect(std.mem.endsWith(u8, footer, "Ctrl+Q quits"));
 
     // The list is not drawn behind it.
     var row_buffer: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
+}
+
+test "the light moves across the wordmark while its shape stays put" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.booting = true;
+
+    var before = Screen.init(80, 24);
+    f.state.spinner = 0;
+    frame(f.inputs(80, 24), &before);
+    var after = Screen.init(80, 24);
+    f.state.spinner = 8;
+    frame(f.inputs(80, 24), &after);
+
+    var moved = false;
+    for (8..13) |y| {
+        for (0..80) |x| {
+            // The letters never change, only how lit they are.
+            try testing.expectEqual(before.cells[y][x].ch, after.cells[y][x].ch);
+            if (!before.cells[y][x].style.eql(after.cells[y][x].style)) moved = true;
+        }
+    }
+    try testing.expect(moved);
+}
+
+test "reduced motion draws one still frame" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.booting = true;
+
+    var inputs = f.inputs(80, 24);
+    inputs.reduced_motion = true;
+
+    var first = Screen.init(80, 24);
+    f.state.spinner = 0;
+    frame(inputs, &first);
+    var later = Screen.init(80, 24);
+    f.state.spinner = 9;
+    frame(inputs, &later);
+
+    for (0..24) |y| {
+        for (0..80) |x| {
+            try testing.expect(first.cells[y][x].style.eql(later.cells[y][x].style));
+        }
+    }
+}
+
+test "a cramped splash drops the address before it reaches the footer" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.booting = true;
+    f.state.accounts.add(core.id.AccountId.from_int(1), "work", try core.address.Address.init("alice@example.com"), .{});
+
+    var out = Screen.init(40, 10);
+    frame(f.inputs(40, 10), &out);
+    // Ten rows: middle is 5, so the wordmark starts at 1 and the footer is 9.
+    try row_contains(&out, 1, "█████");
+    try row_contains(&out, 8, "connecting to work");
+    var footer_buffer: [512]u8 = undefined;
+    const footer = out.row_text(9, &footer_buffer);
+    try testing.expect(std.mem.indexOf(u8, footer, "Ctrl+Q quits") != null);
+    try testing.expect(std.mem.indexOf(u8, footer, "alice@example.com") == null);
 }
 
 test "the splash names the account in scope, not every account" {
@@ -1776,59 +1858,9 @@ test "the splash names the account in scope, not every account" {
 
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
-    try row_contains(&out, 14, "connecting to work");
+    try row_contains(&out, 15, "connecting to work");
     var row_buffer: [512]u8 = undefined;
-    try testing.expect(std.mem.indexOf(u8, out.row_text(14, &row_buffer), "home") == null);
-}
-
-test "the splash breathes: one cell at rest, a hill at the top, back again" {
-    var f = try fixture();
-    defer f.deinit();
-    f.state.booting = true;
-    const row: u16 = 11;
-
-    f.state.spinner = 0;
-    var out = Screen.init(80, 24);
-    frame(f.inputs(80, 24), &out);
-    try testing.expectEqual(@as(usize, 1), drawn_cells(&out, row));
-    try testing.expectEqual(@as(u21, '█'), out.cells[row][40].ch);
-
-    // A quarter of the way in: wider, still centred, still symmetrical.
-    f.state.spinner = 6;
-    frame(f.inputs(80, 24), &out);
-    const quarter = drawn_cells(&out, row);
-    try testing.expect(quarter > 1 and quarter < 25);
-    try expect_symmetric(&out, row, 40, quarter);
-
-    // The top of the breath: widest, still a hill and not a bar -- the edge
-    // cells fade out rather than ending in a hard line.
-    f.state.spinner = 11;
-    frame(f.inputs(80, 24), &out);
-    const peak = drawn_cells(&out, row);
-    try testing.expect(peak > quarter);
-    try testing.expect(peak < 25);
-    try expect_symmetric(&out, row, 40, peak);
-    try testing.expectEqual(@as(u21, '█'), out.cells[row][40].ch);
-
-    // And one full breath later it is where it started.
-    f.state.spinner = 24;
-    frame(f.inputs(80, 24), &out);
-    try testing.expectEqual(@as(usize, 1), drawn_cells(&out, row));
-}
-
-test "a cramped splash drops the address before it overlaps the caption" {
-    var f = try fixture();
-    defer f.deinit();
-    f.state.booting = true;
-    f.state.accounts.add(core.id.AccountId.from_int(1), "work", try core.address.Address.init("alice@example.com"), .{});
-
-    var out = Screen.init(40, 10);
-    frame(f.inputs(40, 10), &out);
-    // Ten rows: middle is 5, so the address would land on the caption's row.
-    try row_contains(&out, 2, "z m a i l");
-    try row_contains(&out, 7, "connecting to work");
-    try row_contains(&out, 8, "cached mail opens instantly");
-    try row_contains(&out, 9, "Ctrl+Q quits");
+    try testing.expect(std.mem.indexOf(u8, out.row_text(15, &row_buffer), "home") == null);
 }
 
 test "the splash breathes without color when color is off" {
@@ -1836,7 +1868,7 @@ test "the splash breathes without color when color is off" {
     defer f.deinit();
     f.theme = theme_mod.Theme.mono();
     f.state.booting = true;
-    f.state.spinner = 11;
+    f.state.spinner = 8;
 
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
@@ -1847,27 +1879,18 @@ test "the splash breathes without color when color is off" {
             try testing.expect(std.meta.eql(style.bg, screen.Color.default));
         }
     }
-}
 
-/// How many cells of `row` carry a glyph the breath drew.
-fn drawn_cells(out: *const Screen, row: u16) usize {
-    var count: usize = 0;
-    for (0..out.columns) |x| {
-        if (out.cells[row][x].ch != ' ') count += 1;
+    // And the wave is still there: weight carries it when hue cannot.
+    var other = Screen.init(80, 24);
+    f.state.spinner = 0;
+    frame(f.inputs(80, 24), &other);
+    var moved = false;
+    for (8..13) |y| {
+        for (0..80) |x| {
+            if (!out.cells[y][x].style.eql(other.cells[y][x].style)) moved = true;
+        }
     }
-    return count;
-}
-
-/// The hill reads as one shape, so the cells either side of the middle match.
-fn expect_symmetric(out: *const Screen, row: u16, centre: u16, width: usize) !void {
-    const reach: u16 = @intCast(width / 2);
-    var offset: u16 = 1;
-    while (offset <= reach) : (offset += 1) {
-        const left = out.cells[row][centre - offset];
-        const right = out.cells[row][centre + offset];
-        try testing.expectEqual(left.ch, right.ch);
-        try testing.expectEqual(left.style, right.style);
-    }
+    try testing.expect(moved);
 }
 
 test "frame shows search hints while typing" {

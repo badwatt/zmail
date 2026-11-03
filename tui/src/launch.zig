@@ -133,6 +133,7 @@ fn run_session(
         .splash = splash,
         .system = system,
         .theme = theme_for_environment(),
+        .reduced_motion = os.env("ZMAIL_NO_MOTION") != null,
         .now = os.now_unix,
         .open_url = openUrlThunk,
         .open_url_context = &browser,

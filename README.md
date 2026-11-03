@@ -45,6 +45,10 @@ address, derives the IMAP/SMTP servers, collects the password, and writes
 `0600`. Later runs read both; `ZMAIL_PASSWORD` overrides the file for a
 single-account config.
 
+`NO_COLOR` (or `TERM=dumb`) drops colour and keeps everything else; `ZMAIL_NO_MOTION`
+keeps the first screen still. Both are environment variables, read once at
+start.
+
 `~/.config/zmail/config` (or `--config PATH`) supports several accounts, shown
 in one unified inbox:
 

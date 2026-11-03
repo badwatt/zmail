@@ -124,23 +124,29 @@ Without a cache (first run, or a new account) the network is unavoidable, so
 the first frame is a splash instead of an empty list:
 
 ```
-                       z m a i l
-                    ▁▂▃▄▄▅▆▇█▇▆▅▄▄▃▂▁
-                  ●  connecting to work
-                     alice@example.com
+                             █████ █   █  ███  ▀ █
+                                ██ ██ ██ █   █   █
+                               ██  █ █ █ █████ █ █
+                              ██   █   █ █   █ █ █
+                             █████ █   █  ███  █ █
 
-         cached mail opens instantly · Ctrl+R refreshes
-                            Ctrl+Q quits
+                             connecting to work
+                             alice@example.com
+
+ cached mail opens instantly                                       Ctrl+Q quits
 ```
 
-The only thing that moves is the breath: one row of blocks that fills from a
-single pulse to a soft hill and lets go, once every two and a half seconds, with
-the marker under it and the wordmark above it breathing in time. It is a shape
-rather than a spinner because the wait is a cold start, not a job: a spinning
-glyph says "busy", and what is happening here is "one connection, one login, a
-few hundred milliseconds". A breath frozen mid-way still reads as a design; a
-frozen spinner reads as a hang. `NO_COLOR` keeps the whole thing: the shape
-carries the movement and bold carries the peak.
+The wordmark is drawn, not typed: a terminal cannot set type, and five rows of
+one-cell strokes is the closest it gets. Its light moves — a ramp from slate to
+lit that crosses the letters once every three seconds — and nothing else on the
+screen moves at all. That is the whole animation budget, and it buys the one
+thing a cold start needs: a still frame that says "alive" without a spinner,
+because the first connection blocks the loop a spinner would have needed, so a
+spinner here would freeze mid-turn and read as a hang.
+
+`ZMAIL_NO_MOTION` draws the still frame instead, which is a lit wordmark and not
+a blank one; `NO_COLOR` keeps the wave, carried by weight (dim, normal, bold)
+because the shape and the weight were always doing the work.
 
 A connection that fails no longer refuses to start: cached mail stays readable
 and the failure becomes a status line.

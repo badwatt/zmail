@@ -106,6 +106,9 @@ pub const Deps = struct {
     /// Paint the spinner while an effect runs, and keep it up this long (ms) so
     /// even an instant fetch reads as "working", not as a jump.
     loading_ms: u32 = 90,
+    /// The user asked for no motion (`ZMAIL_NO_MOTION`): the splash draws its
+    /// still frame and never animates.
+    reduced_motion: bool = false,
     system: System,
     theme: theme_mod.Theme = theme_mod.Theme.dark(),
     now: Now = fixed_now,
@@ -1778,6 +1781,7 @@ pub const Session = struct {
             .kinds = self.html_kinds[0..self.html_kind_count],
             .cover = self.cover_rows[0..self.cover_len],
             .selection = self.selection,
+            .reduced_motion = self.deps.reduced_motion,
             .now_unix = self.now_unix,
             .columns = self.size.columns,
             .rows = self.size.rows,
