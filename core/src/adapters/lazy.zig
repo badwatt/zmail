@@ -30,6 +30,7 @@ pub const LazyMail = struct {
 
     pub fn mail(self: *LazyMail) mail_port.Mail {
         return .{ .context = self, .vtable = &.{
+            .connected = connectedThunk,
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
             .fetch_raw = fetchRawThunk,
