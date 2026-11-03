@@ -25,6 +25,8 @@ pub const Compose = struct {
     body: [limits.body_max]u8 = undefined,
     body_len: u32 = 0,
     in_reply_to: MessageId = .unknown,
+    /// Unix time the held send leaves, or 0 when nothing is pending.
+    hold_until: i64 = 0,
     /// Which account sends this draft, and from which address.
     account: AccountId = .unknown,
     from: Address = .{},
@@ -36,6 +38,7 @@ pub const Compose = struct {
         self.subject.clear();
         self.body_len = 0;
         self.in_reply_to = .unknown;
+        self.hold_until = 0;
         self.account = .unknown;
         self.from = .{};
     }

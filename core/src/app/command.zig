@@ -88,6 +88,9 @@ pub const Command = union(enum) {
     compose_new,
     compose_reply,
     compose_send,
+    /// Ctrl+S: the same send, but a few seconds late, so it can still be
+    /// stopped. The session runs the countdown; the core never reads a clock.
+    compose_send_held: struct { now_unix: i64 },
     compose_cancel,
     compose_char: u21,
     compose_newline,
@@ -168,6 +171,7 @@ test "every command is classified for status clearing" {
         .{ .command = .compose_new, .clears = true },
         .{ .command = .compose_reply, .clears = true },
         .{ .command = .compose_send, .clears = true },
+        .{ .command = .{ .compose_send_held = .{ .now_unix = 0 } }, .clears = true },
         .{ .command = .compose_cancel, .clears = true },
         .{ .command = .{ .compose_char = 'a' }, .clears = true },
         .{ .command = .compose_newline, .clears = true },
@@ -185,5 +189,5 @@ test "every command is classified for status clearing" {
     for (commands) |case| {
         try testing.expectEqual(case.clears, case.command.clears_status());
     }
-    try testing.expectEqual(@as(usize, 53), commands.len);
+    try testing.expectEqual(@as(usize, 54), commands.len);
 }

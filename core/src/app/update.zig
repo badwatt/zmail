@@ -25,6 +25,12 @@ const View = @import("state.zig").View;
 pub fn apply(state: *State, store: *Store, command: Command) Effects {
     var effects: Effects = .{};
     if (command.clears_status()) state.clear_status();
+    // Typing during the countdown stops it: mail that leaves while it is still
+    // being written is not what the writer meant to send.
+    if (state.compose.hold_until != 0) switch (command) {
+        .compose_char, .compose_newline, .compose_backspace, .compose_clear_field, .compose_edit => state.compose.hold_until = 0,
+        else => {},
+    };
     // A confirmation only survives the command that asked for it.
     if (command != .empty_trash) state.pending_empty = false;
 
@@ -70,6 +76,7 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .compose_new => start_compose(state, store),
         .compose_reply => start_reply(state, store),
         .compose_send => send_compose(state, &effects),
+        .compose_send_held => |held| hold_compose(state, held.now_unix),
         .compose_cancel => cancel_compose(state),
         .compose_char => |codepoint| {
             if (state.view == .compose) state.compose.append(codepoint);
@@ -531,6 +538,18 @@ fn start_reply(state: *State, store: *Store) void {
     state.view = .compose;
 }
 
+/// Ctrl+S does not send: it starts a countdown, so a message addressed to the
+/// wrong person can still be stopped. `Esc` during it keeps the draft.
+fn hold_compose(state: *State, now_unix: i64) void {
+    if (state.view != .compose) return;
+    if (state.compose.recipient() == null) {
+        state.set_alert("That address does not look right", .{});
+        return;
+    }
+    state.compose.hold_until = now_unix + limits.send_hold_seconds;
+    state.set_status("Sending · Esc stops it", .{});
+}
+
 fn send_compose(state: *State, effects: *Effects) void {
     if (state.view != .compose) return;
 
@@ -538,6 +557,7 @@ fn send_compose(state: *State, effects: *Effects) void {
         state.set_alert("That address does not look right", .{});
         return;
     };
+    state.compose.hold_until = 0;
 
     effects.add(.{ .send = .{
         .account = state.compose.account,
@@ -591,6 +611,15 @@ fn quote_original(state: *State, quote: Quote) void {
 
 fn cancel_compose(state: *State) void {
     if (state.view != .compose) return;
+
+    // `Esc` during the countdown is the escape hatch, not a discarded draft:
+    // the send stops and the writing stays where it is.
+    if (state.compose.hold_until != 0) {
+        state.compose.hold_until = 0;
+        state.set_status("Send cancelled", .{});
+        return;
+    }
+
     state.compose.active = false;
     state.compose.field = .to;
     state.view = .list;
@@ -599,6 +628,7 @@ fn cancel_compose(state: *State) void {
 fn compose_sent(state: *State) void {
     state.compose.active = false;
     state.compose.field = .to;
+    state.compose.hold_until = 0;
     state.view = .list;
     state.set_status("Message sent · 2 opens Sent", .{});
 }
@@ -1630,6 +1660,83 @@ test "compose_edit is refused outside the composer, and a failure says so" {
     _ = apply(&fixture.state, &fixture.store, .compose_edit_failed);
     try testing.expect(fixture.state.status_alert);
     try testing.expectEqualStrings("Could not run the editor; set $EDITOR", fixture.state.status.slice());
+}
+
+test "ctrl+s holds the send instead of sending it" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    fixture.state.compose.to.set("a@example.com");
+
+    const effects = apply(&fixture.state, &fixture.store, .{ .compose_send_held = .{ .now_unix = 1_700_000_000 } });
+    try testing.expect(effects.is_empty());
+    try testing.expectEqual(View.compose, fixture.state.view);
+    try testing.expectEqual(@as(i64, 1_700_000_000 + limits.send_hold_seconds), fixture.state.compose.hold_until);
+    try testing.expectEqualStrings("Sending · Esc stops it", fixture.state.status.slice());
+}
+
+test "a held send leaves when its window closes" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    fixture.state.compose.to.set("a@example.com");
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_send_held = .{ .now_unix = 1_700_000_000 } });
+
+    const effects = apply(&fixture.state, &fixture.store, .compose_send);
+    try testing.expectEqual(@as(usize, 1), effects.slice().len);
+    try testing.expectEqualStrings("a", effects.slice()[0].send.to.local.slice());
+    try testing.expectEqualStrings("example.com", effects.slice()[0].send.to.domain.slice());
+    try testing.expectEqual(@as(i64, 0), fixture.state.compose.hold_until);
+}
+
+test "esc during the hold stops the send and keeps the draft" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    fixture.state.compose.to.set("a@example.com");
+    fixture.state.compose.field = .body;
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_char = 'x' });
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_send_held = .{ .now_unix = 1_700_000_000 } });
+
+    _ = apply(&fixture.state, &fixture.store, .compose_cancel);
+    try testing.expectEqual(View.compose, fixture.state.view);
+    try testing.expectEqual(@as(i64, 0), fixture.state.compose.hold_until);
+    try testing.expectEqualStrings("Send cancelled", fixture.state.status.slice());
+    try testing.expectEqualStrings("x", fixture.state.compose.body_slice());
+}
+
+test "typing during the countdown stops it" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    fixture.state.compose.to.set("a@example.com");
+    fixture.state.compose.field = .body;
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_send_held = .{ .now_unix = 1_700_000_000 } });
+    try testing.expect(fixture.state.compose.hold_until != 0);
+
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_char = 'y' });
+    try testing.expectEqual(@as(i64, 0), fixture.state.compose.hold_until);
+    try testing.expectEqualStrings("y", fixture.state.compose.body_slice());
+}
+
+test "a held send with a bad recipient is refused before the countdown" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_char = 'n' });
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_send_held = .{ .now_unix = 1_700_000_000 } });
+    try testing.expectEqual(@as(i64, 0), fixture.state.compose.hold_until);
+    try testing.expect(fixture.state.status_alert);
+
+    // And with no composer open there is nothing to hold.
+    _ = apply(&fixture.state, &fixture.store, .compose_cancel);
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_send_held = .{ .now_unix = 1_700_000_000 } });
+    try testing.expectEqual(@as(i64, 0), fixture.state.compose.hold_until);
 }
 
 test "compose_new opens an empty draft at the recipient" {

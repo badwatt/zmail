@@ -178,7 +178,8 @@ written, the path, and where the password goes. `Enter` saves, `Esc` goes back,
 | `Backspace` | delete the last character of the active field |
 | `Ctrl+U` | clear the active field |
 | `Ctrl+E` | write the body in `$EDITOR` and take it back |
-| `Ctrl+S` | send (validates the recipient first) |
+| `Ctrl+S` | send, after a five-second countdown (validates the recipient first) |
+| `Esc` during the countdown | stop the send and keep the draft |
 | `Esc` | cancel the draft |
 
 ## Accounts
@@ -221,6 +222,11 @@ the original is open, it is quoted below the draft as well: an attribution line,
 then every line prefixed with `> `. Replying from the list quotes nothing — the
 body was never fetched. The draft survives a failed send. Non-ASCII text is sent
 as UTF-8, and a non-ASCII subject leaves as an RFC 2047 encoded word.
+
+`Ctrl+S` does not send at once: the message waits five seconds, the status line
+says `Sending · Esc stops it`, and `Esc` (or any typing) takes it back, draft
+intact. That is long enough to catch the wrong Alice and short enough not to be
+in the way.
 
 `Ctrl+E` is the way out of the one-line-at-the-end editor: it writes the body to
 a temporary file, runs `$ZMAIL_EDITOR`, `$VISUAL`, `$EDITOR`, or `vi` (as an argv

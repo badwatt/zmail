@@ -967,7 +967,7 @@ const help_rows = [_]Hint{
     .{ .keys = "", .action = "-- writing" },
     .{ .keys = "Tab / Shift+Tab", .action = "next / previous field" },
     .{ .keys = "Enter", .action = "next field, or a new line in the body" },
-    .{ .keys = "Ctrl+S", .action = "send (compose), save (forms)" },
+    .{ .keys = "Ctrl+S", .action = "send in 5s, save (forms)" },
     .{ .keys = "Ctrl+E", .action = "write the body in $EDITOR" },
     .{ .keys = "Ctrl+U", .action = "clear the field" },
     .{ .keys = "Space", .action = "toggle an option" },

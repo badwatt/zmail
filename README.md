@@ -125,7 +125,8 @@ with AUTH PLAIN inside that TLS connection. STARTTLS and a real secret store
 (OS keyring, encrypted file, self-hosted sync) are next.
 
 Writing mail: `c` composes, `r` replies, `Tab` moves between fields, `Ctrl+S`
-sends, `Ctrl+E` hands the body to `$EDITOR` and takes it back, `Esc` cancels. The first version edits at the end of the active field
+sends after a five-second countdown that `Esc` stops, `Ctrl+E` hands the body to
+`$EDITOR` and takes it back, `Esc` cancels. The first version edits at the end of the active field
 (`Ctrl+U` clears it) and sends to one recipient. A reply written from the
 reader quotes the original below the draft, attribution line included; a
 subject with non-ASCII characters leaves as an RFC 2047 encoded word.

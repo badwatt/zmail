@@ -66,5 +66,10 @@ pub const secret_max: u32 = 512;
 /// line, so a space in a path cannot be expressed and quoting is unnecessary).
 pub const password_command_max: u32 = 200;
 
+/// Seconds a send waits after Ctrl+S, so a message addressed to the wrong
+/// person can still be stopped. Short on purpose: a longer window is a longer
+/// wait before the mail that was meant to go, goes.
+pub const send_hold_seconds: i64 = 5;
+
 /// Maximum number of actions a single user command may produce.
 pub const actions_max: u32 = 8;

@@ -35,6 +35,11 @@ pub fn fixed_now() i64 {
     return 1_700_000_000;
 }
 
+/// A clock far enough past `fixed_now` that a held send is due.
+fn after_hold() i64 {
+    return 1_700_000_100;
+}
+
 /// One configured account: its identity, its mail connection, and its outbox.
 pub const MailSource = struct {
     id: core.id.AccountId,
@@ -517,8 +522,16 @@ pub const Session = struct {
         self.sync_size();
         self.state.spinner +%= 1;
         self.now_unix = self.deps.now();
+        self.release_held_send();
         if (self.needs_render) self.render();
         return !self.state.quit;
+    }
+
+    /// A send that was held for a few seconds leaves when its window closes.
+    fn release_held_send(self: *Session) void {
+        if (self.state.compose.hold_until == 0) return;
+        if (self.now_unix < self.state.compose.hold_until) return;
+        _ = self.apply(.compose_send);
     }
 
     /// Runs until the user quits. `run.zig` wraps this with raw mode and the
@@ -684,6 +697,11 @@ pub const Session = struct {
             }
         }
         const command = keymap.translate(key, .{ .mode = self.state.mode, .view = self.state.view }) orelse return false;
+        // Ctrl+S starts a countdown, and the clock is the session's, so the core
+        // keeps its promise of never reading one.
+        if (command == .compose_send) {
+            return self.apply(.{ .compose_send_held = .{ .now_unix = self.now_unix } });
+        }
         return self.apply(command);
     }
 
@@ -2081,6 +2099,12 @@ const Rig = struct {
         _ = self.session.step();
     }
 
+    /// Lets a held send reach its deadline: the clock jumps, the loop notices.
+    fn settle_send(self: *Rig) void {
+        self.session.deps.now = after_hold;
+        _ = self.session.step();
+    }
+
     fn rejecting_mail(self: *Rig) core.mail_port.Mail {
         _ = self;
         return .{ .context = undefined, .vtable = &reject_vtable };
@@ -2343,10 +2367,38 @@ test "composing and sending with a working outbox closes the draft" {
     rig.send("Hi");
     rig.send("\t\thello");
     rig.send("\x13"); // Ctrl+S
+    try testing.expectEqual(@as(u32, 0), outbox.sent);
+    rig.settle_send();
 
     try testing.expectEqual(@as(u32, 1), outbox.sent);
     try testing.expectEqual(core.state.View.list, rig.session.state.view);
     try testing.expectEqualStrings("Message sent · 2 opens Sent", rig.session.state.status.slice());
+}
+
+test "esc stops a held send before it leaves" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    var outbox: RecordingOutbox = .{};
+    const outboxes = [_]OutboxSource{.{ .id = core.id.AccountId.from_int(1), .outbox = outbox.outbox() }};
+    rig.session.deps.outboxes = &outboxes;
+    _ = rig.session.step();
+
+    rig.send("c");
+    rig.send("alice@example.com");
+    rig.send("\x13"); // Ctrl+S
+    // Still here: the countdown has not run out.
+    try testing.expectEqual(core.state.View.compose, rig.session.state.view);
+
+    rig.send("\x1b"); // Esc
+    // A lone ESC is ambiguous until the next read times out.
+    _ = rig.session.step();
+    try testing.expectEqualStrings("Send cancelled", rig.session.state.status.slice());
+    try testing.expectEqual(core.state.View.compose, rig.session.state.view);
+
+    rig.settle_send();
+    try testing.expectEqual(@as(u32, 0), outbox.sent);
+    try testing.expectEqual(core.state.View.compose, rig.session.state.view);
 }
 
 test "sending without an outbox keeps the draft and alerts" {
@@ -2358,6 +2410,7 @@ test "sending without an outbox keeps the draft and alerts" {
     rig.send("c");
     rig.send("alice@example.com");
     rig.send("\x13");
+    rig.settle_send();
     try testing.expectEqual(core.state.View.compose, rig.session.state.view);
     try testing.expect(rig.session.state.compose.active);
     try testing.expect(rig.session.state.status_alert);
@@ -2375,6 +2428,7 @@ test "a failing outbox keeps the draft and alerts" {
     rig.send("c");
     rig.send("alice@example.com");
     rig.send("\x13");
+    rig.settle_send();
     try testing.expectEqual(core.state.View.compose, rig.session.state.view);
     try testing.expect(rig.session.state.compose.active);
     try testing.expectEqualStrings("Could not send; the draft is still here", rig.session.state.status.slice());
