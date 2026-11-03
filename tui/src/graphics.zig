@@ -1,12 +1,16 @@
 //! Drawing a picture of the mail in the terminal.
 //!
-//! A terminal cannot lay out HTML: there is no CSS, no fonts, no images. What it
-//! can do is show a picture, and the kitty graphics protocol (kitty, ghostty,
-//! wezterm) takes PNG bytes inline. So the HTML is rendered by a headless
-//! browser into a PNG and that PNG is painted over the reader's body area.
+//! A terminal cannot lay out HTML: there is no CSS, no fonts, no layout engine.
+//! What it can do is show a picture, and the kitty graphics protocol (kitty,
+//! ghostty, wezterm) takes PNG bytes inline, so the reader paints the images the
+//! message itself carries over the rows they occupy.
 //!
-//! Everything is streamed in chunks: a full-page screenshot is megabytes, and
-//! zmail does not allocate per frame.
+//! Nothing here renders HTML. `core/html.zig` reads it into text, with no
+//! browser and no script, and this file only knows how to put pixels on top of
+//! the lines it left free.
+//!
+//! Everything is streamed in chunks: a full-page picture is megabytes, and zmail
+//! does not allocate per frame.
 
 const std = @import("std");
 const assert = std.debug.assert;
