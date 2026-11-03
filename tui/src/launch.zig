@@ -598,7 +598,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
             account.smtp_host.set(smtp.host.slice());
             account.smtp_port = smtp.port;
         }
-        read_password(io, path, entry.label.slice(), file.len == 1, &account.password) catch {};
+        read_password(gpa, io, path, entry.label.slice(), file.len == 1, entry.password_command.slice(), &account.password) catch {};
         account.password_ready = !account.password.is_empty();
         account.oauth_client_id.set(entry.oauth_client_id.slice());
         if (read_token(io, path, entry.label.slice())) |stored| {
@@ -679,16 +679,23 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
 }
 
 fn read_password(
+    gpa: std.mem.Allocator,
     io: std.Io,
     config_path: []const u8,
     label: []const u8,
     allow_env: bool,
+    password_command: []const u8,
     out: *core.secret.Secret,
 ) !void {
     var buffer: [1024]u8 = undefined;
     var path_buffer: [512]u8 = undefined;
 
     const path = cli.credential_path(config_path, label, &path_buffer);
+
+    // An account that names a command has said where its password lives: ask
+    // it first, and never write the answer to disk. The command stays the one
+    // source of truth (`pass` can rotate a password behind our back).
+    if (password_command.len > 0 and run_password_command(gpa, io, password_command, out)) return;
 
     // The environment wins: it is how a password is set or repaired without
     // trusting whatever is on disk, and it re-seals itself for next time.
@@ -736,6 +743,35 @@ fn read_password(
     }
 
     return error.NoPassword;
+}
+
+/// Runs an account's `password_command` and takes its first line as the
+/// password. argv only, so nothing in the config can become a shell script;
+/// a command that fails, or prints something that is not a password, leaves
+/// the account without one rather than with a guess.
+fn run_password_command(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    command_line: []const u8,
+    out: *core.secret.Secret,
+) bool {
+    var argv: core.config.Argv = .{};
+    core.config.split_argv(command_line, &argv) catch return false;
+    if (argv.len == 0) return false;
+
+    const result = std.process.run(gpa, io, .{
+        .argv = argv.slice(),
+        .stdout_limit = .limited(core.limits.secret_max),
+        .stderr_limit = .limited(256),
+    }) catch return false;
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    if (!result.term.success()) return false;
+
+    const password = std.mem.trimEnd(u8, result.stdout, "\r\n");
+    if (!looks_like_password(password)) return false;
+    core.secret.Secret.init(password, out) catch return false;
+    return true;
 }
 
 /// The key that protects credentials lives next to the config: the cache is
@@ -1121,8 +1157,15 @@ const FileAccounts = struct {
         var password: core.secret.Secret = .{};
         defer password.deinit();
         if (!fresh) {
-            read_password(self.io, self.path, entry.label.slice(), file.len == 1, &password) catch
-                return error.Unavailable;
+            read_password(
+                self.gpa,
+                self.io,
+                self.path,
+                entry.label.slice(),
+                file.len == 1,
+                entry.password_command.slice(),
+                &password,
+            ) catch return error.Unavailable;
         }
 
         self.transport.open(self.gpa, self.io, entry.account.imap.host.slice(), entry.account.imap.port) catch

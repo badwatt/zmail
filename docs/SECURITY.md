@@ -80,6 +80,11 @@ milestone. There is no analytics, no update check, and no crash reporting.
   without a secret service. The OS keyring and an `age`-encrypted file are the
   next adapters behind the same `SecretStore` port; until then, the file is
   guarded by `0600` and never printed, logged, or included in the config.
+- **`password_command` is argv, not a shell line.** A config may name a command
+  (`pass show mail/work`) and zmail will run it at startup: the value is split
+  on spaces and handed to `execve` directly, so what runs is exactly the program
+  named, with the arguments written, and nothing else. Its output is used and
+  never stored.
 - **Per-account credentials.** One `0600` file per account label under
   `credentials/`; the config still refuses a `password` key.
 - **Everything on disk is sealed.** One key, `~/.cache/zmail/key` (32 random

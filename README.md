@@ -77,6 +77,26 @@ The password is **never** in the config. It lives in
 `credentials/<label>` (mode `0600`), and `ZMAIL_PASSWORD` overrides it when
 there is only one account.
 
+If a password manager already holds it, name the command instead and zmail asks
+it every start:
+
+```ini
+[account work]
+address          = alice@example.com
+username         = alice
+imap_host        = imap.example.com
+imap_port        = 993
+imap_security    = tls
+# Runs as an argv list, never through a shell. One line of output, no caching.
+password_command = pass show mail/work
+```
+
+The command runs as argv (split on spaces, no quoting, `sh` is never
+involved), its first line of output is used and nothing is written to disk, so
+`pass` rotating a password needs no action here. It wins over both
+`ZMAIL_PASSWORD` and the sealed file, because an account that names a command
+has said where its password lives.
+
 ### OAuth2 (Microsoft and Google)
 
 Providers that no longer accept passwords need OAuth2. Mark the account in the

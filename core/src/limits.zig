@@ -62,5 +62,9 @@ pub const username_max: u32 = 128;
 /// Maximum bytes of a secret (password or token) held in memory.
 pub const secret_max: u32 = 512;
 
+/// Maximum bytes of a `password_command` line (an argv to run, never a shell
+/// line, so a space in a path cannot be expressed and quoting is unnecessary).
+pub const password_command_max: u32 = 200;
+
 /// Maximum number of actions a single user command may produce.
 pub const actions_max: u32 = 8;

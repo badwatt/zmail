@@ -19,6 +19,40 @@ const account = @import("domain/account.zig");
 
 pub const max_accounts: u8 = 4;
 
+/// Words in a `password_command`: enough for `gopass show -o mail/work`.
+pub const argv_max: u8 = 8;
+
+/// A command line split into arguments. The slices point into the config text
+/// the caller parsed, so they live as long as that buffer does.
+pub const Argv = struct {
+    items: [argv_max][]const u8 = undefined,
+    len: u8 = 0,
+
+    pub fn slice(self: *const Argv) []const []const u8 {
+        assert(self.len <= argv_max);
+        return self.items[0..self.len];
+    }
+};
+
+/// Splits a `password_command` into argv on runs of spaces. No quoting, no
+/// escapes, and above all no shell: a value in a config file must not be able
+/// to become a program with arguments the user did not write. The cost is that
+/// a path with a space in it cannot be expressed, which is the honest limit of
+/// this shortcut.
+pub fn split_argv(value: []const u8, out: *Argv) Error!void {
+    out.len = 0;
+    var rest = value;
+    while (true) {
+        rest = std.mem.trimStart(u8, rest, " ");
+        if (rest.len == 0) return;
+        if (out.len == argv_max) return error.TooManyArguments;
+        const end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
+        out.items[out.len] = rest[0..end];
+        out.len += 1;
+        rest = rest[end..];
+    }
+}
+
 pub const Entry = struct {
     label: Text(limits.label_max) = .{},
     account: account.Account = .{},
@@ -28,6 +62,9 @@ pub const Entry = struct {
     oauth_client_id: Text(256) = .{},
     /// Microsoft tenant for the authorize URL (`common`, `consumers`, an id).
     oauth_tenant: Text(64) = .{},
+    /// Optional: a command whose standard output is the password (`pass show`,
+    /// `gopass`, an `age` script). Run as an argv list, never through a shell.
+    password_command: Text(limits.password_command_max) = .{},
     policy: account.Policy = .{},
 
     pub fn validate(self: *const Entry) account.RuleError!void {
@@ -62,6 +99,7 @@ pub const Error = error{
     TooManyAccounts,
     MixedFormat,
     TooLong,
+    TooManyArguments,
 };
 
 const Pending = struct {
@@ -143,6 +181,10 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
             entry.oauth_client_id.set(value);
         } else if (std.mem.eql(u8, key, "oauth_tenant")) {
             entry.oauth_tenant.set(value);
+        } else if (std.mem.eql(u8, key, "password_command")) {
+            entry.password_command.set(value);
+            var argv: Argv = .{};
+            try split_argv(value, &argv);
         } else if (std.mem.eql(u8, key, "username")) {
             entry.account.username.set(value);
             pending_entry.seen_username = true;
@@ -474,6 +516,32 @@ test "a partial SMTP group is refused, a complete one is accepted" {
 }
 
 test "a password in the config is refused by name" {
+    try testing.expectError(error.PasswordInConfig, parse(minimal ++ "password = hunter2\n"));
+}
+
+test "a password_command is kept as an argv, never as a shell line" {
+    const file = try parse(minimal ++ "password_command = pass show mail/work\n");
+    try testing.expectEqualStrings("pass show mail/work", file.items()[0].password_command.slice());
+
+    var argv: Argv = .{};
+    try split_argv(file.items()[0].password_command.slice(), &argv);
+    try testing.expectEqual(@as(u8, 3), argv.len);
+    try testing.expectEqualStrings("pass", argv.slice()[0]);
+    try testing.expectEqualStrings("mail/work", argv.slice()[2]);
+}
+
+test "split_argv runs of spaces are one separator, and too many words fail" {
+    var argv: Argv = .{};
+    try split_argv("  pass   show  mail  ", &argv);
+    try testing.expectEqual(@as(usize, 3), argv.slice().len);
+    try testing.expectEqualStrings("mail", argv.slice()[2]);
+
+    // A command with more words than the client will run is refused, rather
+    // than silently truncated into a different command.
+    try testing.expectError(error.TooManyArguments, split_argv("a b c d e f g h i", &argv));
+}
+
+test "a password_command still cannot smuggle a password into the config" {
     try testing.expectError(error.PasswordInConfig, parse(minimal ++ "password = hunter2\n"));
 }
 
