@@ -212,7 +212,7 @@ fn render_review(setup: *const core.setup.Setup, theme: theme_mod.Theme, config_
     var path_buffer: [512]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buffer, "Config: {s}", .{config_path}) catch "";
     _ = out.put_text(1, out.rows -| 4, path, out.columns -| 2, theme.dim);
-    _ = out.put_text(1, out.rows -| 3, "Password: saved next to it in a 0600 file (AMAIL_PASSWORD overrides)", out.columns -| 2, theme.dim);
+    _ = out.put_text(1, out.rows -| 3, "Password: saved next to it in a 0600 file (ZMAIL_PASSWORD overrides)", out.columns -| 2, theme.dim);
 }
 
 fn flush(system: system_mod.System, screen: *const screen_mod.Screen, theme: theme_mod.Theme) void {
@@ -250,7 +250,7 @@ test "a complete wizard saves the config and the password" {
     const keys = "alice@example.com\r" ++ "\r\r\r\r\r" ++ "hunter2\r" ++ "\r";
     fake.push_input(keys);
 
-    var outcome = try run_with(&fake, "/tmp/amail/config", "");
+    var outcome = try run_with(&fake, "/tmp/zmail/config", "");
     defer switch (outcome) {
         .saved => |*saved| saved.password.deinit(),
         .cancelled => {},
@@ -270,14 +270,14 @@ test "a seed supplies the keystrokes the caller already read" {
     fake.push_input("\x11");
     try testing.expectEqual(
         Outcome.cancelled,
-        try run_with(&fake, "/tmp/amail/config", "alice@example.com"),
+        try run_with(&fake, "/tmp/zmail/config", "alice@example.com"),
     );
 
     // A seed can also carry the quit itself.
     var quit: Fake = .{};
     try testing.expectEqual(
         Outcome.cancelled,
-        try run_with(&quit, "/tmp/amail/config", "\x11"),
+        try run_with(&quit, "/tmp/zmail/config", "\x11"),
     );
 }
 
@@ -336,13 +336,13 @@ test "the review screen shows the config, the path, and warns about the password
     try testing.expectEqual(core.setup.Step.review, setup.step);
 
     var screen = screen_mod.Screen.init(100, 30);
-    render(&setup, theme_mod.Theme.dark(), "/tmp/amail/config", &screen);
+    render(&setup, theme_mod.Theme.dark(), "/tmp/zmail/config", &screen);
     var buffer: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, screen.row_text(3, &buffer), "Save this account?") != null);
-    try testing.expect(std.mem.indexOf(u8, screen.row_text(4, &buffer), "# amail account") != null);
+    try testing.expect(std.mem.indexOf(u8, screen.row_text(4, &buffer), "# zmail account") != null);
     try testing.expect(std.mem.indexOf(u8, screen.row_text(5, &buffer), "[account alice]") != null);
     try testing.expect(std.mem.indexOf(u8, screen.row_text(6, &buffer), "address = alice@example.com") != null);
-    try testing.expect(std.mem.indexOf(u8, screen.row_text(26, &buffer), "/tmp/amail/config") != null);
+    try testing.expect(std.mem.indexOf(u8, screen.row_text(26, &buffer), "/tmp/zmail/config") != null);
     try testing.expect(std.mem.indexOf(u8, screen.row_text(27, &buffer), "0600 file") != null);
 }
 

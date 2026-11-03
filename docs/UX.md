@@ -2,7 +2,7 @@
 
 Design rules, in priority order:
 
-1. **Nothing to learn before the first minute.** `amail` opens a real, populated
+1. **Nothing to learn before the first minute.** `zmail` opens a real, populated
    inbox with no account and no setup. The hint bar always shows the keys that
    apply right now.
 2. **One screen, one job.** List, reader, help. No panes fighting for space, no
@@ -35,7 +35,7 @@ still switches.
 
 ```
  ● Alice Rivera         Re: design tokens review                            1m
-   GitHub               [amail] TUI skeleton merged (#42)                   2h
+   GitHub               [zmail] TUI skeleton merged (#42)                   2h
  ● Ana Torres           Invoice for October                                 1d ★
 ```
 
@@ -96,7 +96,7 @@ and disappears on the next action.
 | `E`, `E` | empty Trash (asks once) |
 | `Ctrl+N` / `Ctrl+P` | down / up, for terminals without arrow keys |
 | `Space` | a page in the list and the reader |
-| `H` | in the reader: HTML view, or the plain text one. The HTML is read by amail itself: no browser, no external program |
+| `H` | in the reader: HTML view, or the plain text one. The HTML is read by zmail itself: no browser, no external program |
 | `o` | in the reader: the whole mail in a browser |
 | `Ctrl+Q` `Ctrl+C` | quit. The top level never closes on `Esc`, `q`, or `h` |
 
@@ -110,7 +110,7 @@ text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
 
 ## Opening
 
-With a cache, amail opens instantly: the first frame is the last known mail,
+With a cache, zmail opens instantly: the first frame is the last known mail,
 read from disk, and **no socket is opened**. `Ctrl+R` is what talks to the
 server — it pulls the current mailbox for every account, in the background,
 while the footer's position turns into a spinner.
@@ -137,10 +137,10 @@ and the failure becomes a status line.
 
 ## First run
 
-`amail` with no config opens the setup assistant, one field per screen:
+`zmail` with no config opens the setup assistant, one field per screen:
 
 ```
- amail setup                                                     step 2/8
+ zmail setup                                                     step 2/8
 ────────────────────────────────────────────────────────────────────────
  IMAP server
  imap.example.com▏
@@ -187,7 +187,7 @@ its account label, in that account's own hue, so a glance is enough:
 
 ```
  ●home   Alice Rivera       Re: design tokens review                   1m
-  work   GitHub            [amail] TUI skeleton merged (#42)          2h
+  work   GitHub            [zmail] TUI skeleton merged (#42)          2h
 ```
 
 `a` cycles the scope: all accounts → account one → account two → all. On wide
@@ -210,7 +210,7 @@ Press `A` for the accounts overlay:
 account (it rewrites the config, deletes its credential, and drops its mail from
 the view), and `n` runs the assistant and appends a new one — the new account
 connects on the next start. The same can be done outside the TUI with
-`amail --add-account`.
+`zmail --add-account`.
 
 Accounts live in the same file as `[account <label>]` sections, so they can also
 be written by hand; the label must be unique.
@@ -288,5 +288,5 @@ whichever exists); a Ctrl+click on the words around it does nothing.
 
 The accounts overlay (`A`) lists "All accounts" first and then your accounts by
 name, whatever order the config file uses. The choice is remembered in
-`~/.config/amail/scope`, so the next start opens on the same account — or on all
+`~/.config/zmail/scope`, so the next start opens on the same account — or on all
 of them, if that is what you picked last.

@@ -1,5 +1,5 @@
 //! The demo account: a realistic inbox with no network, no account, and no
-//! credentials. This is what `amail` opens by default, so a first-time user
+//! credentials. This is what `zmail` opens by default, so a first-time user
 //! sees a working, beautiful client before configuring anything.
 
 const std = @import("std");
@@ -56,7 +56,7 @@ const entries = [_]Entry{
         .id = 3,
         .mailbox = .inbox,
         .from = "GitHub <notifications@github.com>",
-        .subject = "[amail] TUI skeleton merged (#42)",
+        .subject = "[zmail] TUI skeleton merged (#42)",
         .snippet = "A small, tested foundation: bounded text, typed ids, and a screen buffer.",
         .age_seconds = 2 * 3600,
         .size_bytes = 1_536,
@@ -107,7 +107,7 @@ const entries = [_]Entry{
     .{
         .id = 8,
         .mailbox = .sent,
-        .from = "Me <me@amail.local>",
+        .from = "Me <me@zmail.local>",
         .subject = "Re: design tokens review",
         .snippet = "Agreed on both nits. Pushed the contrast fix and a screenshot.",
         .age_seconds = 30 * 60,
@@ -117,7 +117,7 @@ const entries = [_]Entry{
     .{
         .id = 9,
         .mailbox = .sent,
-        .from = "Me <me@amail.local>",
+        .from = "Me <me@zmail.local>",
         .subject = "Re: Zig 0.17 release notes",
         .snippet = "Reading tonight. The new Io model is a lot to absorb.",
         .age_seconds = 2 * 3600,
@@ -127,7 +127,7 @@ const entries = [_]Entry{
     .{
         .id = 10,
         .mailbox = .drafts,
-        .from = "Me <me@amail.local>",
+        .from = "Me <me@zmail.local>",
         .subject = "Draft: notes on hexagonal mail",
         .snippet = "Core does not know what a terminal is. That is the whole trick.",
         .age_seconds = 10 * 60,

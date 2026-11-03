@@ -81,7 +81,7 @@ test "sending appends to Sent with the outgoing fields" {
 
     var outgoing = Outgoing{
         .account = AccountId.from_int(1),
-        .from = try Address.init("me <me@amail.local>"),
+        .from = try Address.init("me <me@zmail.local>"),
         .to = try Address.init("alice@example.com"),
         .body = "First line\nsecond line",
     };
@@ -111,7 +111,7 @@ test "a missing from address is filled with the demo account" {
 
     const sent = mail.find(MessageId.from_int(101)).?;
     var address_buffer: [limits.address_max]u8 = undefined;
-    try testing.expectEqualStrings("me@amail.local", sent.from.addr_spec(&address_buffer));
+    try testing.expectEqualStrings("me@zmail.local", sent.from.addr_spec(&address_buffer));
 }
 
 test "a full mailbox is reported as Unavailable" {

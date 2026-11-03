@@ -1,7 +1,7 @@
 //! Accounts and their servers.
 //!
 //! Validation returns an error instead of sanitizing silently, because the user
-//! must be told when amail refuses a configuration. Plaintext transport is
+//! must be told when zmail refuses a configuration. Plaintext transport is
 //! rejected unless the caller explicitly opts in.
 
 const std = @import("std");

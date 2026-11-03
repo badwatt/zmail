@@ -1,6 +1,6 @@
 //! The browser round trip: PKCE, a local listener, and the token exchange.
 //!
-//! `amail --oauth <provider>` runs this; the TUI's account form calls it through
+//! `zmail --oauth <provider>` runs this; the TUI's account form calls it through
 //! the accounts port. When there is no browser, the URL is printed as a QR code
 //! (via `qrencode` if installed) so a phone can scan it.
 
@@ -103,7 +103,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
             var writer = stream.writer(io, &reply_buffer);
             writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n" ++
                 "Content-Length: 36\r\nConnection: close\r\n\r\n" ++
-                "amail: signed in. Close this window.\n") catch {};
+                "zmail: signed in. Close this window.\n") catch {};
             writer.interface.flush() catch {};
         } else |_| {}
     }

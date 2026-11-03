@@ -1,4 +1,4 @@
-//! amail TUI: the terminal adapter.
+//! zmail TUI: the terminal adapter.
 //!
 //! Layering, from the outside in:
 //!   `run`      process entry (argv -> intent)

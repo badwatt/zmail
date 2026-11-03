@@ -26,7 +26,7 @@ pub const Label = @import("cache_file.zig").Label;
 /// builds stored the already-flattened text here, which cannot be told apart
 /// from a message without headers: the marker is what makes the difference
 /// visible, and an entry without it is ignored (and refetched).
-const raw_marker = "AMAIL-RAW-1\n";
+const raw_marker = "ZMAIL-RAW-1\n";
 
 pub const FileBodies = struct {
     gpa: std.mem.Allocator,

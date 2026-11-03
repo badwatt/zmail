@@ -1551,7 +1551,7 @@ test "compose_reply with no selection explains itself" {
 test "compose_send validates the recipient and emits the message" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
-    fixture.state.from_address = try Address.init("Me <me@amail.local>");
+    fixture.state.from_address = try Address.init("Me <me@zmail.local>");
 
     _ = apply(&fixture.state, &fixture.store, .compose_new);
     var effects = apply(&fixture.state, &fixture.store, .compose_send);

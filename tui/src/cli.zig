@@ -18,7 +18,7 @@ pub const Mode = enum { demo, live };
 
 /// What to start, and with which config.
 pub const Launch = struct {
-    /// Live is the default: `amail` with a config is a real client, and
+    /// Live is the default: `zmail` with a config is a real client, and
     /// without one it opens the setup assistant.
     mode: Mode = .live,
     /// `--add-account`: run the assistant and append the account to the config.
@@ -114,25 +114,25 @@ pub fn legacy_credential_path(config_path: []const u8, buffer: []u8) []const u8 
     return std.fmt.bufPrint(buffer, "{s}{s}credential", .{ dir, separator }) catch "";
 }
 
-/// `$XDG_CACHE_HOME/amail`, or `$HOME/.cache/amail`. Empty when neither is set.
+/// `$XDG_CACHE_HOME/zmail`, or `$HOME/.cache/zmail`. Empty when neither is set.
 pub fn default_cache_dir(buffer: []u8, xdg_cache_home: ?[]const u8, home: ?[]const u8) []const u8 {
     if (xdg_cache_home) |xdg| {
-        if (xdg.len > 0) return std.fmt.bufPrint(buffer, "{s}/amail", .{xdg}) catch "";
+        if (xdg.len > 0) return std.fmt.bufPrint(buffer, "{s}/zmail", .{xdg}) catch "";
     }
     if (home) |base| {
-        if (base.len > 0) return std.fmt.bufPrint(buffer, "{s}/.cache/amail", .{base}) catch "";
+        if (base.len > 0) return std.fmt.bufPrint(buffer, "{s}/.cache/zmail", .{base}) catch "";
     }
     return "";
 }
 
-/// `$XDG_CONFIG_HOME/amail/config`, or `$HOME/.config/amail/config`. Empty when
+/// `$XDG_CONFIG_HOME/zmail/config`, or `$HOME/.config/zmail/config`. Empty when
 /// neither variable is set, which the launcher reports.
 pub fn default_config_path(buffer: []u8, xdg_config_home: ?[]const u8, home: ?[]const u8) []const u8 {
     if (xdg_config_home) |xdg| {
-        if (xdg.len > 0) return std.fmt.bufPrint(buffer, "{s}/amail/config", .{xdg}) catch "";
+        if (xdg.len > 0) return std.fmt.bufPrint(buffer, "{s}/zmail/config", .{xdg}) catch "";
     }
     if (home) |base| {
-        if (base.len > 0) return std.fmt.bufPrint(buffer, "{s}/.config/amail/config", .{base}) catch "";
+        if (base.len > 0) return std.fmt.bufPrint(buffer, "{s}/.config/zmail/config", .{base}) catch "";
     }
     return "";
 }
@@ -141,7 +141,7 @@ fn is_flag(arg: []const u8) bool {
     return arg.len > 1 and arg[0] == '-';
 }
 
-/// Maximum arguments amail accepts. A mail client has no use for more.
+/// Maximum arguments zmail accepts. A mail client has no use for more.
 pub const args_max: u32 = 16;
 
 /// Copies the process arguments into `buffer`, so the rest of the program works
@@ -184,7 +184,7 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\
         \\Accounts live in P as [account <label>] sections; add more with
         \\--add-account or by hand. The password is never in the config.
-        \\Inside amail, press ? for the key map.
+        \\Inside zmail, press ? for the key map.
         \\
     ,
         .{ meta.name, meta.version, meta.name },
@@ -230,14 +230,14 @@ test "--live launches with a config, without a path" {
 }
 
 test "--config takes the next argument and implies live" {
-    const action = parse(&[_][]const u8{ meta.name, "--config", "/tmp/amail.conf" });
+    const action = parse(&[_][]const u8{ meta.name, "--config", "/tmp/zmail.conf" });
     try testing.expectEqual(Mode.live, action.launch.mode);
-    try testing.expectEqualStrings("/tmp/amail.conf", action.launch.config_path.?);
+    try testing.expectEqualStrings("/tmp/zmail.conf", action.launch.config_path.?);
 }
 
 test "--config=path works too" {
-    const action = parse(&[_][]const u8{ meta.name, "--config=/tmp/amail.conf" });
-    try testing.expectEqualStrings("/tmp/amail.conf", action.launch.config_path.?);
+    const action = parse(&[_][]const u8{ meta.name, "--config=/tmp/zmail.conf" });
+    try testing.expectEqualStrings("/tmp/zmail.conf", action.launch.config_path.?);
 }
 
 test "--password asks for the password once" {
@@ -273,8 +273,8 @@ test "--config without a value and repeated --config are usage errors" {
 
 test "default cache dir follows XDG_CACHE_HOME, then HOME" {
     var buffer: [256]u8 = undefined;
-    try testing.expectEqualStrings("/xdg/amail", default_cache_dir(&buffer, "/xdg", "/home/me"));
-    try testing.expectEqualStrings("/home/me/.cache/amail", default_cache_dir(&buffer, null, "/home/me"));
+    try testing.expectEqualStrings("/xdg/zmail", default_cache_dir(&buffer, "/xdg", "/home/me"));
+    try testing.expectEqualStrings("/home/me/.cache/zmail", default_cache_dir(&buffer, null, "/home/me"));
     try testing.expectEqualStrings("", default_cache_dir(&buffer, null, null));
     try testing.expectEqualStrings("", default_cache_dir(&buffer, "", ""));
 }
@@ -282,15 +282,15 @@ test "default cache dir follows XDG_CACHE_HOME, then HOME" {
 test "default config path follows XDG, then HOME" {
     var buffer: [256]u8 = undefined;
     try testing.expectEqualStrings(
-        "/xdg/amail/config",
+        "/xdg/zmail/config",
         default_config_path(&buffer, "/xdg", "/home/me"),
     );
     try testing.expectEqualStrings(
-        "/home/me/.config/amail/config",
+        "/home/me/.config/zmail/config",
         default_config_path(&buffer, null, "/home/me"),
     );
     try testing.expectEqualStrings(
-        "/home/me/.config/amail/config",
+        "/home/me/.config/zmail/config",
         default_config_path(&buffer, "", "/home/me"),
     );
     try testing.expectEqualStrings("", default_config_path(&buffer, null, null));
@@ -298,7 +298,7 @@ test "default config path follows XDG, then HOME" {
 }
 
 test "parent_dir keeps the directory part" {
-    try testing.expectEqualStrings("/home/me/.config/amail", parent_dir("/home/me/.config/amail/config"));
+    try testing.expectEqualStrings("/home/me/.config/zmail", parent_dir("/home/me/.config/zmail/config"));
     try testing.expectEqualStrings("a", parent_dir("a/config"));
     try testing.expectEqualStrings("/", parent_dir("/config"));
     try testing.expectEqualStrings("", parent_dir("config"));
@@ -307,8 +307,8 @@ test "parent_dir keeps the directory part" {
 test "credential_path is one file per account, next to the config" {
     var buffer: [256]u8 = undefined;
     try testing.expectEqualStrings(
-        "/home/me/.config/amail/credentials/work",
-        credential_path("/home/me/.config/amail/config", "work", &buffer),
+        "/home/me/.config/zmail/credentials/work",
+        credential_path("/home/me/.config/zmail/config", "work", &buffer),
     );
     try testing.expectEqualStrings("credentials/work", credential_path("config", "work", &buffer));
     try testing.expectEqualStrings("/credentials/work", credential_path("/config", "work", &buffer));
@@ -394,19 +394,19 @@ test "render_help degrades to empty output when the buffer cannot hold it" {
 test "render_usage_error names the offending value and points at help" {
     var buffer: [128]u8 = undefined;
     try testing.expectEqualStrings(
-        "unknown option: --nope\nRun 'amail --help' for usage.\n",
+        "unknown option: --nope\nRun 'zmail --help' for usage.\n",
         render_usage_error(&buffer, .{ .unknown_flag = "--nope" }),
     );
     try testing.expectEqualStrings(
-        "unexpected argument: inbox\nRun 'amail --help' for usage.\n",
+        "unexpected argument: inbox\nRun 'zmail --help' for usage.\n",
         render_usage_error(&buffer, .{ .unexpected_argument = "inbox" }),
     );
     try testing.expectEqualStrings(
-        "option needs a value: --config\nRun 'amail --help' for usage.\n",
+        "option needs a value: --config\nRun 'zmail --help' for usage.\n",
         render_usage_error(&buffer, .{ .missing_value = "--config" }),
     );
     try testing.expectEqualStrings(
-        "option given twice: --config\nRun 'amail --help' for usage.\n",
+        "option given twice: --config\nRun 'zmail --help' for usage.\n",
         render_usage_error(&buffer, .{ .duplicate_flag = "--config" }),
     );
 }

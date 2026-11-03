@@ -1,15 +1,15 @@
-# amail
+# zmail
 
-[![ci](https://github.com/badwatt/amail/actions/workflows/ci.yml/badge.svg)](https://github.com/badwatt/amail/actions/workflows/ci.yml)
+[![ci](https://github.com/badwatt/zmail/actions/workflows/ci.yml/badge.svg)](https://github.com/badwatt/zmail/actions/workflows/ci.yml)
 
 A calm terminal mail client, written in Zig.
 
 ```
- amail  Inbox    3 Sent       Drafts     Archive    Trash      Junk
+ zmail  Inbox    3 Sent       Drafts     Archive    Trash      Junk
 ────────────────────────────────────────────────────────────────────────────
  ● Alice Rivera         Re: design tokens review                            1m
  ● Bob Chen             Zig 0.17 release notes                             14m ★
-   GitHub               [amail] TUI skeleton merged (#42)                   2h
+   GitHub               [zmail] TUI skeleton merged (#42)                   2h
    NixOS Weekly         NixOS Weekly #312                                   5h
  ● Ana Torres           Invoice for October                                 1d ★
    Linear               Your week in review                                 3d
@@ -25,7 +25,7 @@ decision below serves one of those, in that order.
 
 ```sh
 zig build run        # live by default: the config, or the setup assistant
-amail --demo         # the built-in demo inbox: no account, no network
+zmail --demo         # the built-in demo inbox: no account, no network
 ```
 
 Once the cache is warm, startup opens no socket: the first frame is the mail you
@@ -39,13 +39,13 @@ every key (`/` inside the help filters it).
 
 ### Live mode
 
-The first `amail` with no config starts a setup assistant: it asks for the
+The first `zmail` with no config starts a setup assistant: it asks for the
 address, derives the IMAP/SMTP servers, collects the password, and writes
-`~/.config/amail/config` plus `~/.config/amail/credentials/<label>`, both
-`0600`. Later runs read both; `AMAIL_PASSWORD` overrides the file for a
+`~/.config/zmail/config` plus `~/.config/zmail/credentials/<label>`, both
+`0600`. Later runs read both; `ZMAIL_PASSWORD` overrides the file for a
 single-account config.
 
-`~/.config/amail/config` (or `--config PATH`) supports several accounts, shown
+`~/.config/zmail/config` (or `--config PATH`) supports several accounts, shown
 in one unified inbox:
 
 ```ini
@@ -74,7 +74,7 @@ keep working. Press `a` to cycle the scope (all accounts → one → next → al
 the list is unified by default and each row carries its account initial.
 
 The password is **never** in the config. It lives in
-`credentials/<label>` (mode `0600`), and `AMAIL_PASSWORD` overrides it when
+`credentials/<label>` (mode `0600`), and `ZMAIL_PASSWORD` overrides it when
 there is only one account.
 
 ### OAuth2 (Microsoft and Google)
@@ -87,16 +87,16 @@ oauth_client_id = <your app registration's client id>
 oauth_tenant   = common      # Microsoft only: common | consumers | organizations | <tenant id>
 ```
 
-Then `amail --oauth`, or `o` on the account in the `A` overlay. The flow opens
+Then `zmail --oauth`, or `o` on the account in the `A` overlay. The flow opens
 the browser, listens on `http://127.0.0.1:8123/` and reads the code when the
 provider redirects back; there is nothing to paste unless the port cannot be
 bound, and no QR unless `qrencode` is installed. The token is sealed in
-`~/.config/amail/tokens/<label>` and refreshed in the background when it
+`~/.config/zmail/tokens/<label>` and refreshed in the background when it
 expires, so a password is never asked for again.
 
 For Microsoft the app registration must allow personal accounts (or the tenant
 matching the account), be a public client, and list `http://127.0.0.1:8123/` as
-a redirect URI; otherwise Azure answers `unauthorized_client`, which amail now
+a redirect URI; otherwise Azure answers `unauthorized_client`, which zmail now
 prints verbatim.
 
 Only implicit TLS is supported today (IMAP 993, SMTP 465). Certificate
@@ -141,7 +141,7 @@ larger than 128 KiB is truncated rather than refused.
 Live IMAP works: TLS transport with mandatory certificate verification, the
 protocol layer (framing with literals, commands, responses with ENVELOPE),
 the client loop, the `Mail` adapter, multi-account config, and the setup
-assistant. Envelopes are cached under `~/.cache/amail`, so a restart and a
+assistant. Envelopes are cached under `~/.cache/zmail`, so a restart and a
 mailbox switch do not wait for the network; `Ctrl+R` refreshes on demand, and
 message bodies are cached too (sealed with XChaCha20-Poly1305), so reading a
 message you have already opened never touches a socket. The protocol

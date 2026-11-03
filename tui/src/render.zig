@@ -922,7 +922,7 @@ fn render_hints(hints: []const Hint, y: u16, limit: u16, theme: *const Theme, ou
     }
 }
 
-/// Every key amail answers to, grouped by where it works. An entry with no
+/// Every key zmail answers to, grouped by where it works. An entry with no
 /// `keys` is a heading.
 const help_rows = [_]Hint{
     .{ .keys = "", .action = "-- anywhere" },

@@ -1,4 +1,4 @@
-//! End-to-end tests: spawn the real `amail` binary.
+//! End-to-end tests: spawn the real `zmail` binary.
 //!
 //! These cover the process boundary that unit tests cannot: argv handling,
 //! stdout/stderr, and exit codes. The interactive session is covered separately
@@ -7,7 +7,7 @@
 const std = @import("std");
 const core = @import("core");
 const meta = core.meta;
-const exe_path = @import("build_options").amail_exe;
+const exe_path = @import("build_options").zmail_exe;
 
 const testing = std.testing;
 
@@ -57,7 +57,7 @@ test "--help prints usage and exits 0" {
     defer result.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u8, 0), result.code);
-    try testing.expect(std.mem.indexOf(u8, result.stdout, "Usage: amail") != null);
+    try testing.expect(std.mem.indexOf(u8, result.stdout, "Usage: zmail") != null);
 }
 
 test "an unknown option exits 2 and explains itself on stderr" {

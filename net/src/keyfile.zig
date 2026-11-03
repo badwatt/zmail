@@ -1,4 +1,4 @@
-//! The single key that seals everything amail writes: cache, bodies, and the
+//! The single key that seals everything zmail writes: cache, bodies, and the
 //! password file. One file, 32 random bytes, mode 0600.
 //!
 //! Trust boundary, stated plainly: the key sits next to the data. This protects

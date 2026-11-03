@@ -1993,7 +1993,7 @@ const Rig = struct {
         self.sources[0] = .{
             .id = core.id.AccountId.from_int(1),
             .label = "account",
-            .from = core.address.Address.init("me@amail.local") catch .{},
+            .from = core.address.Address.init("me@zmail.local") catch .{},
             .mail = self.fake_mail.mail(),
         };
         try self.session.init(testing.allocator, .{
@@ -2984,7 +2984,7 @@ test "editing prefills the form and replaces the account" {
 
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = core.id.AccountId.from_int(1) } }});
     const form = &rig.session.settings.?;
-    try testing.expectEqualStrings("me@amail.local", form.setup.address.slice());
+    try testing.expectEqualStrings("me@zmail.local", form.setup.address.slice());
     try testing.expectEqualStrings("imap.example.com", form.setup.imap_host.slice());
     try testing.expectEqualStrings("993", form.setup.imap_port.slice());
     try testing.expectEqualStrings("me", form.setup.username.slice());

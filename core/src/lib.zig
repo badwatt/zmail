@@ -1,4 +1,4 @@
-//! amail core: domain and application, the hexagon's inside.
+//! zmail core: domain and application, the hexagon's inside.
 //!
 //! Nothing in this module tree performs I/O, reads the clock, or knows what a
 //! terminal is. Adapters (TUI today, GUI tomorrow, IMAP/SMTP later) depend on
@@ -7,7 +7,7 @@
 const std = @import("std");
 
 pub const limits = @import("limits.zig");
-/// Accounts a single amail process can talk to at once.
+/// Accounts a single zmail process can talk to at once.
 pub const app_max_accounts: u8 = 4;
 pub const meta = @import("meta.zig");
 pub const text = @import("domain/text.zig");

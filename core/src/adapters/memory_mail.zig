@@ -215,7 +215,7 @@ fn template(id: MessageId) []const u8 {
             "Pick one and I will make it happen.",
         "Heads up: the build is green again. The failure was a stale cache,\n" ++
             "not the change itself. Nothing to do on your side.",
-        "I have attached nothing on purpose: amail is text-only and offline\n" ++
+        "I have attached nothing on purpose: zmail is text-only and offline\n" ++
             "in demo mode. When live accounts land, attachments will be shown\n" ++
             "as a name and size, never opened automatically.",
     };

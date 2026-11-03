@@ -345,9 +345,9 @@ test "env reads the process environment" {
     const setenv = struct {
         extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
     };
-    try testing.expectEqual(@as(c_int, 0), setenv.setenv("AMAIL_TEST_VARIABLE", "hello", 1));
-    try testing.expectEqualStrings("hello", env("AMAIL_TEST_VARIABLE").?);
-    try testing.expect(env("AMAIL_TEST_VARIABLE_THAT_DOES_NOT_EXIST") == null);
+    try testing.expectEqual(@as(c_int, 0), setenv.setenv("ZMAIL_TEST_VARIABLE", "hello", 1));
+    try testing.expectEqualStrings("hello", env("ZMAIL_TEST_VARIABLE").?);
+    try testing.expect(env("ZMAIL_TEST_VARIABLE_THAT_DOES_NOT_EXIST") == null);
 }
 
 test "now_unix returns a plausible current time" {

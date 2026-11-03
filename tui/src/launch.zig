@@ -352,7 +352,7 @@ const LiveAccount = struct {
         if (self.has_imap) return self.imap.mail();
         // An OAuth account has a token, not a password: do not demand one.
         if (self.token.access.is_empty() and !self.password_ready) {
-            self.failure = "No password for an account: run setup again or set AMAIL_PASSWORD";
+            self.failure = "No password for an account: run setup again or set ZMAIL_PASSWORD";
             return error.Unavailable;
         }
 
@@ -615,7 +615,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         } else |_| {}
         // An OAuth account lives on its token: a missing password is expected.
         if (!account.password_ready and account.token.access.is_empty() and missing_password == null) {
-            missing_password = "No password for an account: set AMAIL_PASSWORD or run the add-account command";
+            missing_password = "No password for an account: set ZMAIL_PASSWORD or run the add-account command";
         }
 
         live.add(account);
@@ -693,7 +693,7 @@ fn read_password(
     // The environment wins: it is how a password is set or repaired without
     // trusting whatever is on disk, and it re-seals itself for next time.
     if (allow_env) {
-        if (os.env("AMAIL_PASSWORD")) |value| {
+        if (os.env("ZMAIL_PASSWORD")) |value| {
             if (value.len > 0) {
                 try core.secret.Secret.init(value, out);
                 if (path.len > 0) seal_in_place(io, config_path, path, value) catch {};
@@ -709,7 +709,7 @@ fn read_password(
     }
 
     if (allow_env) {
-        if (os.env("AMAIL_PASSWORD")) |value| {
+        if (os.env("ZMAIL_PASSWORD")) |value| {
             try core.secret.Secret.init(value, out);
             // Re-seal it: a lost or replaced key heals on the next start.
             if (path.len > 0) seal_in_place(io, config_path, path, value) catch {};
@@ -874,12 +874,12 @@ fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Se
     }
 
     const client_id = if (entry.oauth_client_id.is_empty())
-        (os.env("AMAIL_OAUTH_CLIENT_ID") orelse "")
+        (os.env("ZMAIL_OAUTH_CLIENT_ID") orelse "")
     else
         entry.oauth_client_id.slice();
     // Optional: without one we can still print the URL the user must build.
     if (client_id.len == 0) {
-        return .{ .message = "Add oauth_client_id to the config (or set AMAIL_OAUTH_CLIENT_ID)" };
+        return .{ .message = "Add oauth_client_id to the config (or set ZMAIL_OAUTH_CLIENT_ID)" };
     }
 
     const Io = struct {
@@ -1452,7 +1452,7 @@ fn read_file(io: std.Io, path: []const u8, buffer: []u8) ![]const u8 {
 
 fn config_message(err: anyerror) []const u8 {
     return switch (err) {
-        error.PasswordInConfig => "Remove the password from the config; use AMAIL_PASSWORD",
+        error.PasswordInConfig => "Remove the password from the config; use ZMAIL_PASSWORD",
         error.UnknownKey => "Unknown key in the config file",
         error.MissingKey => "Missing required key in the config file",
         error.InvalidValue, error.MissingEquals => "Invalid line in the config file",
@@ -1501,7 +1501,7 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 
 fn login_message(err: core.imap.client.Error) []const u8 {
     return switch (err) {
-        error.LoginFailed => "Login failed: check username and AMAIL_PASSWORD",
+        error.LoginFailed => "Login failed: check username and ZMAIL_PASSWORD",
         error.Unavailable => "The IMAP server could not be reached",
         error.Timeout => "The IMAP server stopped responding",
         else => "The IMAP server refused the session",

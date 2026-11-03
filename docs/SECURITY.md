@@ -75,14 +75,14 @@ milestone. There is no analytics, no update check, and no crash reporting.
 - **The config never contains a password.** The parser refuses a `password`
   key by name, with an actionable error. The setup assistant writes the
   password to a separate `0600` file next to the config (`credential`), and
-  `AMAIL_PASSWORD` overrides it. A plaintext file with owner-only permissions is
+  `ZMAIL_PASSWORD` overrides it. A plaintext file with owner-only permissions is
   a deliberate, temporary tradeoff: it is what makes first-run setup usable
   without a secret service. The OS keyring and an `age`-encrypted file are the
   next adapters behind the same `SecretStore` port; until then, the file is
   guarded by `0600` and never printed, logged, or included in the config.
 - **Per-account credentials.** One `0600` file per account label under
   `credentials/`; the config still refuses a `password` key.
-- **Everything on disk is sealed.** One key, `~/.cache/amail/key` (32 random
+- **Everything on disk is sealed.** One key, `~/.cache/zmail/key` (32 random
   bytes from the IO's CSPRNG, mode `0600`, created on first use), encrypts the
   envelope cache, the message bodies, and the password file with
   XChaCha20-Poly1305. No sender, subject, snippet, body, or password is written
@@ -93,9 +93,9 @@ milestone. There is no analytics, no update check, and no crash reporting.
   keyring) is the next step.
 - **Migration.** An older install's plaintext `credential` and `.tsv` files are
   read once and immediately replaced with sealed copies.
-- **Bodies are sealed at rest.** `~/.cache/amail/<label>/bodies/<mailbox>/<uid>.bin`
+- **Bodies are sealed at rest.** `~/.cache/zmail/<label>/bodies/<mailbox>/<uid>.bin`
   is `nonce || XChaCha20-Poly1305 ciphertext || tag`, keyed with
-  `~/.cache/amail/key` (32 random bytes, `0600`, created on first use; the key
+  `~/.cache/zmail/key` (32 random bytes, `0600`, created on first use; the key
   uses the IO's CSPRNG). No body text is ever written in the clear, so a stray
   backup or a synced cache directory does not leak prose. A tampered or
   truncated file fails authentication and is treated as a cache miss.
@@ -116,7 +116,7 @@ These are designed for but not built yet; they are not claimed as done.
   fallback.
 - **Credentials leave the environment.** The `SecretStore` port will have three
   adapters: OS keyring, an `age`/`sops`-encrypted file with `0600` permissions,
-  and the self-hosted backend below. `AMAIL_PASSWORD` is the temporary bridge;
+  and the self-hosted backend below. `ZMAIL_PASSWORD` is the temporary bridge;
   it is never logged, echoed, or written to the config.
 - **OAuth2/XOAUTH2 for providers that require it**, with tokens stored like
   passwords, refreshed in memory, and never written to logs.

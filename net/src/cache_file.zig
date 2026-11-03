@@ -99,7 +99,7 @@ pub const FileCache = struct {
         const label = self.label_for(account) orelse return;
         var dir_buffer: [512]u8 = undefined;
         const dir = std.fmt.bufPrint(&dir_buffer, "{s}/{s}", .{ self.base_dir, label }) catch return;
-        // createDirPath: the cache root may not exist yet (`~/.cache/amail`).
+        // createDirPath: the cache root may not exist yet (`~/.cache/zmail`).
         _ = std.Io.Dir.cwd().createDirPathStatus(self.io, dir, directory_mode) catch
             return error.Unavailable;
 

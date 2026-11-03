@@ -6,7 +6,7 @@
 //! browser into a PNG and that PNG is painted over the reader's body area.
 //!
 //! Everything is streamed in chunks: a full-page screenshot is megabytes, and
-//! amail does not allocate per frame.
+//! zmail does not allocate per frame.
 
 const std = @import("std");
 const assert = std.debug.assert;

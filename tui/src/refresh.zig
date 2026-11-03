@@ -1,4 +1,4 @@
-//! A background refresh: the only thread amail ever spawns.
+//! A background refresh: the only thread zmail ever spawns.
 //!
 //! The transport is blocking (TLS over a socket, with bounded timeouts), so
 //! concurrency here is one worker thread and one atomic flag: the UI keeps

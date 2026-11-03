@@ -1,7 +1,7 @@
 .{
-    .name = .amail,
+    .name = .zmail,
     .version = "0.3.0",
-    .fingerprint = 0x1212dab46abcd052,
+    .fingerprint = 0x5227c277bb400ed,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},
     .paths = .{

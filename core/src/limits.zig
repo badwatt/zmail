@@ -1,6 +1,6 @@
 //! Compile-time bounds for the whole product.
 //!
-//! Every buffer in amail is bounded before data enters it, because the data is
+//! Every buffer in zmail is bounded before data enters it, because the data is
 //! written by strangers on the internet. A mail server that sends us a 4 GiB
 //! subject line must degrade to a truncated subject, never to an allocation
 //! failure or an unbounded copy.

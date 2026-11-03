@@ -1,6 +1,6 @@
 //! Color palettes.
 //!
-//! Default backgrounds, never a black box: amail inherits the terminal's own
+//! Default backgrounds, never a black box: zmail inherits the terminal's own
 //! background and only tints foregrounds, so it looks at home in light and dark
 //! themes alike. `NO_COLOR` degrades to attributes only.
 

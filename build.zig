@@ -1,4 +1,4 @@
-//! Build configuration for amail.
+//! Build configuration for zmail.
 //!
 //! Two source trees, one product:
 //!   - `core/`  domain + application (ports & adapters inward). No I/O, no terminal.
@@ -111,7 +111,7 @@ fn addExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
-    b.step("run", "Run amail").dependOn(&run_cmd.step);
+    b.step("run", "Run zmail").dependOn(&run_cmd.step);
     return exe;
 }
 
@@ -122,10 +122,10 @@ fn addExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 fn addTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, exe: *std.Build.Step.Compile, install_test_bins: bool) void {
     const test_step = b.step("test", "Run unit and integration tests");
 
-    addUnitTest(b, test_step, core, "amail-core-test", install_test_bins);
+    addUnitTest(b, test_step, core, "zmail-core-test", install_test_bins);
 
     const tui = tuiModule(b, target, optimize, core);
-    addUnitTest(b, test_step, tui, "amail-tui-test", install_test_bins);
+    addUnitTest(b, test_step, tui, "zmail-tui-test", install_test_bins);
 
     const helpers = b.createModule(.{
         .root_source_file = b.path("build/tests.zig"),
@@ -161,7 +161,7 @@ fn addE2eTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
         .link_libc = true,
     });
     const options = b.addOptions();
-    options.addOptionPath("amail_exe", exe.getEmittedBin());
+    options.addOptionPath("zmail_exe", exe.getEmittedBin());
     mod.addImport("build_options", options.createModule());
     mod.addImport("core", core);
 
@@ -238,14 +238,14 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 }
 
 /// Fails when the docs quote a Zig version, a version, or a product name that the
-/// manifest no longer says, and when a literal "amail appears in the Zig trees:
+/// manifest no longer says, and when a literal "zmail appears in the Zig trees:
 /// the name lives in `build.zig.zon`, and nothing else may spell it out.
 fn addDocsCheck(b: *std.Build) void {
     const check = b.addSystemCommand(&.{ "sh", "-c" });
     check.addArg(b.fmt(
         \\set -e
         \\grep -q "Zig {s}" README.md AGENTS.md
-        \\if grep -rn --include=*.zig -e '"amail' core tui build tests | grep -v 'amail-cache'; then
+        \\if grep -rn --include=*.zig -e '"zmail' core tui build tests | grep -v 'zmail-cache'; then
         \\  echo "the product name is a literal; read it from build.zig.zon" >&2
         \\  exit 1
         \\fi

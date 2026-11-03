@@ -292,7 +292,7 @@ pub const Setup = struct {
         const label = self.account_label(&label_buffer);
         var writer = std.Io.Writer.fixed(buffer);
         writer.print(
-            \\# amail account. Created by the setup assistant.
+            \\# zmail account. Created by the setup assistant.
             \\[account {s}]
             \\address = {s}
             \\username = {s}

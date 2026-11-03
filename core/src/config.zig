@@ -332,7 +332,7 @@ test "rename_label changes one section header only" {
 
 test "without removes exactly one section and keeps the rest" {
     const text =
-        \\# amail accounts
+        \\# zmail accounts
         \\[account work]
         \\address = a@work.example
         \\username = a
@@ -413,7 +413,7 @@ test "sections describe several accounts" {
 
 test "comments, blank lines, and whitespace are ignored" {
     const text =
-        \\# amail
+        \\# zmail
         \\
         \\[account  work ]
         \\  address   =   alice@example.com

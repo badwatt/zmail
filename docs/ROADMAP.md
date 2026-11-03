@@ -41,7 +41,7 @@ The port exists; this milestone fills it in.
   verification. Today only implicit TLS is accepted.
 - **SecretStore (next).** OS keyring, then an encrypted file, then the
   self-hosted sync backend. This replaces the plaintext `0600` credential file
-  that setup writes today; `AMAIL_PASSWORD` stays as an override.
+  that setup writes today; `ZMAIL_PASSWORD` stays as an override.
 - **IDLE** for new mail, and flag sync back to the server after a local change.
 - **TLS adapter.** `std.crypto.tls.Client` with certificate verification
   mandatory. STARTTLS upgrade. A bounded, line-oriented transport with
@@ -61,7 +61,7 @@ The port exists; this milestone fills it in.
   `r` prefilling recipient and subject. Demo mode sends into Sent.
 - **Multi-account and cache (done).** `[account <label>]` sections, one
   credential file per account, a unified list with an `a` scope switch, and a
-  TSV envelope cache under `~/.cache/amail`. Switching to a loaded mailbox no
+  TSV envelope cache under `~/.cache/zmail`. Switching to a loaded mailbox no
   longer refetches it, and startup reads the cache before the network.
 - **Real mail bodies (done).** `core/src/mime.zig` decodes encoded-word
   subjects and names, base64 and quoted-printable, the common charsets, and

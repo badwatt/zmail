@@ -79,7 +79,7 @@ pub fn get(
     const header = std.fmt.bufPrint(&header_buffer, "GET {s} HTTP/1.1\r\n" ++
         "Host: {s}\r\n" ++
         "Accept: image/png, image/*;q=0.8\r\n" ++
-        "User-Agent: amail\r\n" ++
+        "User-Agent: zmail\r\n" ++
         "Connection: close\r\n\r\n", .{ path, host }) catch return error.Malformed;
 
     transport.write(header) catch return error.Unavailable;
