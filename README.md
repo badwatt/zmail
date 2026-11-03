@@ -202,6 +202,12 @@ for a bogus password). STARTTLS and a real secret store are next.
 - **Bounded everything.** Subjects, addresses, bodies, and the cache have
   fixed capacities. Mail from strangers is truncated at a UTF-8 boundary, never
   trusted to size an allocation.
+- **One colour, derived.** No palette to configure: zmail asks the terminal what
+  it paints behind the text and generates the rest in OKLCH, where "a shade
+  lighter" is arithmetic and the contrast of the result can be computed instead
+  of hoped for. The first screen is a wordmark with light crossing it — the only
+  thing that moves — and a terminal that does not answer the question keeps the
+  built-in palette rather than a guess.
 - **Safe by default.** Control characters are neutralized on ingress, so a
   subject cannot emit a terminal escape. Plaintext transport is rejected unless
   explicitly allowed. Secrets zero on drop and print as `<redacted>`.

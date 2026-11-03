@@ -39,6 +39,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
     }
 
     try system.enter_raw();
+    install_panic_button(&posix);
     // Asked while the terminal is raw and before anything reads keys: both
     // answers come on stdin, and a parser would read them as typing.
     graphics.detect(system);
@@ -55,6 +56,44 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
         return problem.code;
     }
     return 0;
+}
+
+/// Ctrl+C, as a way out that always works.
+///
+/// The loop that would have noticed the keystroke is the one blocked on a
+/// socket, a login, or the first connection of a cold start, so a quit sent as a
+/// key can only be honoured when that call returns. A signal is not blocked by
+/// anything: the handler puts the terminal back the way it was found and leaves,
+/// which is what "quit now" has to mean when "now" is inside a TLS read.
+fn install_panic_button(posix: *os.Posix) void {
+    interrupting = posix;
+
+    var action = std.posix.Sigaction{
+        .handler = .{ .handler = onInterrupt },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &action, null);
+    std.posix.sigaction(std.posix.SIG.QUIT, &action, null);
+
+    // Ctrl+Z would suspend into a screen nobody repaints on the way back: keep
+    // it inert, the way it was while Ctrl turned it into a byte.
+    const ignore = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TSTP, &ignore, null);
+}
+
+/// What the handler needs: the terminal it has to give back.
+var interrupting: ?*os.Posix = null;
+
+fn onInterrupt(_: std.posix.SIG) callconv(.c) void {
+    // Only a write and a syscall here: the terminal is the whole point, and the
+    // process is about to end, so there is nothing to free and nothing to join.
+    if (interrupting) |posix| posix.restoreNow();
+    std.c._exit(130);
 }
 
 /// Returns null on a clean exit, or what to report once the terminal is back.
@@ -495,12 +534,14 @@ const Live = struct {
         };
         self.mail_count += 1;
 
+        // Always initialised, even without SMTP: `close` walks accounts, not
+        // outboxes, and an undefined slot is a function pointer into nowhere.
+        self.lazy_outbox[index] = .{
+            .context = &self.accounts[index],
+            .open_fn = LiveAccount.openOutbox,
+            .close_fn = LiveAccount.closeOutbox,
+        };
         if (stored.smtp_enabled) {
-            self.lazy_outbox[index] = .{
-                .context = &self.accounts[index],
-                .open_fn = LiveAccount.openOutbox,
-                .close_fn = LiveAccount.closeOutbox,
-            };
             self.outboxes[self.outbox_count] = .{
                 .id = stored.id,
                 .outbox = self.lazy_outbox[index].outbox(),

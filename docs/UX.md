@@ -108,6 +108,17 @@ cancels it. `↑`/`↓` still move the cursor while typing. Inside the help over
 `Esc` is never a quit key. The only ways out are `q` from the list (never from a
 text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
 
+**Quitting while something is loading.** The loop spends part of its life
+waiting: for a refresh, for a body, for the first connection of a cold start.
+Wherever it is waiting rather than working it reads keys, so a quit during a
+wait is honoured at the first opportunity, nothing further is started, and the
+spinner is not waited out. A key pressed *while a socket is being read* can only
+be acted on when that call returns -- which is why `Ctrl+C` is a signal and not
+a byte: zmail keeps `ISIG` on, and the handler puts the terminal back the way it
+found it (alternate screen off, cursor visible, cooked mode) and leaves with
+status 130. That path works even inside a TLS read, in the middle of the splash,
+before the first frame.
+
 ## Opening
 
 With a cache, zmail opens instantly: the first frame is the last known mail,
@@ -124,11 +135,16 @@ Without a cache (first run, or a new account) the network is unavoidable, so
 the first frame is a splash instead of an empty list:
 
 ```
-                             █████ █   █  ███  ▀ █
-                                ██ ██ ██ █   █   █
-                               ██  █ █ █ █████ █ █
-                              ██   █   █ █   █ █ █
-                             █████ █   █  ███  █ █
+                   ██████████  ██      ██    ██████    ▀▀  ██
+                   ██████████  ██      ██    ██████    ▀▀  ██
+                         ████  ████  ████  ██      ██      ██
+                         ████  ████  ████  ██      ██      ██
+                       ████    ██  ██  ██  ██████████  ██  ██
+                       ████    ██  ██  ██  ██████████  ██  ██
+                     ████      ██      ██  ██      ██  ██  ██
+                     ████      ██      ██  ██      ██  ██  ██
+                   ██████████  ██      ██    ██████    ██  ██
+                   ██████████  ██      ██    ██████    ██  ██
 
                              connecting to work
                              alice@example.com
@@ -136,17 +152,20 @@ the first frame is a splash instead of an empty list:
  cached mail opens instantly                                       Ctrl+Q quits
 ```
 
-The wordmark is drawn, not typed: a terminal cannot set type, and five rows of
-one-cell strokes is the closest it gets. Its light moves — a ramp from slate to
-lit that crosses the letters once every three seconds — and nothing else on the
-screen moves at all. That is the whole animation budget, and it buys the one
-thing a cold start needs: a still frame that says "alive" without a spinner,
-because the first connection blocks the loop a spinner would have needed, so a
-spinner here would freeze mid-turn and read as a hang.
+The wordmark is drawn, not typed: a terminal cannot set type, and blocks are
+the closest it gets. It is one shape stored once — the doubled size is the small
+one with every cell drawn twice, so the two can never drift apart — and it is
+used at that size when the terminal has room for it.
 
-`ZMAIL_NO_MOTION` draws the still frame instead, which is a lit wordmark and not
-a blank one; `NO_COLOR` keeps the wave, carried by weight (dim, normal, bold)
-because the shape and the weight were always doing the work.
+Its light moves: a ramp one step apart in lightness, crossing the letters once
+every three seconds. Nothing else on the screen moves. That is the whole
+animation budget, and it buys the one thing a cold start needs — a still frame
+that says "alive" without a spinner, because the first connection blocks the loop
+a spinner would have needed, so a spinner here freezes mid-turn and reads as a
+hang.
+
+`ZMAIL_NO_MOTION` draws the still frame, which is a lit wordmark and not a blank
+one.
 
 A connection that fails no longer refuses to start: cached mail stays readable
 and the failure becomes a status line.
@@ -287,10 +306,23 @@ because hovering is part of how a link is opened.
 
 ## Color
 
-Default background; one accent (xterm 74, muted blue); amber for stars; a dim
-gray for metadata; the terminal's own foreground for body text. `NO_COLOR` (or
-`TERM=dumb`) switches to attributes only — bold, dim, reverse — and the layout
-is unchanged.
+There is no palette to configure. Once, at startup, zmail asks the terminal what
+colour it paints behind the text (`OSC 11`) and derives everything from it in
+OKLCH: the lightness of that ground decides the direction, one hue family is
+laid out in steps of lightness — accent, metadata, selection, rule — and hue
+carries meaning rather than decoration (a muted periwinkle for the accent,
+red-orange for alerts, amber for stars, four account hues a quarter turn apart).
+
+Contrast is therefore a property of the construction, not of taste: the accent
+clears 4.5:1 against the ground it was built for, the metadata 3:1, and the
+selection stays near the ground so the terminal's own text still reads on it. A
+terminal that does not answer keeps the built-in palette; nothing is guessed.
+
+Body text is left at the terminal's own foreground, because it is already tuned
+to that background and no generated colour can improve on it.
+
+`NO_COLOR` (or `TERM=dumb`) switches to attributes only — bold, dim, reverse —
+and the layout is unchanged.
 
 ## Non-goals for now
 

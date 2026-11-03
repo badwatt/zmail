@@ -652,8 +652,21 @@ pub const Session = struct {
     pub fn wait_refresh(self: *Session) void {
         while (self.refreshing) {
             self.poll_refresh();
+            // A wait is not work: the keys pressed during it are read here, so a
+            // quit means now and not "after the fetch".
+            self.read_keys();
+            if (self.state.quit) return;
             std.atomic.spinLoopHint();
         }
+    }
+
+    /// Reads whatever has arrived without waiting, and hands it to the key map.
+    /// Used where the loop would otherwise sit on its hands.
+    fn read_keys(self: *Session) void {
+        var buffer: [256]u8 = undefined;
+        const read = self.deps.system.read(&buffer, 0) catch return;
+        if (read == 0) return;
+        self.handle_bytes(buffer[0..read]);
     }
 
     pub fn settle_refresh_for_test(self: *Session) void {
@@ -1023,6 +1036,12 @@ pub const Session = struct {
         scope.save(label) catch {};
     }
 
+    /// Test hook: the tail of the loading wrapper, without the effect.
+    pub fn end_loading_for_test(self: *Session) void {
+        self.state.loading = true;
+        self.end_loading(os.monotonic_ms());
+    }
+
     /// Test hook: run effects the way the loop does.
     pub fn run_effects_for_test(self: *Session, effects: []const core.effect.Effect) void {
         self.run_effects(effects);
@@ -1039,6 +1058,11 @@ pub const Session = struct {
     }
 
     fn end_loading(self: *Session, started: ?i64) void {
+        // A quit is not worth keeping the spinner up for.
+        if (self.state.quit) {
+            self.state.loading = false;
+            return;
+        }
         if (self.deps.loading_ms == 0) return;
         if (started) |begin| {
             const elapsed: i64 = @max(0, os.monotonic_ms() - begin);
@@ -1051,6 +1075,7 @@ pub const Session = struct {
 
     fn run_effects(self: *Session, effects: []const core.effect.Effect) void {
         for (effects) |effect| {
+            if (self.state.quit) return;
             // One connection: a body asked for while the worker has it is
             // deferred (the reader shows its placeholder) instead of freezing
             // the UI; everything else waits for the worker.
@@ -1714,6 +1739,11 @@ pub const Session = struct {
             // A single account in scope means the others are not opened at all:
             // no socket, no login, nothing to wait for.
             if (!self.in_scope(source.id)) continue;
+            // A quit during the first load must not wait for the second account.
+            if (self.state.booting) {
+                self.read_keys();
+                if (self.state.quit) return;
+            }
             const count = source.mail.fetch(mailbox, self.scratch) catch |err| {
                 failed = true;
                 if (err == error.Rejected) login_failed = true;
@@ -2430,6 +2460,51 @@ test "composing and sending with a working outbox closes the draft" {
     try testing.expectEqual(@as(u32, 1), outbox.sent);
     try testing.expectEqual(core.state.View.list, rig.session.state.view);
     try testing.expectEqualStrings("Message sent · 2 opens Sent", rig.session.state.status.slice());
+}
+
+test "a key pressed while the loop waits is read, not queued behind the wait" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.fake_system.push_input("q");
+    rig.session.read_keys();
+    try testing.expect(rig.session.state.quit);
+}
+
+test "nothing else starts once the user has said quit" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    var outbox: RecordingOutbox = .{};
+    const outboxes = [_]OutboxSource{.{ .id = core.id.AccountId.from_int(1), .outbox = outbox.outbox() }};
+    rig.session.deps.outboxes = &outboxes;
+    _ = rig.session.step();
+
+    rig.session.state.quit = true;
+    rig.session.run_effects_for_test(&.{
+        .{ .send = .{ .account = core.id.AccountId.from_int(1), .body = "hi", .subject = .{} } },
+        .{ .refresh = .{ .account = null, .mailbox = .inbox } },
+    });
+
+    try testing.expectEqual(@as(u32, 0), outbox.sent);
+    try testing.expect(!rig.session.refreshing);
+}
+
+test "quitting does not wait out the spinner" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.deps.loading_ms = 90;
+
+    rig.session.state.quit = true;
+    const started = os.monotonic_ms();
+    rig.session.end_loading_for_test();
+    const elapsed = os.monotonic_ms() - started;
+
+    try testing.expect(!rig.session.state.loading);
+    try testing.expect(elapsed < 60);
 }
 
 test "esc stops a held send before it leaves" {

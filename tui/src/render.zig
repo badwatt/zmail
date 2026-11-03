@@ -212,13 +212,66 @@ const spinner_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 /// The wordmark, drawn rather than typed: five rows, one-cell strokes, and air
 /// between the letters, so it reads as a masthead instead of as a fence. A
 /// terminal cannot set type, and this is the closest it gets.
-const wordmark = [_][]const u8{
+const wordmark_rows = [_][]const u8{
     "█████ █   █  ███  ▀ █",
     "   ██ ██ ██ █   █   █",
     "  ██  █ █ █ █████ █ █",
     " ██   █   █ █   █ █ █",
     "█████ █   █  ███  █ █",
 };
+
+/// One wordmark, two sizes. The big one is the small one with every cell drawn
+/// twice: a terminal cannot scale type, so the only way to have a bigger
+/// wordmark is to draw more of it, and deriving it from one shape is what keeps
+/// the two from drifting apart.
+const wordmark = Words{
+    .small = decode(5, 21, wordmark_rows),
+    .large = doubled(5, 21, decode(5, 21, wordmark_rows)),
+};
+
+const Words = struct {
+    small: [5][21]u21,
+    large: [10][42]u21,
+};
+
+fn decode(
+    comptime rows: usize,
+    comptime width: usize,
+    comptime lines: [rows][]const u8,
+) [rows][width]u21 {
+    @setEvalBranchQuota(4000);
+    var out: [rows][width]u21 = @splat(@splat(' '));
+    for (lines, 0..) |line, y| {
+        var index: usize = 0;
+        var cell: usize = 0;
+        while (index < line.len and cell < width) {
+            const length = std.unicode.utf8ByteSequenceLength(line[index]) catch 1;
+            const stop = @min(line.len, index + length);
+            out[y][cell] = std.unicode.utf8Decode(line[index..stop]) catch ' ';
+            index = stop;
+            cell += 1;
+        }
+    }
+    return out;
+}
+
+fn doubled(
+    comptime rows: usize,
+    comptime width: usize,
+    comptime grid: [rows][width]u21,
+) [rows * 2][width * 2]u21 {
+    @setEvalBranchQuota(8000);
+    var out: [rows * 2][width * 2]u21 = @splat(@splat(' '));
+    for (grid, 0..) |line, y| {
+        for (line, 0..) |cell, x| {
+            out[y * 2][x * 2] = cell;
+            out[y * 2][x * 2 + 1] = cell;
+            out[y * 2 + 1][x * 2] = cell;
+            out[y * 2 + 1][x * 2 + 1] = cell;
+        }
+    }
+    return out;
+}
 
 /// Ticks a wave of light takes to cross the wordmark. The loop wakes ten times
 /// a second, so one crossing lasts about three seconds: slow enough to read as
@@ -255,20 +308,25 @@ fn pulse_style(theme: *const Theme, shade: u8) Style {
 /// Draws the wordmark, one row at a time, shading each column by where the
 /// light has reached it.
 fn draw_wordmark(out: *Screen, top: u16, tick: u16, theme: *const Theme) void {
-    const width = screen.text_columns(wordmark[0]);
+    // The big one where there is room for it: an 80-column terminal gets the
+    // masthead at twice the size, a narrow one keeps the small mark rather than
+    // a cropped one.
+    if (out.columns >= wordmark.large[0].len + 6 and out.rows >= 18) {
+        return draw_grid(out, &wordmark.large, top, tick, theme);
+    }
+    draw_grid(out, &wordmark.small, top, tick, theme);
+}
+
+fn draw_grid(out: *Screen, grid: anytype, top: u16, tick: u16, theme: *const Theme) void {
+    const width: u16 = @intCast(grid[0].len);
     const left = (out.columns -| width) / 2;
 
-    for (wordmark, 0..) |line, index| {
+    for (grid, 0..) |line, index| {
         const row = top +| @as(u16, @intCast(index));
         if (row >= out.rows) return;
-
-        // Codepoints, not bytes: a block glyph is three bytes and one cell, and
-        // treating it as three cells smears the wordmark into noise.
-        var view = std.unicode.Utf8View.initUnchecked(line).iterator();
-        var column: u16 = 0;
-        while (view.nextCodepoint()) |codepoint| : (column += 1) {
-            if (codepoint == ' ') continue;
-            out.put(left +| column, row, codepoint, pulse_style(theme, pulse_shade(tick, column, width)));
+        for (line, 0..) |cell, column| {
+            if (cell == ' ') continue;
+            out.put(left +| @as(u16, @intCast(column)), row, cell, pulse_style(theme, pulse_shade(tick, @intCast(column), width)));
         }
     }
 }
@@ -283,13 +341,19 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     const middle = out.rows / 2;
     const tick: u16 = if (inputs.reduced_motion) 0 else @intCast(inputs.state.spinner);
 
-    draw_wordmark(out, middle -| 4, tick, theme);
+    // The mark and the two lines under it are one block: place the block on the
+    // middle of the screen, not the mark alone, or the big size drags it up.
+    const big = out.columns >= wordmark.large[0].len + 6 and out.rows >= 18;
+    const mark_rows: u16 = if (big) wordmark.large.len else wordmark.small.len;
+    const mark_top = middle -| (mark_rows / 2) -| 2;
+    draw_wordmark(out, mark_top, tick, theme);
 
     var label_buffer: [96]u8 = undefined;
     const labels = account_labels(inputs.state, &label_buffer);
-    const status_text = put_centered_marked(out, middle +| 3, inputs.state, theme, labels);
+    const status_row = mark_top +| mark_rows +| 2;
+    const status_text = put_centered_marked(out, status_row, theme, labels);
 
-    const address_row = middle +| 4;
+    const address_row = status_row +| 1;
     const footer_row = out.rows -| 1;
     if (inputs.state.accounts.len == 1 and address_row < footer_row) {
         var address_buffer: [core.limits.address_max]u8 = undefined;
@@ -312,7 +376,7 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
 /// `connecting to <labels>`, centred, the words quiet and the account named in
 /// its own hue. Returns the column where the words start, so the address can
 /// line up under them.
-fn put_centered_marked(out: *Screen, row: u16, state: *const State, theme: *const Theme, labels: []const u8) u16 {
+fn put_centered_marked(out: *Screen, row: u16, theme: *const Theme, labels: []const u8) u16 {
     var line_buffer: [160]u8 = undefined;
     const line = std.fmt.bufPrint(&line_buffer, "connecting to {s}", .{labels}) catch return 0;
 
@@ -320,15 +384,10 @@ fn put_centered_marked(out: *Screen, row: u16, state: *const State, theme: *cons
     const start = (out.columns -| width) / 2;
     _ = out.put_text(start, row, line[0.."connecting to ".len], out.columns -| start, theme.dim);
 
-    // The account being connected owns the hue, the way its rows do in the
-    // list: the splash and the mailbox agree about who is who.
-    const hue_index: usize = if (state.account_filter) |id| (state.accounts.index_of(id) orelse 0) else 0;
+    // One colour on this screen, the way the mark above it is one colour: the
+    // splash is a moment, not the mailbox, and a second hue would make it busy.
     const labels_x = start +| @as(u16, "connecting to ".len);
-    const hue: Style = if (theme.colored)
-        (Style{}).with_fg(theme.account_colors[@min(hue_index, theme.account_colors.len - 1)]).with_bold()
-    else
-        theme.accent.with_bold();
-    _ = out.put_text(labels_x, row, labels, out.columns -| labels_x, hue);
+    _ = out.put_text(labels_x, row, labels, out.columns -| labels_x, theme.accent.with_bold());
     return start;
 }
 
@@ -1771,11 +1830,11 @@ test "the boot splash is a wordmark, the account, and a footer" {
 
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
-    // middle = 12: wordmark on 8..12, status on 15, address on 16, footer on 23.
-    try row_contains(&out, 8, "█████ █   █  ███");
-    try row_contains(&out, 12, "█████ █   █  ███");
-    try row_contains(&out, 15, "connecting to work");
-    try row_contains(&out, 16, "alice@example.com");
+    // middle = 12: the big mark on 5..14, status on 15, address on 16, footer 23.
+    try row_contains(&out, 5, "██████████  ██      ██");
+    try row_contains(&out, 14, "██████████  ██      ██");
+    try row_contains(&out, 17, "connecting to work");
+    try row_contains(&out, 18, "alice@example.com");
     var footer_buffer: [512]u8 = undefined;
     const footer = std.mem.trim(u8, out.row_text(23, &footer_buffer), " ");
     try testing.expect(startsWith(footer, "cached mail opens instantly"));
@@ -1799,7 +1858,7 @@ test "the light moves across the wordmark while its shape stays put" {
     frame(f.inputs(80, 24), &after);
 
     var moved = false;
-    for (8..13) |y| {
+    for (5..15) |y| {
         for (0..80) |x| {
             // The letters never change, only how lit they are.
             try testing.expectEqual(before.cells[y][x].ch, after.cells[y][x].ch);
@@ -1858,9 +1917,9 @@ test "the splash names the account in scope, not every account" {
 
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
-    try row_contains(&out, 15, "connecting to work");
+    try row_contains(&out, 17, "connecting to work");
     var row_buffer: [512]u8 = undefined;
-    try testing.expect(std.mem.indexOf(u8, out.row_text(15, &row_buffer), "home") == null);
+    try testing.expect(std.mem.indexOf(u8, out.row_text(17, &row_buffer), "home") == null);
 }
 
 test "the splash breathes without color when color is off" {
@@ -1885,7 +1944,7 @@ test "the splash breathes without color when color is off" {
     f.state.spinner = 0;
     frame(f.inputs(80, 24), &other);
     var moved = false;
-    for (8..13) |y| {
+    for (5..15) |y| {
         for (0..80) |x| {
             if (!out.cells[y][x].style.eql(other.cells[y][x].style)) moved = true;
         }

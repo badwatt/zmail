@@ -139,6 +139,79 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
     try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
 }
 
+test "a live session with a dead server still quits cleanly" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A config with one account whose server refuses the connection: the list
+    // comes up with a failure on the status line, and quitting must give the
+    // terminal back instead of aborting somewhere in teardown.
+    const config_path = "/tmp/zmail-e2e-live.conf";
+    const config_text =
+        "address = alice@example.com\n" ++
+        "username = alice\n" ++
+        "imap_host = 127.0.0.1\n" ++
+        "imap_port = 9\n" ++
+        "imap_security = tls\n";
+    {
+        const file = try std.Io.Dir.cwd().createFile(io, config_path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, config_text);
+    }
+    defer std.Io.Dir.cwd().deleteFile(io, config_path) catch {};
+
+    const terminal = try open_pty();
+    defer _ = std.c.close(terminal.master);
+    defer _ = std.c.close(terminal.slave);
+
+    const slave_file: std.Io.File = .{ .handle = terminal.slave, .flags = .{ .nonblocking = false } };
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ exe_path, "--config", config_path },
+        .stdin = .{ .file = slave_file },
+        .stdout = .{ .file = slave_file },
+        .stderr = .{ .file = slave_file },
+    });
+
+    var fds = [1]std.posix.pollfd{
+        .{ .fd = terminal.master, .events = std.posix.POLL.IN, .revents = 0 },
+    };
+    var frame: [65536]u8 = undefined;
+    var total: usize = 0;
+    var attempts: u32 = 0;
+    // The list, after the failed connection: the point at which the old code
+    // read an uninitialised outbox on the way out.
+    while (attempts < 60 and total < frame.len) : (attempts += 1) {
+        const ready = try std.posix.poll(&fds, 200);
+        if (ready == 0) continue;
+        const count = std.posix.read(terminal.master, frame[total..]) catch 0;
+        if (count == 0) break;
+        total += count;
+        if (std.mem.indexOf(u8, frame[0..total], "Inbox") != null) break;
+    }
+    if (total == 0) {
+        child.kill(io);
+        return error.TestExpectedFrame;
+    }
+
+    const written = std.c.write(terminal.master, "q", 1);
+    try testing.expectEqual(@as(isize, 1), written);
+    // A dead server is reported, so the exit code is 1 -- but the exit is an
+    // exit, and the terminal is handed back (the alternate screen is left).
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, try child.wait(io));
+
+    var rest: [4096]u8 = undefined;
+    var seen: usize = 0;
+    while (seen < rest.len) {
+        const count = std.posix.read(terminal.master, rest[seen..]) catch 0;
+        if (count == 0) break;
+        seen += count;
+    }
+    const all = std.mem.concat(testing.allocator, u8, &.{ frame[0..total], rest[0..seen] }) catch return;
+    defer testing.allocator.free(all);
+    try testing.expect(std.mem.indexOf(u8, all, "\x1b[?1049l") != null);
+}
+
 test "the product name and version come from the same source of truth" {
     try testing.expect(meta.name.len > 0);
     var expected: [32]u8 = undefined;

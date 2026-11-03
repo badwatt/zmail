@@ -90,6 +90,13 @@ pub const Posix = struct {
         return .{ .columns = window.col, .rows = window.row };
     }
 
+    /// Puts the terminal back the way it was found, from anywhere: the sequence
+    /// a signal handler has to be able to run.
+    pub fn restoreNow(self: *Posix) void {
+        writeThunk(self, leave_screen) catch {};
+        leaveRawThunk(self) catch {};
+    }
+
     /// Leave the alternate screen and cooked mode: what a browser flow needs.
     fn suspendThunk(context: *anyopaque) system_mod.Error!void {
         const self: *Posix = @ptrCast(@alignCast(context));
@@ -118,7 +125,10 @@ pub const Posix = struct {
         raw.cflag.PARENB = false;
         raw.lflag.ICANON = false;
         raw.lflag.ECHO = false;
-        raw.lflag.ISIG = false;
+        // Signals stay on: Ctrl+C has to be able to reach the process while it
+        // is blocked on a socket, and a signal is the only thing that can. The
+        // handler (launch.zig) puts the terminal back and leaves.
+        raw.lflag.ISIG = true;
         raw.lflag.IEXTEN = false;
         raw.cc[@backingInt(std.posix.V.MIN)] = 0;
         raw.cc[@backingInt(std.posix.V.TIME)] = 0;
@@ -400,11 +410,33 @@ test "raw mode disables echo and canonical input, and restores them" {
     try testing.expect(!during.lflag.ICANON);
     try testing.expect(!during.lflag.ECHO);
     try testing.expect(!during.oflag.OPOST);
+    // Signals stay on: Ctrl+C has to reach the process while it is blocked.
+    try testing.expect(during.lflag.ISIG);
 
     try system.leave_raw();
     const after = try std.posix.tcgetattr(pty.slave);
     try testing.expect(after.lflag.ICANON);
     try testing.expect(after.lflag.ECHO);
+}
+
+test "restoreNow gives the terminal back in one call, from anywhere" {
+    const pty = try Pty.open();
+    defer pty.close();
+    var posix = Posix.init(pty.slave, pty.slave);
+    try posix.system().enter_raw();
+    try testing.expect(posix.raw_enabled);
+
+    posix.restoreNow();
+    try testing.expect(!posix.raw_enabled);
+
+    const after = try std.posix.tcgetattr(pty.slave);
+    try testing.expect(after.lflag.ICANON);
+    try testing.expect(after.lflag.ECHO);
+
+    // And the alternate screen is left, so the shell comes back to its own.
+    var buffer: [128]u8 = undefined;
+    const count = pty.readMaster(&buffer);
+    try testing.expect(std.mem.indexOf(u8, buffer[0..count], "\x1b[?1049l") != null);
 }
 
 test "leaving raw mode without entering it is a no-op" {
