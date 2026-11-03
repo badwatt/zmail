@@ -1940,6 +1940,30 @@ test "the splash names the account in scope, not every account" {
     try testing.expect(std.mem.indexOf(u8, out.row_text(17, &row_buffer), "home") == null);
 }
 
+test "the wordmark is lit by the derived theme, not by a fixed palette" {
+    var f = try fixture();
+    defer f.deinit();
+    f.theme = theme_mod.Theme.from_background(.{ .r = 25, .g = 25, .b = 37 });
+    f.state.booting = true;
+
+    var out = Screen.init(80, 24);
+    frame(f.inputs(80, 24), &out);
+
+    var lit: u32 = 0;
+    for (5..15) |y| {
+        for (0..80) |x| {
+            switch (out.cells[y][x].style.fg) {
+                .rgb => lit += 1,
+                // A 256-colour index here would mean the first screen kept its
+                // own palette while the rest of the app followed the terminal.
+                .ansi256 => return error.TestUnexpectedColour,
+                .default => {},
+            }
+        }
+    }
+    try testing.expect(lit > 0);
+}
+
 test "the splash breathes without color when color is off" {
     var f = try fixture();
     defer f.deinit();

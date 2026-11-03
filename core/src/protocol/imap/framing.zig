@@ -12,12 +12,10 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 /// A whole response must fit in one buffer, and a message body arrives as one
-/// response. The bound has to hold real mail from a web client (a few hundred
-/// KiB with inline images) rather than the text a decade ago; a response larger
-/// than this is still refused, and the fix for that is to stream it rather than
-/// to grow the buffer again.
-/// Room for the marker line and the closing parenthesis on top of the prefix
-/// the client asks for, so a full-size body still frames.
+/// response. The client asks for a body prefix (`BODY.PEEK[]<0.N>`) of the size
+/// of its buffer, so this is that prefix plus room for the marker line around
+/// it: a message with a scanned certificate is a megabyte, and its text is at the
+/// front.
 pub const max_response: u32 = 512 * 1024 + 1024;
 
 pub const Error = error{
@@ -56,41 +54,11 @@ pub const Framer = struct {
     /// Stable copy of the response being returned, so shifting `pending` does
     /// not invalidate the slice the caller is parsing.
     response: [max_response]u8 = undefined,
-    /// Literal bytes of the current response still to come, and how many of
-    /// them fit. A 4 MiB message is not a reason to show nothing: the part that
-    /// fits is kept, the rest is skipped as it arrives, and the connection
-    /// stays in step with the server.
-    literal_left: u32 = 0,
-    keep_left: u32 = 0,
-    /// Room left in `pending` for the closing `)` and the CRLF once the kept
-    /// prefix of a truncated literal is in place.
-    const tail_room: u32 = 16;
 
     pub fn push(self: *Framer, bytes: []const u8) Error!void {
-        var rest = bytes;
-
-        // Inside a literal that is being cut short: store what still fits, then
-        // throw away the rest without ever holding it.
-        while (rest.len > 0 and self.literal_left > 0) {
-            if (self.keep_left > 0) {
-                const store = @min(self.keep_left, @as(u32, @intCast(rest.len)));
-                if (store > self.pending.len - self.pending_len) return error.ResponseTooLong;
-                @memcpy(self.pending[self.pending_len..][0..store], rest[0..store]);
-                self.pending_len += store;
-                self.keep_left -= store;
-                self.literal_left -= store;
-                rest = rest[store..];
-                continue;
-            }
-            const skip = @min(self.literal_left, @as(u32, @intCast(rest.len)));
-            self.literal_left -= skip;
-            rest = rest[skip..];
-        }
-
-        if (rest.len == 0) return;
-        if (rest.len > self.pending.len - self.pending_len) return error.ResponseTooLong;
-        @memcpy(self.pending[self.pending_len..][0..rest.len], rest);
-        self.pending_len += @intCast(rest.len);
+        if (bytes.len > self.pending.len - self.pending_len) return error.ResponseTooLong;
+        @memcpy(self.pending[self.pending_len..][0..bytes.len], bytes);
+        self.pending_len += @intCast(bytes.len);
     }
 
     /// Pops one complete response, CRLF included. The returned slice is valid
@@ -104,56 +72,14 @@ pub const Framer = struct {
             const literal_size = trailing_literal_size(line) orelse {
                 return self.take(line_end + 2);
             };
+            if (literal_size > max_response) return error.InvalidLiteral;
 
             const payload_start = line_end + 2;
-            if (literal_size > self.pending.len - payload_start - tail_room) {
-                // Too big to keep. Announce how much of it we did keep, throw
-                // the rest away as it arrives, and let the response end
-                // normally: a body that is cut short is readable, a fetch that
-                // fails is not.
-                const keep: u32 = @intCast(self.pending.len - payload_start - tail_room);
-                // Whatever already arrived is part of that keep: only the rest
-                // of it still has to be stored.
-                const arrived = @min(keep, self.pending_len - payload_start);
-                self.rewrite_literal_size(line_end, keep);
-                self.literal_left = literal_size - arrived;
-                self.keep_left = keep - arrived;
-                search_start = payload_start + keep;
-                continue;
-            }
-
             if (literal_size > self.pending_len - payload_start) return null;
 
             // The response continues after the literal; look for its CRLF.
             search_start = payload_start + literal_size;
         }
-    }
-
-    /// Rewrites `{n}` at the end of the line as `{keep}`, padded to the same
-    /// width with leading zeros so the marker keeps its place in the buffer and
-    /// the reader still sees one well-formed literal.
-    fn rewrite_literal_size(self: *Framer, line_end: u32, keep: u32) void {
-        var close = line_end - 1;
-        if (self.pending[close] != '}') return;
-        close -= 1;
-        if (self.pending[close] == '+') close -= 1;
-
-        var open = close;
-        while (open > 0) : (open -= 1) {
-            if (self.pending[open - 1] == '{') break;
-        }
-        const digits = close - open;
-        if (digits == 0) return;
-
-        var formatted: [10]u8 = undefined;
-        const text = std.fmt.bufPrint(&formatted, "{d}", .{keep}) catch return;
-        if (text.len > digits) return;
-
-        // Leading zeros: `{000131072}` parses as 131072 and keeps the width.
-        const padding = digits - text.len;
-        var index: u32 = 0;
-        while (index < padding) : (index += 1) self.pending[open + index] = '0';
-        @memcpy(self.pending[open + padding ..][0..text.len], text);
     }
 
     fn take(self: *Framer, response_len: u32) []const u8 {
@@ -258,9 +184,12 @@ test "a full buffer that still needs bytes is an error" {
     try testing.expectError(error.ResponseTooLong, framer.push("x"));
 }
 
-test "the bound holds the mail a web client sends" {
-    // A newsletter with inline images: markup plus base64, not a 2 KiB note.
-    try testing.expect(max_response >= 512 * 1024);
+test "a literal larger than the buffer is an error" {
+    var framer: Framer = .{};
+    var line_buffer: [64]u8 = undefined;
+    const line = try std.fmt.bufPrint(&line_buffer, "* 1 FETCH (BODY[] {{{d}}}\r\n", .{max_response + 1});
+    try framer.push(line);
+    try testing.expectError(error.InvalidLiteral, framer.next());
 }
 
 test "a brace group that is not a literal is part of the line" {
