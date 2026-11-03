@@ -97,6 +97,65 @@ fn decode_word(input: []const u8, start: usize) ?usize {
     return 2 + charset_end + 1 + 2 + text_end + 2;
 }
 
+/// Source bytes one encoded word carries. Base64 turns 45 bytes into 60
+/// characters, and `=?UTF-8?B?` plus `?=` add 12: 72 characters, under the 75
+/// that RFC 2047 §2 allows. Longer values are split, because one huge word is
+/// what a mail server drops.
+pub const encode_chunk_max: usize = 45;
+
+/// Bytes `encode_header_value` may write for an input of `len` bytes: every
+/// chunk becomes a 72-byte word, plus the space that separates it from the next.
+pub fn encoded_bound(len: usize) usize {
+    const chunks = len / encode_chunk_max + 1;
+    return chunks * (encode_chunk_max / 3 * 4 + 12 + 1);
+}
+
+/// RFC 2047 encoding for a header value: a subject, a display name.
+///
+/// ASCII comes back verbatim: an encoded word only earns its decoding cost
+/// when the value needs one. Anything else becomes `=?UTF-8?B?…?=` words,
+/// split on UTF-8 boundaries and separated by a space, which the standard says
+/// a decoder drops. The result decodes back to exactly `value`.
+///
+/// Returns an empty slice when `out` cannot hold the whole value: half an
+/// encoded word decodes to garbage, so refusing the header is the honest
+/// answer.
+pub fn encode_header_value(value: []const u8, out: []u8) []const u8 {
+    var needs_encoding = false;
+    for (value) |byte| {
+        if (byte >= 0x80) {
+            needs_encoding = true;
+            break;
+        }
+    }
+
+    if (!needs_encoding) {
+        if (value.len > out.len) return "";
+        @memcpy(out[0..value.len], value);
+        return out[0..value.len];
+    }
+
+    var writer = std.Io.Writer.fixed(out);
+    var index: usize = 0;
+    while (index < value.len) {
+        var end = @min(index + encode_chunk_max, value.len);
+        // A word is decoded on its own, so it must end on a codepoint boundary:
+        // half a sequence would decode to a replacement character.
+        while (end > index and end < value.len and value[end] & 0b1100_0000 == 0b1000_0000) end -= 1;
+
+        if (index != 0) writer.writeAll(" ") catch return "";
+        writer.writeAll("=?UTF-8?B?") catch return "";
+
+        var scratch: [encode_chunk_max / 3 * 4 + 4]u8 = undefined;
+        const encoded = std.base64.standard.Encoder.encode(&scratch, value[index..end]);
+        writer.writeAll(encoded) catch return "";
+        writer.writeAll("?=") catch return "";
+
+        index = end;
+    }
+    return writer.buffered();
+}
+
 /// Writes one encoded word, converting its charset to UTF-8.
 fn write_word(word: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     const rest = word[2..];
@@ -863,6 +922,70 @@ test "to_display: UTF-8 is kept, 8-bit headers are read as Windows-1252" {
     try testing.expectEqualStrings("\u{201C}hi\u{201D}", to_display("\x93hi\x94", &out));
     // Control bytes stay out of the list.
     try testing.expectEqualStrings("a b", to_display("a\x01b", &out));
+}
+
+test "encode_header_value: plain ASCII is left alone" {
+    var out: [64]u8 = undefined;
+    try testing.expectEqualStrings("Re: design tokens", encode_header_value("Re: design tokens", &out));
+    try testing.expectEqualStrings("", encode_header_value("", &out));
+}
+
+test "encode_header_value: non-ASCII becomes one encoded word that decodes back" {
+    var encoded: [128]u8 = undefined;
+    const word = encode_header_value("Re: café", &encoded);
+    try testing.expectEqualStrings("=?UTF-8?B?UmU6IGNhZsOp?=", word);
+
+    var decoded: [64]u8 = undefined;
+    try testing.expectEqualStrings("Re: café", decode_encoded_words(word, &decoded));
+}
+
+test "encode_header_value: a long value is split into words under 75 bytes" {
+    // 50 "é" is 100 bytes: three words, each a whole number of codepoints, so
+    // no word can end inside a sequence.
+    const value: [100]u8 = comptime blk: {
+        var bytes: [100]u8 = undefined;
+        for (0..50) |index| {
+            bytes[index * 2] = 0xc3;
+            bytes[index * 2 + 1] = 0xa9;
+        }
+        break :blk bytes;
+    };
+    var encoded: [256]u8 = undefined;
+    const words = encode_header_value(&value, &encoded);
+
+    var count: u32 = 0;
+    var index: usize = 0;
+    while (index < words.len) : (count += 1) {
+        const end = std.mem.indexOfScalarPos(u8, words, index, ' ') orelse words.len;
+        const word = words[index..end];
+        try testing.expect(word.len <= 75);
+        index = end + 1;
+    }
+    try testing.expectEqual(@as(u32, 3), count);
+
+    var decoded: [128]u8 = undefined;
+    try testing.expectEqualStrings(&value, decode_encoded_words(words, &decoded));
+}
+
+test "encode_header_value: a buffer that cannot hold the value returns empty" {
+    var small: [8]u8 = undefined;
+    try testing.expectEqualStrings("", encode_header_value("café", &small));
+    try testing.expectEqualStrings("", encode_header_value("too long for this buffer", &small));
+}
+
+test "encoded_bound is enough for a value at the subject limit" {
+    const value: [160]u8 = comptime blk: {
+        var bytes: [160]u8 = undefined;
+        for (0..80) |index| {
+            bytes[index * 2] = 0xc3;
+            bytes[index * 2 + 1] = 0xbc;
+        }
+        break :blk bytes;
+    }; // 80 "ü", 160 bytes: the largest subject the client keeps
+    var buffer: [encoded_bound(value.len)]u8 = undefined;
+    const encoded = encode_header_value(&value, &buffer);
+    try testing.expect(encoded.len > value.len);
+    try testing.expectEqualStrings("?=", encoded[encoded.len - 2 ..]);
 }
 
 test "encoded words: bare CRLF is dropped" {

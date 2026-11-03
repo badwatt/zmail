@@ -3,6 +3,8 @@
 const std = @import("std");
 const Outgoing = @import("../../domain/outgoing.zig").Outgoing;
 const Address = @import("../../domain/address.zig").Address;
+const mime = @import("../../mime.zig");
+const limits = @import("../../limits.zig");
 
 pub const Error = error{
     NoSpaceLeft,
@@ -112,13 +114,29 @@ pub fn quit(buffer: []u8) Error![]const u8 {
 
 /// Headers only; the body is streamed separately so it never needs a copy.
 pub fn write_headers(writer: *std.Io.Writer, message: *const Outgoing, date: []const u8) error{WriteFailed}!void {
+    var name_scratch: [mime.encoded_bound(limits.name_max)]u8 = undefined;
+    var subject_scratch: [mime.encoded_bound(limits.subject_max)]u8 = undefined;
+
     try writer.writeAll("From: ");
-    try message.from.format(writer);
+    try write_address(writer, &message.from, &name_scratch);
     try writer.writeAll("\r\nTo: ");
-    try message.to.format(writer);
-    try writer.print("\r\nSubject: {s}\r\nDate: {s}\r\n", .{ message.subject.slice(), date });
+    try write_address(writer, &message.to, &name_scratch);
+    const subject = mime.encode_header_value(message.subject.slice(), &subject_scratch);
+    try writer.print("\r\nSubject: {s}\r\nDate: {s}\r\n", .{ subject, date });
     try writer.writeAll("MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n");
     try writer.writeAll("Content-Transfer-Encoding: 8bit\r\n\r\n");
+}
+
+/// `Name <local@domain>`, with the name RFC 2047 encoded when it has to be.
+/// The angle-addr is never encoded: a server that cannot read it rejects the
+/// mail, and a person reading the raw headers would not recognise it.
+fn write_address(writer: *std.Io.Writer, address: *const Address, scratch: []u8) error{WriteFailed}!void {
+    if (address.name.is_empty()) {
+        try writer.print("{s}@{s}", .{ address.local.slice(), address.domain.slice() });
+        return;
+    }
+    const name = mime.encode_header_value(address.name.slice(), scratch);
+    try writer.print("{s} <{s}@{s}>", .{ name, address.local.slice(), address.domain.slice() });
 }
 
 fn valid_domain(domain: []const u8) bool {
@@ -192,6 +210,47 @@ test "DATA and QUIT are plain lines" {
 test "a buffer too small fails instead of truncating a command" {
     var buffer: [8]u8 = undefined;
     try testing.expectError(error.NoSpaceLeft, ehlo(&buffer, "mail.example.com"));
+}
+
+test "headers encode a non-ASCII subject and display name" {
+    var outgoing = Outgoing{
+        .from = Address.from_parts("Álvaro Núñez", "alvaro", "example.com"),
+        .to = try Address.init("alice@example.com"),
+    };
+    outgoing.subject.set("Re: café ☕");
+
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try write_headers(&writer, &outgoing, "Tue, 14 Nov 2023 22:13:20 +0000");
+    const headers = writer.buffered();
+
+    var decoded: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "Re: café ☕",
+        mime.decode_encoded_words(header_line(headers, "Subject"), &decoded),
+    );
+
+    // The name is encoded, the angle-addr stays readable to every server.
+    const from = header_line(headers, "From");
+    const bracket = std.mem.indexOfScalar(u8, from, '<').?;
+    try testing.expectEqualStrings(
+        "Álvaro Núñez ",
+        mime.decode_encoded_words(from[0..bracket], &decoded),
+    );
+    try testing.expectEqualStrings("<alvaro@example.com>", from[bracket..]);
+
+    // ASCII stays as it is: an encoded word there is noise nobody needs.
+    try testing.expectEqualStrings("alice@example.com", header_line(headers, "To"));
+}
+
+/// The value of one header, up to the CRLF, from a rendered header block.
+fn header_line(headers: []const u8, name: []const u8) []const u8 {
+    var buffer: [32]u8 = undefined;
+    const prefix = std.fmt.bufPrint(&buffer, "{s}: ", .{name}) catch return "";
+    const start = std.mem.indexOf(u8, headers, prefix) orelse return "";
+    const value = start + prefix.len;
+    const end = std.mem.indexOf(u8, headers[value..], "\r\n") orelse return headers[value..];
+    return headers[value..][0..end];
 }
 
 test "headers carry from, to, subject, date, and MIME" {
