@@ -1039,11 +1039,6 @@ pub const Session = struct {
             // the UI; everything else waits for the worker.
             switch (effect) {
                 .refresh => {},
-                .edit_body => {
-                    // No spinner: the terminal is handed over to another program.
-                    self.edit_body(effect.edit_body.initial);
-                    continue;
-                },
                 .fetch_body => |args| {
                     if (self.refreshing) {
                         self.pending_body = .{
@@ -1070,7 +1065,7 @@ pub const Session = struct {
                 .oauth_account => |args| self.oauth_account(args.account),
                 .refresh => self.start_refresh(),
                 .send => |outgoing| self.send(&outgoing),
-                .edit_body => unreachable, // handled before the loading wrapper
+                .edit_body => |request| self.edit_body(request.initial),
             }
             self.end_loading(timer);
         }
@@ -2313,6 +2308,23 @@ test "ctrl+e puts the body in the editor and takes it back" {
     try testing.expectEqualStrings("hello", editor.seen_text());
     try testing.expectEqualStrings("written\nelsewhere", rig.session.state.compose.body_slice());
     try testing.expectEqual(core.state.View.compose, rig.session.state.view);
+}
+
+test "an editor that answers nothing keeps the draft and says why" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+
+    var editor = FakeEditor{}; // no text: the editor failed, or exited empty
+    rig.session.deps.edit_text = FakeEditor.edit;
+    rig.session.deps.edit_text_context = &editor;
+
+    rig.send("c");
+    rig.send("\t\thello");
+    rig.send("\x05");
+
+    try testing.expectEqualStrings("hello", rig.session.state.compose.body_slice());
+    try testing.expect(rig.session.state.status_alert);
 }
 
 test "an editor that cannot start keeps the draft and says why" {

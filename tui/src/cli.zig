@@ -122,6 +122,7 @@ pub fn parse(args: []const []const u8) Action {
 /// no positionals: a script that mistypes a flag gets an error, not a message
 /// with the wrong recipient.
 fn parse_send(args: []const []const u8) Action {
+    const Flag = enum { to, subject, body, from };
     const names = [_][]const u8{ "--to", "--subject", "--body", "--from" };
     var seen: [names.len]bool = @splat(false);
     var send = Send{};
@@ -150,18 +151,17 @@ fn parse_send(args: []const []const u8) Action {
             }
             if (value.len == 0) return .{ .usage_error = .{ .missing_value = name } };
 
-            switch (slot) {
-                0 => send.to = value,
-                1 => send.subject = value,
-                2 => {
+            switch (@as(Flag, @fromBackingInt(@intCast(slot)))) {
+                .to => send.to = value,
+                .subject => send.subject = value,
+                .body => {
                     if (std.mem.eql(u8, value, "-")) {
                         send.body_from_stdin = true;
                     } else {
                         send.body = value;
                     }
                 },
-                3 => send.from = value,
-                else => unreachable,
+                .from => send.from = value,
             }
             matched = true;
             break;
