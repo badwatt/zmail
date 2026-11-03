@@ -16,7 +16,9 @@ const assert = std.debug.assert;
 /// KiB with inline images) rather than the text a decade ago; a response larger
 /// than this is still refused, and the fix for that is to stream it rather than
 /// to grow the buffer again.
-pub const max_response: u32 = 512 * 1024;
+/// Room for the marker line and the closing parenthesis on top of the prefix
+/// the client asks for, so a full-size body still frames.
+pub const max_response: u32 = 512 * 1024 + 1024;
 
 pub const Error = error{
     ResponseTooLong,

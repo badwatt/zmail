@@ -148,12 +148,20 @@ pub fn fetch_envelopes(buffer: []u8, tag: []const u8, first_sequence: u32, last_
     return render.finish();
 }
 
-pub fn fetch_body(buffer: []u8, tag: []const u8, uid: u32) Error![]const u8 {
+/// `BODY.PEEK[]<0.limit>`: the first `limit` bytes of the message, not all of
+/// it. A certificate as a PDF attachment turns a two-paragraph mail into a
+/// megabyte of base64, and the text of a message is at the front of it. Asking
+/// the server for a prefix is what keeps a real mailbox openable, and it is the
+/// same thing mutt and friends do.
+pub fn fetch_body(buffer: []u8, tag: []const u8, uid: u32, limit: u32) Error![]const u8 {
     if (uid == 0) return error.InvalidNumber;
+    if (limit == 0) return error.InvalidNumber;
 
     var render = Render.begin(buffer, tag, "UID FETCH ");
     render.number(uid);
-    render.text(" (BODY.PEEK[])");
+    render.text(" (BODY.PEEK[]<0.");
+    render.number(limit);
+    render.text(">)");
     return render.finish();
 }
 
@@ -274,12 +282,13 @@ test "fetch_envelopes rejects impossible ranges" {
 
 test "fetch_body uses UID and peeks so it does not mark the message read" {
     var buffer: [128]u8 = undefined;
-    try expect_command("a4 UID FETCH 42 (BODY.PEEK[])\r\n", fetch_body(&buffer, "a4", 42));
+    try expect_command("a4 UID FETCH 42 (BODY.PEEK[]<0.4096>)\r\n", fetch_body(&buffer, "a4", 42, 4096));
 }
 
 test "fetch_body rejects uid zero" {
     var buffer: [128]u8 = undefined;
-    try testing.expectError(error.InvalidNumber, fetch_body(&buffer, "a4", 0));
+    try testing.expectError(error.InvalidNumber, fetch_body(&buffer, "a4", 0, 4096));
+    try testing.expectError(error.InvalidNumber, fetch_body(&buffer, "a4", 1, 0));
 }
 
 test "store_flags writes the whole set: seen and flagged" {

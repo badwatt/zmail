@@ -193,7 +193,10 @@ pub const Client = struct {
     pub fn fetch_body(self: *Client, uid: u32, out: []u8) Error![]const u8 {
         var tag_buffer: [16]u8 = undefined;
         const tag = self.beginCommand(&tag_buffer);
-        const bytes = command.fetch_body(self.command_slice(), tag, uid) catch
+        // Ask for exactly what fits: a partial fetch keeps a 4 MiB message from
+        // being a message nobody can open.
+        const limit = std.math.cast(u32, out.len) orelse std.math.maxInt(u32);
+        const bytes = command.fetch_body(self.command_slice(), tag, uid, limit) catch
             return error.ProtocolError;
         try self.send(bytes);
 
@@ -588,7 +591,9 @@ test "fetch_body copies the literal into the caller's buffer" {
     var body: [64]u8 = undefined;
     const text = try client.fetch_body(7, &body);
     try testing.expectEqualStrings("hello world", text);
-    try testing.expectEqualStrings("a1 UID FETCH 7 (BODY.PEEK[])\r\n", scripted.output_text());
+    // Exactly what the caller can hold: a message with a scanned certificate
+    // is a megabyte, and its text is at the front.
+    try testing.expectEqualStrings("a1 UID FETCH 7 (BODY.PEEK[]<0.64>)\r\n", scripted.output_text());
 }
 
 test "fetch_body truncates a body larger than the buffer" {
