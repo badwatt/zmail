@@ -923,6 +923,7 @@ pub const Session = struct {
     fn apply(self: *Session, command: core.command.Command) bool {
         const effects = core.update.apply(&self.state, &self.store, command);
         self.run_effects(effects.slice());
+        self.quote_original(command);
         self.repaint();
         // A scope is a preference, however it was changed: the picker or the
         // `a` key both end up here, and the next start opens where this one is.
@@ -931,6 +932,23 @@ pub const Session = struct {
             else => {},
         }
         return true;
+    }
+
+    /// A reply that starts while the original is loaded gets it quoted below
+    /// the draft. What quoting means is `update`'s rule; this only knows which
+    /// buffer still holds the text.
+    fn quote_original(self: *Session, command: core.command.Command) void {
+        if (command != .compose_reply) return;
+        if (self.state.opened != self.state.compose.in_reply_to) return;
+
+        const text = self.reader_text();
+        if (text.len == 0) return;
+
+        _ = self.apply(.{ .compose_quote = .{
+            .text = text,
+            .from = self.state.opened_from,
+            .at = self.state.opened_time,
+        } });
     }
 
     fn remember_scope(self: *Session) void {
@@ -2197,6 +2215,30 @@ const RecordingOutbox = struct {
         self.sent += 1;
     }
 };
+
+test "a reply opened from the reader quotes the original" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    try rig.open_reader("Content-Type: text/plain; charset=utf-8\r\n\r\nhello there");
+
+    rig.send("r");
+    try testing.expectEqual(core.state.View.compose, rig.session.state.view);
+
+    const body = rig.session.state.compose.body_slice();
+    try testing.expect(std.mem.indexOf(u8, body, "wrote:\n") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "> hello there") != null);
+}
+
+test "a reply opened from the list quotes nothing it never loaded" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+
+    rig.send("r");
+    try testing.expectEqual(core.state.View.compose, rig.session.state.view);
+    try testing.expectEqualStrings("", rig.session.state.compose.body_slice());
+}
 
 test "composing and sending with a working outbox closes the draft" {
     var rig: Rig = .{};

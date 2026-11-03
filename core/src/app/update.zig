@@ -11,8 +11,10 @@ const limits = @import("../limits.zig");
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
 const Message = @import("../domain/message.zig").Message;
 const Store = @import("../domain/store.zig").Store;
+const time = @import("../domain/time.zig");
 
 const Command = @import("command.zig").Command;
+const Quote = @import("command.zig").Quote;
 const Move = @import("command.zig").Move;
 const Viewport = @import("command.zig").Viewport;
 const Effect = @import("effect.zig").Effect;
@@ -87,6 +89,7 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .compose_clear_field => {
             if (state.view == .compose) state.compose.clear_field();
         },
+        .compose_quote => |quote| quote_original(state, quote),
         .send_succeeded => compose_sent(state),
         .send_failed => compose_failed(state),
     }
@@ -536,6 +539,38 @@ fn send_compose(state: *State, effects: *Effects) void {
         .body = state.compose.body_slice(),
         .in_reply_to = state.compose.in_reply_to,
     } });
+}
+
+/// Quotes the original below the draft. The attribution is built here, not in
+/// the front end, so a GUI reply reads exactly like this one.
+fn quote_original(state: *State, quote: Quote) void {
+    if (state.view != .compose) return;
+    if (!state.compose.in_reply_to.is_known()) return;
+
+    var address_buffer: [limits.address_max]u8 = undefined;
+    const address = quote.from.addr_spec(&address_buffer);
+
+    // A sender with no display name is written as its address alone: the
+    // attribution should read like a sentence, not like a template.
+    var who_buffer: [limits.name_max + limits.address_max + 4]u8 = undefined;
+    const name = quote.from.label();
+    const who = if (name.len == 0)
+        std.fmt.bufPrint(&who_buffer, "<{s}>", .{address}) catch address
+    else
+        std.fmt.bufPrint(&who_buffer, "{s} <{s}>", .{ name, address }) catch name;
+
+    var date_buffer: [16]u8 = undefined;
+    // Zero is what the state carries when the server never said when: an
+    // attribution reading "1 Jan 1970" would be a lie dressed as a date.
+    const date = if (quote.at == 0) "" else time.full_date(&date_buffer, quote.at);
+
+    var attribution: [200]u8 = undefined;
+    const line = if (date.len == 0)
+        std.fmt.bufPrint(&attribution, "{s} wrote:", .{who}) catch "wrote:"
+    else
+        std.fmt.bufPrint(&attribution, "On {s}, {s} wrote:", .{ date, who }) catch "wrote:";
+
+    state.compose.append_quote(quote.text, line);
 }
 
 fn cancel_compose(state: *State) void {
@@ -1501,6 +1536,49 @@ test "opening help clears a previous filter" {
     _ = apply(&fixture.state, &fixture.store, .toggle_help);
     _ = apply(&fixture.state, &fixture.store, .toggle_help);
     try testing.expect(fixture.state.help_filter.is_empty());
+}
+
+test "compose_quote appends the original under an attribution line" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_reply);
+    const quote = Quote{
+        .text = "the original words\r\nand a second line",
+        .from = try @import("../domain/address.zig").Address.init("Alice <alice@example.com>"),
+        .at = 1_700_000_000,
+    };
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_quote = quote });
+
+    try testing.expectEqualStrings(
+        "On 14 Nov 2023, Alice <alice@example.com> wrote:\n" ++
+            "> the original words\n> and a second line\n",
+        fixture.state.compose.body_slice(),
+    );
+}
+
+test "compose_quote without a date still says who wrote it" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_reply);
+    const quote = Quote{ .text = "hi", .at = 0 };
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_quote = quote });
+    try testing.expectEqualStrings("<@> wrote:\n> hi\n", fixture.state.compose.body_slice());
+}
+
+test "compose_quote is ignored outside a reply" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_quote = .{ .text = "hi", .at = 1_700_000_000 } });
+    try testing.expectEqualStrings("", fixture.state.compose.body_slice());
+
+    // And when there is no compose window at all.
+    _ = apply(&fixture.state, &fixture.store, .compose_cancel);
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_quote = .{ .text = "hi", .at = 1_700_000_000 } });
+    try testing.expectEqualStrings("", fixture.state.compose.body_slice());
 }
 
 test "compose_new opens an empty draft at the recipient" {

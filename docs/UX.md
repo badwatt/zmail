@@ -215,9 +215,11 @@ connects on the next start. The same can be done outside the TUI with
 Accounts live in the same file as `[account <label>]` sections, so they can also
 be written by hand; the label must be unique.
 
-A reply prefills the recipient and `Re: <subject>` and starts in the body. The
-draft survives a failed send. Non-ASCII text is sent as UTF-8; a subject with
-non-ASCII characters will need MIME encoding in a later version.
+A reply prefills the recipient and `Re: <subject>` and starts in the body. When
+the original is open, it is quoted below the draft as well: an attribution line,
+then every line prefixed with `> `. Replying from the list quotes nothing — the
+body was never fetched. The draft survives a failed send. Non-ASCII text is sent
+as UTF-8, and a non-ASCII subject leaves as an RFC 2047 encoded word.
 
 Empty fields show a dim hint (`someone@example.com`, `(no subject)`, `Write your
 message.`), and the cursor sits in the first free cell. In demo mode, sending

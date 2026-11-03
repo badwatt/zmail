@@ -106,7 +106,9 @@ with AUTH PLAIN inside that TLS connection. STARTTLS and a real secret store
 
 Writing mail: `c` composes, `r` replies, `Tab` moves between fields, `Ctrl+S`
 sends, `Esc` cancels. The first version edits at the end of the active field
-(`Ctrl+U` clears it), sends to one recipient, and does not quote the original.
+(`Ctrl+U` clears it) and sends to one recipient. A reply written from the
+reader quotes the original below the draft, attribution line included; a
+subject with non-ASCII characters leaves as an RFC 2047 encoded word.
 
 In the demo, sending is real end to end: the message is appended to Sent and the
 status line says `Message sent · 2 opens Sent`. No account needed.

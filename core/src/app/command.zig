@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
+const Address = @import("../domain/address.zig").Address;
 
 pub const Move = enum {
     up,
@@ -26,6 +27,15 @@ pub const Viewport = struct {
     reader_rows: u16 = 1,
     /// Total wrapped lines of the open body, as measured by the renderer.
     body_rows: u32 = 0,
+};
+
+/// The original of a reply, as the front end already holds it.
+pub const Quote = struct {
+    /// Plain text of the message being answered, borrowed from the reader's
+    /// buffer: a reply opened from the list has none, and quotes nothing.
+    text: []const u8 = "",
+    from: Address = .{},
+    at: i64 = 0,
 };
 
 pub const Command = union(enum) {
@@ -85,6 +95,9 @@ pub const Command = union(enum) {
     compose_next_field,
     compose_previous_field,
     compose_clear_field,
+    /// Append the original below the draft, quoted. Sent right after
+    /// `compose_reply` when the message is already loaded.
+    compose_quote: Quote,
     /// Internal: the outbox accepted the message.
     send_succeeded,
     /// Internal: the outbox refused it; the draft stays.
@@ -156,11 +169,12 @@ test "every command is classified for status clearing" {
         .{ .command = .compose_next_field, .clears = true },
         .{ .command = .compose_previous_field, .clears = true },
         .{ .command = .compose_clear_field, .clears = true },
+        .{ .command = .{ .compose_quote = .{} }, .clears = true },
         .{ .command = .send_succeeded, .clears = false },
         .{ .command = .send_failed, .clears = false },
     };
     for (commands) |case| {
         try testing.expectEqual(case.clears, case.command.clears_status());
     }
-    try testing.expectEqual(@as(usize, 49), commands.len);
+    try testing.expectEqual(@as(usize, 50), commands.len);
 }
