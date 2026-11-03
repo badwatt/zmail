@@ -24,7 +24,16 @@ pub const Mail = struct {
     context: *anyopaque,
     vtable: *const VTable,
 
+    /// Most ports are connected the moment they exist.
+    fn alwaysConnected(_: *anyopaque) bool {
+        return true;
+    }
+
     pub const VTable = struct {
+        /// Whether this connection is already open. A port that opens lazily
+        /// reports false until its first use, so the caller can open it on the
+        /// thread that owns the transport instead of discovering it in a worker.
+        connected: *const fn (context: *anyopaque) bool = alwaysConnected,
         /// Copies the envelope (headers only, never bodies) of `mailbox` into
         /// `out`, newest first, and returns how many were written. If `out` is
         /// too small, the oldest messages are dropped.
@@ -44,6 +53,10 @@ pub const Mail = struct {
         /// Removes every message in a mailbox for good.
         empty_mailbox: *const fn (context: *anyopaque, mailbox: Mailbox) Error!void,
     };
+
+    pub fn connected(self: Mail) bool {
+        return self.vtable.connected(self.context);
+    }
 
     pub fn fetch(self: Mail, mailbox: Mailbox, out: []Message) Error!u32 {
         return self.vtable.fetch(self.context, mailbox, out);

@@ -58,6 +58,11 @@ pub const LazyMail = struct {
         return opened;
     }
 
+    fn connectedThunk(context: *anyopaque) bool {
+        const self: *LazyMail = @ptrCast(@alignCast(context));
+        return self.connected();
+    }
+
     fn fetchThunk(context: *anyopaque, mailbox: Mailbox, out: []Message) mail_port.Error!u32 {
         const self: *LazyMail = @ptrCast(@alignCast(context));
         return (try self.ensure()).fetch(mailbox, out);
@@ -175,10 +180,15 @@ test "lazy mail: the first call opens, later calls reuse the connection" {
     var message = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(1) };
     try opener.mail.seed(&message);
 
+    // Nothing opened yet: the session needs to know, because the thread that
+    // owns the transport is the only one allowed to open it.
+    try testing.expect(!lazy.mail().connected());
+
     var out: [4]Message = undefined;
     try testing.expectEqual(@as(u32, 1), try lazy.mail().fetch(.inbox, &out));
     try testing.expectEqual(@as(u32, 1), opener.opens);
     try testing.expect(lazy.connected());
+    try testing.expect(lazy.mail().connected());
 
     try testing.expectEqual(@as(u32, 1), try lazy.mail().fetch(.inbox, &out));
     try testing.expectEqual(@as(u32, 1), opener.opens);

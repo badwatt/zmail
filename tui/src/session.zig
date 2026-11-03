@@ -580,6 +580,16 @@ pub const Session = struct {
     fn start_refresh(self: *Session) void {
         if (self.refreshing) return;
 
+        // A connection nobody has opened yet must be opened here, on the thread
+        // that owns the transport. The worker cannot: it would create the TLS
+        // stream from another thread and both wait forever.
+        for (self.live_sources()) |source| {
+            if (!self.in_scope(source.id)) continue;
+            if (source.mail.connected()) continue;
+            self.reload(self.state.mailbox);
+            return;
+        }
+
         // The worker takes exactly the accounts in scope: refreshing never wakes
         // an account the reader is not looking at.
         var count: u8 = 0;
@@ -650,23 +660,13 @@ pub const Session = struct {
     /// Waits for an in-flight refresh, then applies its results. Used when a
     /// command needs the connection the worker is holding.
     pub fn wait_refresh(self: *Session) void {
+        // Nothing reads keys here: a command loop re-entered from inside an
+        // effect can start a second worker while the first is still writing.
+        // Ctrl+C does not need the loop -- it is a signal.
         while (self.refreshing) {
             self.poll_refresh();
-            // A wait is not work: the keys pressed during it are read here, so a
-            // quit means now and not "after the fetch".
-            self.read_keys();
-            if (self.state.quit) return;
             std.atomic.spinLoopHint();
         }
-    }
-
-    /// Reads whatever has arrived without waiting, and hands it to the key map.
-    /// Used where the loop would otherwise sit on its hands.
-    fn read_keys(self: *Session) void {
-        var buffer: [256]u8 = undefined;
-        const read = self.deps.system.read(&buffer, 0) catch return;
-        if (read == 0) return;
-        self.handle_bytes(buffer[0..read]);
     }
 
     pub fn settle_refresh_for_test(self: *Session) void {
@@ -1739,11 +1739,6 @@ pub const Session = struct {
             // A single account in scope means the others are not opened at all:
             // no socket, no login, nothing to wait for.
             if (!self.in_scope(source.id)) continue;
-            // A quit during the first load must not wait for the second account.
-            if (self.state.booting) {
-                self.read_keys();
-                if (self.state.quit) return;
-            }
             const count = source.mail.fetch(mailbox, self.scratch) catch |err| {
                 failed = true;
                 if (err == error.Rejected) login_failed = true;
@@ -2460,17 +2455,6 @@ test "composing and sending with a working outbox closes the draft" {
     try testing.expectEqual(@as(u32, 1), outbox.sent);
     try testing.expectEqual(core.state.View.list, rig.session.state.view);
     try testing.expectEqualStrings("Message sent · 2 opens Sent", rig.session.state.status.slice());
-}
-
-test "a key pressed while the loop waits is read, not queued behind the wait" {
-    var rig: Rig = .{};
-    try rig.start();
-    defer rig.deinit();
-    _ = rig.session.step();
-
-    rig.fake_system.push_input("\x03");
-    rig.session.read_keys();
-    try testing.expect(rig.session.state.quit);
 }
 
 test "nothing else starts once the user has said quit" {
