@@ -39,6 +39,11 @@ The port exists; this milestone fills it in.
   and writes the config plus a `0600` credential file next to it.
 - **STARTTLS (next).** Upgrade a plaintext connection on 143/587 with the same
   verification. Today only implicit TLS is accepted.
+- **`password_command` (done).** An account may name the program that holds its
+  password (`pass show mail/work`). The value is split into argv and handed to
+  `execve`, never to a shell, and nothing is written to disk, so a password
+  manager stays the one source of truth. This is what makes a secret store
+  usable before the port below exists.
 - **SecretStore (next).** OS keyring, then an encrypted file, then the
   self-hosted sync backend. This replaces the plaintext `0600` credential file
   that setup writes today; `ZMAIL_PASSWORD` stays as an override.
@@ -99,9 +104,17 @@ The port exists; this milestone fills it in.
 - **Big messages (next).** A response is bounded at 128 KiB, so a message with
   a large attachment is truncated or refused. Streaming a literal straight into
   the body buffer would remove the bound without an allocation.
-- **M3.2 next.** Quote the original in replies; `Cc`/`Bcc` and multiple
-  recipients; RFC 2047 encoding for non-ASCII subjects; drafts persisted in the
-  Drafts mailbox; reply-all and forward; threading by `Message-ID`.
+- **Writing that survives contact with a real mailbox (done).** A reply from the
+  reader quotes the original below the draft, attribution line and `> ` prefixes
+  included; a non-ASCII subject and display name leave as RFC 2047 encoded words
+  instead of 8-bit noise; `Ctrl+E` hands the body to `$EDITOR` (argv, no shell)
+  and takes it back sanitized; `Ctrl+S` holds the send for five seconds so the
+  wrong Alice can still be stopped.
+- **M3.2 next.** `Cc`/`Bcc` and multiple recipients; drafts persisted in the
+  Drafts mailbox; reply-all and forward; threading by `Message-ID`; attachments
+  listed and saved (display-only, per the security rules).
+- **Scripts (done).** `zmail send --to … --subject … [--body TEXT|-] [--from …]`
+  builds one message and exits with 0 or 1; no terminal, no cache.
 - **Later.** STARTTLS for 587, `8BITMIME`/`SIZE` negotiation, a local queue that
   survives a dropped network.
 
