@@ -124,13 +124,23 @@ Without a cache (first run, or a new account) the network is unavoidable, so
 the first frame is a splash instead of an empty list:
 
 ```
-                        a m a i l
-                   ──────────────
-                    ⠋  connecting to work
-                       alice@example.com
+                       z m a i l
+                    ▁▂▃▄▄▅▆▇█▇▆▅▄▄▃▂▁
+                  ●  connecting to work
+                     alice@example.com
 
          cached mail opens instantly · Ctrl+R refreshes
+                            Ctrl+Q quits
 ```
+
+The only thing that moves is the breath: one row of blocks that fills from a
+single pulse to a soft hill and lets go, once every two and a half seconds, with
+the marker under it and the wordmark above it breathing in time. It is a shape
+rather than a spinner because the wait is a cold start, not a job: a spinning
+glyph says "busy", and what is happening here is "one connection, one login, a
+few hundred milliseconds". A breath frozen mid-way still reads as a design; a
+frozen spinner reads as a hang. `NO_COLOR` keeps the whole thing: the shape
+carries the movement and bold carries the peak.
 
 A connection that fails no longer refuses to start: cached mail stays readable
 and the failure becomes a status line.
