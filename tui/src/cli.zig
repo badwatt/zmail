@@ -41,6 +41,8 @@ pub const Send = struct {
     body_from_stdin: bool = false,
     /// A label or an address. Empty means the first account in the config.
     from: []const u8 = "",
+    /// Null means the default path, like `--config` on the client itself.
+    config_path: ?[]const u8 = null,
 };
 
 pub const Action = union(enum) {
@@ -122,8 +124,8 @@ pub fn parse(args: []const []const u8) Action {
 /// no positionals: a script that mistypes a flag gets an error, not a message
 /// with the wrong recipient.
 fn parse_send(args: []const []const u8) Action {
-    const Flag = enum { to, subject, body, from };
-    const names = [_][]const u8{ "--to", "--subject", "--body", "--from" };
+    const Flag = enum { to, subject, body, from, config };
+    const names = [_][]const u8{ "--to", "--subject", "--body", "--from", "--config" };
     var seen: [names.len]bool = @splat(false);
     var send = Send{};
 
@@ -162,6 +164,7 @@ fn parse_send(args: []const []const u8) Action {
                     }
                 },
                 .from => send.from = value,
+                .config => send.config_path = value,
             }
             matched = true;
             break;
@@ -254,7 +257,7 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\{s} {s} - a calm terminal mail client
         \\
         \\Usage: {s} [options]
-        \\       {s} send --to ADDR --subject TEXT [--body TEXT|-] [--from LABEL]
+        \\       {s} send --to ADDR --subject TEXT [--body TEXT|-] [--from LABEL] [--config P]
         \\
         \\Options:
         \\  -h, --help       Show this help and exit
@@ -475,8 +478,9 @@ test "send: the flags become one message" {
 
 test "send: --body - reads the body from stdin, and --flag=value works" {
     const action = parse(&[_][]const u8{
-        meta.name, "send", "--to=a@example.com", "--subject=s", "--body", "-",
+        meta.name, "send", "--to=a@example.com", "--subject=s", "--body", "-", "--config", "/tmp/c",
     });
+    try testing.expectEqualStrings("/tmp/c", action.send.config_path.?);
     try testing.expectEqualStrings("a@example.com", action.send.to);
     try testing.expect(action.send.body_from_stdin);
     try testing.expectEqualStrings("", action.send.body);

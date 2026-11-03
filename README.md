@@ -145,7 +145,8 @@ hands the message to SMTP, and exits. **0 means the server took it, 1 means it
 did not** — a script can tell "sent" from "quietly did nothing". `--body -` reads
 standard input, truncated at the same 128 KiB bound as everything else;
 `--from` picks an account by label or by address, and without it the first
-account in the config sends.
+account in the config sends. `--config PATH` reads a config other than the
+default one.
 
 In the demo, sending is real end to end: the message is appended to Sent and the
 status line says `Message sent · 2 opens Sent`. No account needed.

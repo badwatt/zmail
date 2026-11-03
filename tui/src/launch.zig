@@ -556,9 +556,13 @@ pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
     };
 
     var path_buffer: [512]u8 = undefined;
-    const path = cli.default_config_path(&path_buffer, os.env("XDG_CONFIG_HOME"), os.env("HOME"));
+    const path = request.config_path orelse cli.default_config_path(
+        &path_buffer,
+        os.env("XDG_CONFIG_HOME"),
+        os.env("HOME"),
+    );
     if (path.len == 0) {
-        try stderr.print("{s}: no config path: set XDG_CONFIG_HOME or HOME\n", .{core.meta.name});
+        try stderr.print("{s}: no config path: pass --config or set XDG_CONFIG_HOME\n", .{core.meta.name});
         return 1;
     }
 
@@ -598,6 +602,10 @@ pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
     account.host.set(entry.account.imap.host.slice());
     account.username.set(entry.account.username.slice());
     const smtp = entry.smtp.?;
+    if (smtp.security != .tls) {
+        try stderr.print("{s}: only implicit TLS for SMTP (smtp_port = 465) today\n", .{core.meta.name});
+        return 1;
+    }
     account.smtp_host.set(smtp.host.slice());
     account.smtp_port = smtp.port;
 
