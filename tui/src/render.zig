@@ -278,31 +278,49 @@ fn doubled(
 /// breathing rather than as a progress bar.
 const pulse_ticks: u16 = 32;
 
-/// The accent, from slate to lit. The wordmark is always somewhere on this
-/// ramp, so no frame is dark: the light moves across it instead of blinking.
-const pulse_shades = [_]u8{ 64, 68, 74, 80 };
+/// The wordmark's light, as steps of lightness away from the theme's accent. It
+/// is derived, not listed: the generated theme has no 256-colour index to walk,
+/// and hard-coding one is how the first screen kept its old colours while the
+/// rest of the app changed.
+const pulse_offsets = [_]f32{ -0.14, -0.07, 0.0, 0.07 };
 
 /// Where a column of the wordmark sits on the ramp, one wave later than the
 /// column to its left. `tick` moves the whole ramp; nothing else on the screen
 /// moves at all.
 fn pulse_shade(tick: u16, column: u16, width: u16) u8 {
-    const steps = pulse_shades.len;
+    const steps = pulse_offsets.len;
     const travel = (@as(u32, tick % pulse_ticks)) * steps / pulse_ticks;
     const across = @as(u32, column) * steps / @max(1, width);
     return @intCast((travel + across) % steps);
 }
 
 fn pulse_style(theme: *const Theme, shade: u8) Style {
-    if (theme.colored) {
-        return (Style{}).with_fg(.{ .ansi256 = pulse_shades[@min(shade, pulse_shades.len - 1)] }).with_bold();
-    }
+    const step = pulse_offsets[@min(shade, pulse_offsets.len - 1)];
+
     // No color: the ramp is carried by weight alone, which keeps the wave
     // visible on a monochrome terminal instead of flattening it.
-    return switch (shade) {
-        0 => theme.accent.with_dim(),
-        pulse_shades.len - 1 => theme.accent.with_bold(),
-        else => theme.accent,
-    };
+    if (!theme.colored) {
+        return switch (shade) {
+            0 => theme.accent.with_dim(),
+            pulse_offsets.len - 1 => theme.accent.with_bold(),
+            else => theme.accent,
+        };
+    }
+
+    switch (theme.accent.fg) {
+        // A derived theme: the light is the same hue at four depths, in OKLCH,
+        // so it follows whatever the terminal's background asked for.
+        .rgb => |rgb| {
+            const base = core.oklch.from_rgb(.{ .r = rgb.r, .g = rgb.g, .b = rgb.b });
+            const lit = core.oklch.to_rgb(core.oklch.with_lightness(base, base.l + step));
+            return (Style{}).with_fg(.{ .rgb = .{ .r = lit.r, .g = lit.g, .b = lit.b } }).with_bold();
+        },
+        // The built-in palette has no derivation to follow: keep its ramps.
+        else => {
+            const fixed = [_]u8{ 64, 68, 74, 80 };
+            return (Style{}).with_fg(.{ .ansi256 = fixed[@min(shade, fixed.len - 1)] }).with_bold();
+        },
+    }
 }
 
 /// Draws the wordmark, one row at a time, shading each column by where the
