@@ -34,7 +34,8 @@ sits where the position is). `A` opens the accounts overlay (pick a scope, add, 
 the list is unified by default, with every row labelled and coloured by account,
 and `a` narrows it to one.
 
-`q` quits from the list, `Ctrl+Q`/`Ctrl+C` quit from anywhere, and `?` shows
+`Ctrl+C` quits from anywhere (it is a signal: it works even inside a socket
+read), and `?` shows
 every key (`/` inside the help filters it).
 
 ### Live mode

@@ -40,7 +40,7 @@ fn compose_key(key: Key) ?Command {
             's' => .compose_send,
             'u' => .compose_clear_field,
             'e' => .compose_edit,
-            'c', 'q' => .quit,
+            'c' => .quit,
             else => null,
         },
         .up, .down, .page_up, .page_down, .home, .end, .left, .right, .delete, .insert, .mouse, .unknown => null,
@@ -49,7 +49,7 @@ fn compose_key(key: Key) ?Command {
 
 fn help_key(key: Key) ?Command {
     return switch (key) {
-        .ctrl => |letter| if (letter == 'c' or letter == 'q') .quit else .toggle_help,
+        .ctrl => |letter| if (letter == 'c') .quit else .toggle_help,
         // Scrolling is the only thing besides filtering that does not close the
         // card: everything else means "I have seen enough".
         .char => |codepoint| switch (codepoint) {
@@ -78,7 +78,7 @@ fn help_search_key(key: Key) ?Command {
         .backspace => .help_search_backspace,
         .enter => .help_search_commit,
         .escape => .help_search_cancel,
-        .ctrl => |letter| if (letter == 'c' or letter == 'q') .quit else null,
+        .ctrl => |letter| if (letter == 'c') .quit else null,
         else => null,
     };
 }
@@ -111,7 +111,8 @@ fn char_command(codepoint: u21, view: View) ?Command {
         'g' => .{ .move = .top },
         'G' => .{ .move = .bottom },
         'l', 'o' => .open_selected,
-        'q' => .dismiss,
+        // `q` goes back, never out: only Ctrl+C ends the program.
+        'q' => if (view == .list) null else .dismiss,
         'c' => .compose_new,
         'r' => .compose_reply,
         'h' => if (view == .list) null else .dismiss,
@@ -134,7 +135,7 @@ fn char_command(codepoint: u21, view: View) ?Command {
 
 fn ctrl_command(letter: u8) ?Command {
     return switch (letter) {
-        'c', 'q' => .quit,
+        'c' => .quit,
         'd' => .{ .move = .half_page_down },
         'u' => .{ .move = .half_page_up },
         'f' => .{ .move = .page_down },
@@ -167,7 +168,7 @@ fn accounts_key(key: Key) ?Command {
         .down => .{ .accounts_move = .down },
         .home => .{ .accounts_move = .top },
         .end => .{ .accounts_move = .bottom },
-        .ctrl => |letter| if (letter == 'c' or letter == 'q') .quit else null,
+        .ctrl => |letter| if (letter == 'c') .quit else null,
         else => null,
     };
 }
@@ -241,7 +242,7 @@ test "control keys page and move" {
         .{ .key = .{ .ctrl = 'n' }, .expected = .{ .move = .down } },
         .{ .key = .{ .ctrl = 'p' }, .expected = .{ .move = .up } },
         .{ .key = .{ .ctrl = 'c' }, .expected = .quit },
-        .{ .key = .{ .ctrl = 'q' }, .expected = .quit },
+        .{ .key = .{ .ctrl = 'q' }, .expected = null },
     };
     for (cases) |case| try check(case);
 }
@@ -253,7 +254,7 @@ test "opening and dismissing" {
         .{ .key = .{ .char = 'o' }, .expected = .open_selected },
         .{ .key = .right, .expected = .open_selected },
         .{ .key = .escape, .expected = null },
-        .{ .key = .{ .char = 'q' }, .expected = .dismiss },
+        .{ .key = .{ .char = 'q' }, .expected = null },
         .{ .key = .{ .char = 'h' }, .expected = null },
         .{ .key = .{ .char = 'x' }, .expected = null },
     };
@@ -304,11 +305,12 @@ test "accounts view: movement, select, remove, add, close" {
         .{ .key = .down, .expected = .{ .accounts_move = .down } },
         .{ .key = .home, .expected = .{ .accounts_move = .top } },
         .{ .key = .end, .expected = .{ .accounts_move = .bottom } },
-        .{ .key = .{ .ctrl = 'q' }, .expected = .quit },
     };
     for (cases) |case| {
         try testing.expectEqual(case.expected, translate(case.key, context).?);
     }
+    // Ctrl+Q is not a way out anywhere, not even here.
+    try testing.expect(translate(.{ .ctrl = 'q' }, context) == null);
     try testing.expect(translate(.{ .char = 'z' }, context) == null);
     try testing.expect(translate(.{ .ctrl = 'd' }, context) == null);
 }
@@ -331,7 +333,7 @@ test "actions: unread, flag, archive, delete, search, help, refresh" {
     for (cases) |case| try check(case);
 }
 
-test "help closes on a key, scrolls with j/k, / starts a filter, Ctrl+C/Q quit" {
+test "help closes on a key, scrolls with j/k, / starts a filter, Ctrl+C quits" {
     const help: Context = .{ .view = .help };
     try check(.{ .key = .{ .char = 'j' }, .context = help, .expected = .{ .help_scroll = 1 } });
     try check(.{ .key = .{ .char = 'k' }, .context = help, .expected = .{ .help_scroll = -1 } });
@@ -340,7 +342,7 @@ test "help closes on a key, scrolls with j/k, / starts a filter, Ctrl+C/Q quit" 
     try check(.{ .key = .escape, .context = help, .expected = .toggle_help });
     try check(.{ .key = .{ .char = '/' }, .context = help, .expected = .begin_help_search });
     try check(.{ .key = .{ .ctrl = 'c' }, .context = help, .expected = .quit });
-    try check(.{ .key = .{ .ctrl = 'q' }, .context = help, .expected = .quit });
+    try check(.{ .key = .{ .ctrl = 'q' }, .context = help, .expected = .toggle_help });
 }
 
 test "filtering the help overlay: type, delete, apply, cancel" {
@@ -352,13 +354,15 @@ test "filtering the help overlay: type, delete, apply, cancel" {
     try check(.{ .key = .enter, .context = filtering, .expected = .help_search_commit });
     try check(.{ .key = .escape, .context = filtering, .expected = .help_search_cancel });
     try check(.{ .key = .{ .ctrl = 'c' }, .context = filtering, .expected = .quit });
-    try check(.{ .key = .{ .ctrl = 'q' }, .context = filtering, .expected = .quit });
+    try check(.{ .key = .{ .ctrl = 'q' }, .context = filtering, .expected = null });
     try check(.{ .key = .down, .context = filtering, .expected = null });
     try check(.{ .key = .{ .ctrl = 'd' }, .context = filtering, .expected = null });
 }
 
-test "q quits from the list but never from a text field" {
-    try check(.{ .key = .{ .char = 'q' }, .expected = .dismiss });
+test "q never quits: it goes back, and at the top it does nothing" {
+    try check(.{ .key = .{ .char = 'q' }, .expected = null });
+    const reader: Context = .{ .view = .reader };
+    try check(.{ .key = .{ .char = 'q' }, .context = reader, .expected = .dismiss });
     const search: Context = .{ .mode = .search };
     try check(.{ .key = .{ .char = 'q' }, .context = search, .expected = .{ .search_char = 'q' } });
     const filtering: Context = .{ .view = .help, .mode = .help_search };
@@ -407,7 +411,7 @@ test "compose mode: typing, fields, send, cancel" {
     try check(.{ .key = .{ .ctrl = 's' }, .context = writing, .expected = .compose_send });
     try check(.{ .key = .{ .ctrl = 'u' }, .context = writing, .expected = .compose_clear_field });
     try check(.{ .key = .{ .ctrl = 'c' }, .context = writing, .expected = .quit });
-    try check(.{ .key = .{ .ctrl = 'q' }, .context = writing, .expected = .quit });
+    try check(.{ .key = .{ .ctrl = 'q' }, .context = writing, .expected = null });
     try check(.{ .key = .{ .ctrl = 'd' }, .context = writing, .expected = null });
     try check(.{ .key = .left, .context = writing, .expected = null });
     try check(.{ .key = .{ .char = 'j' }, .context = writing, .expected = .{ .compose_char = 'j' } });

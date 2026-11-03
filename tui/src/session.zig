@@ -2255,18 +2255,18 @@ test "escape in the list does nothing, not even after the timeout resolves it" {
     try testing.expectEqual(core.state.View.list, rig.session.state.view);
 }
 
-test "Ctrl+Q quits from the list" {
+test "Ctrl+C quits from the list" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
 
-    rig.fake_system.push_input("\x11");
+    rig.fake_system.push_input("\x03");
     try testing.expect(!rig.session.step());
     try testing.expect(rig.session.state.quit);
 }
 
-test "q quits from the list but not from the search field" {
+test "q never quits: in the search field it types, in the list it does nothing" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -2279,7 +2279,7 @@ test "q quits from the list but not from the search field" {
     rig.send("\x1b");
 
     rig.send("q");
-    try testing.expect(rig.session.state.quit);
+    try testing.expect(!rig.session.state.quit);
 }
 
 test "closed stdin ends the session" {
@@ -2468,7 +2468,7 @@ test "a key pressed while the loop waits is read, not queued behind the wait" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    rig.fake_system.push_input("q");
+    rig.fake_system.push_input("\x03");
     rig.session.read_keys();
     try testing.expect(rig.session.state.quit);
 }
@@ -2919,7 +2919,7 @@ test "loop without a splash paints only the data" {
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    rig.fake_system.push_input("\x11"); // quit on the first step
+    rig.fake_system.push_input("\x03"); // quit on the first step
     try rig.session.init(testing.allocator, .{
         .accounts = &rig.sources,
         .system = rig.fake_system.system(),
@@ -3413,7 +3413,7 @@ test "the form's keys edit, submit, back out, and quit" {
     _ = rig.session.settings_key(form, .{ .mouse = .{ .x = 0, .y = 0, .kind = .press, .button = .left } });
     try testing.expect(!rig.session.state.quit);
 
-    // Ctrl+Q quits from the form, like everywhere else.
+    // Ctrl+C quits from the form, like everywhere else.
     _ = rig.session.settings_key(&rig.session.settings.?, .{ .ctrl = 'q' });
     try testing.expect(rig.session.state.quit);
 
@@ -4013,7 +4013,7 @@ test "loop runs until quit" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
-    rig.fake_system.push_input("\x11");
+    rig.fake_system.push_input("\x03");
     rig.session.loop();
     try testing.expect(rig.session.state.quit);
 }

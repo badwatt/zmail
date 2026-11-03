@@ -124,9 +124,9 @@ pub fn render(setup: *const core.setup.Setup, theme: theme_mod.Theme, config_pat
     }
 
     const footer = if (setup.step == .review)
-        " Enter saves  ·  Esc back  ·  Ctrl+Q quit "
+        " Enter saves  ·  Esc back  ·  Ctrl+C quit "
     else
-        " Enter next  ·  Esc back  ·  Ctrl+U clear  ·  Ctrl+Q quit ";
+        " Enter next  ·  Esc back  ·  Ctrl+U clear  ·  Ctrl+C quit ";
     _ = out.put_text(1, out.rows -| 1, footer, out.columns -| 2, theme.dim);
 }
 
@@ -267,7 +267,7 @@ test "a seed supplies the keystrokes the caller already read" {
     var fake: Fake = .{};
     // The address arrives as the seed; quitting right after proves it was
     // applied, and that the seed cannot be lost by the caller.
-    fake.push_input("\x11");
+    fake.push_input("\x03");
     try testing.expectEqual(
         Outcome.cancelled,
         try run_with(&fake, "/tmp/zmail/config", "alice@example.com"),
@@ -277,7 +277,7 @@ test "a seed supplies the keystrokes the caller already read" {
     var quit: Fake = .{};
     try testing.expectEqual(
         Outcome.cancelled,
-        try run_with(&quit, "/tmp/zmail/config", "\x11"),
+        try run_with(&quit, "/tmp/zmail/config", "\x03"),
     );
 }
 
@@ -289,7 +289,7 @@ test "escape on the first step cancels and writes nothing" {
 
 test "ctrl+q cancels at any step" {
     var fake: Fake = .{};
-    fake.push_input("alice@example.com\r\x11");
+    fake.push_input("alice@example.com\r\x03");
     try testing.expectEqual(Outcome.cancelled, try run_with(&fake, "/tmp/c", ""));
 }
 
@@ -314,7 +314,7 @@ test "the password is masked and never printed" {
     var fake: Fake = .{};
     fake.push_input("alice@example.com\r\r\r\r\r" ++ "secret\r");
     // Cancel from the review screen; every frame so far was rendered.
-    fake.push_input("\x11");
+    fake.push_input("\x03");
     const outcome = try run_with(&fake, "/tmp/c", "");
     try testing.expectEqual(Outcome.cancelled, outcome);
     try testing.expect(std.mem.indexOf(u8, fake.output_text(), "secret") == null);
@@ -378,7 +378,7 @@ test "every step renders its own value and the password is masked" {
 test "backspace, clear, and a resize are handled by the loop" {
     var fake: Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
     // Type, go to the next step, delete, clear, then cancel.
-    fake.push_input("alice@example.com\r" ++ "\x7f\x15" ++ "\x11");
+    fake.push_input("alice@example.com\r" ++ "\x7f\x15" ++ "\x03");
     try testing.expectEqual(Outcome.cancelled, try run_with(&fake, "/tmp/c", ""));
     try testing.expect(fake.output_len > 0);
 }

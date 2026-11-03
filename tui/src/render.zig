@@ -388,7 +388,7 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     // Anchored to the two corners of the last row: a footer, not a caption
     // floating in the middle of the page.
     _ = out.put_text(1, footer_row, "cached mail opens instantly", out.columns -| 2, theme.border);
-    put_right(out, out.columns -| 2, footer_row, "Ctrl+Q quits", theme.border);
+    put_right(out, out.columns -| 2, footer_row, "Ctrl+C quits", theme.border);
 }
 
 /// `connecting to <labels>`, centred, the words quiet and the account named in
@@ -978,7 +978,7 @@ const reader_hints = [_]Hint{
     .{ .keys = "H", .action = "html" },
     .{ .keys = "click", .action = "open link" },
     .{ .keys = "r", .action = "reply" },
-    .{ .keys = "q", .action = "back" },
+    .{ .keys = "q", .action = "back (never quits)" },
     .{ .keys = "^R", .action = "refresh" },
 };
 
@@ -1093,7 +1093,7 @@ fn render_hints(hints: []const Hint, y: u16, limit: u16, theme: *const Theme, ou
 const help_rows = [_]Hint{
     .{ .keys = "", .action = "-- anywhere" },
     .{ .keys = "?", .action = "this card (j/k scrolls, / filters)" },
-    .{ .keys = "Ctrl+Q / C", .action = "quit" },
+    .{ .keys = "Ctrl+C", .action = "quit" },
     .{ .keys = "Ctrl+R", .action = "refresh" },
     .{ .keys = "Tab / [ ]", .action = "next / previous mailbox" },
     .{ .keys = "1 - 6", .action = "Inbox, Sent, Drafts, Archive, Trash, Junk" },
@@ -1150,7 +1150,7 @@ const help_rows = [_]Hint{
 /// What the card must mention, checked by a test: a key that works and is not
 /// here is a key nobody will find.
 const required_in_help = [_][]const u8{
-    "Ctrl+Q", "Ctrl+R", "Tab",    "1 - 6",  "a",      "A",          "/",        "j",
+    "Ctrl+C", "Ctrl+R", "Tab",    "1 - 6",  "a",      "A",          "/",        "j",
     "k",      "g",      "G",      "Ctrl+D", "Ctrl+F", "Ctrl+N",     "PageDown", "Space",
     "Enter",  "l",      "Right",  "o",      "c",      "r",          "u",        "s",
     "*",      "d",      "#",      "Delete", "X",      "E",          "click",    "wheel",
@@ -1856,7 +1856,7 @@ test "the boot splash is a wordmark, the account, and a footer" {
     var footer_buffer: [512]u8 = undefined;
     const footer = std.mem.trim(u8, out.row_text(23, &footer_buffer), " ");
     try testing.expect(startsWith(footer, "cached mail opens instantly"));
-    try testing.expect(std.mem.endsWith(u8, footer, "Ctrl+Q quits"));
+    try testing.expect(std.mem.endsWith(u8, footer, "Ctrl+C quits"));
 
     // The list is not drawn behind it.
     var row_buffer: [512]u8 = undefined;
@@ -1921,7 +1921,7 @@ test "a cramped splash drops the address before it reaches the footer" {
     try row_contains(&out, 8, "connecting to work");
     var footer_buffer: [512]u8 = undefined;
     const footer = out.row_text(9, &footer_buffer);
-    try testing.expect(std.mem.indexOf(u8, footer, "Ctrl+Q quits") != null);
+    try testing.expect(std.mem.indexOf(u8, footer, "Ctrl+C quits") != null);
     try testing.expect(std.mem.indexOf(u8, footer, "alice@example.com") == null);
 }
 

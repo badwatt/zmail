@@ -98,15 +98,15 @@ and disappears on the next action.
 | `Space` | a page in the list and the reader |
 | `H` | in the reader: HTML view, or the plain text one. The HTML is read by zmail itself: no browser, no external program |
 | `o` | in the reader: the whole mail in a browser |
-| `Ctrl+Q` `Ctrl+C` | quit. The top level never closes on `Esc`, `q`, or `h` |
+| `Ctrl+C` | quit. Nothing else does: not `Esc`, `q`, `h`, or `Ctrl+Q` |
 
 Search is live: typing filters as you go, `Enter` keeps the filter, `Esc`
 cancels it. `↑`/`↓` still move the cursor while typing. Inside the help overlay,
 `/` starts the same kind of filter over the key map itself; `Enter` keeps it and
 `Esc` clears it.
 
-`Esc` is never a quit key. The only ways out are `q` from the list (never from a
-text field) and `Ctrl+Q` / `Ctrl+C` from anywhere.
+`Esc` is never a quit key, and neither is `q`: it goes back one layer and at the
+top it does nothing. **`Ctrl+C` is the only way out**, from anywhere.
 
 **Quitting while something is loading.** The loop spends part of its life
 waiting: for a refresh, for a body, for the first connection of a cold start.
@@ -149,7 +149,7 @@ the first frame is a splash instead of an empty list:
                              connecting to work
                              alice@example.com
 
- cached mail opens instantly                                       Ctrl+Q quits
+ cached mail opens instantly                                       Ctrl+C quits
 ```
 
 The wordmark is drawn, not typed: a terminal cannot set type, and blocks are
@@ -181,7 +181,7 @@ and the failure becomes a status line.
  imap.example.com▏
  Where mail is read from; TLS is required
 
- Enter next  ·  Esc back  ·  Ctrl+U clear  ·  Ctrl+Q quit
+ Enter next  ·  Esc back  ·  Ctrl+U clear  ·  Ctrl+C quit
 ```
 
 It asks for the address, the IMAP server and port (prefilled `imap.<domain>`
@@ -189,7 +189,7 @@ and `993`), the SMTP server and port (`smtp.<domain>` / `465`, leave the host
 empty to skip sending), the username (prefilled from the address), and the
 password (masked, never echoed). The last screen shows the config that will be
 written, the path, and where the password goes. `Enter` saves, `Esc` goes back,
-`Ctrl+Q` cancels without writing anything.
+`Ctrl+C` cancels without writing anything.
 
 ## Writing mail
 

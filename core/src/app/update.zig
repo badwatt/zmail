@@ -225,9 +225,10 @@ fn apply_dismiss(state: *State, store: *Store) void {
             },
             .compose => cancel_compose(state),
             .accounts => state.view = .list,
-            // `q` at the top level quits. Esc never reaches this branch: the
-            // key map does not translate it to `dismiss` in the list.
-            .list => state.quit = true,
+            // Nothing closes the program from the list: `q` goes back one
+            // layer, and there is no layer under the list. Ctrl+C is a signal,
+            // not a command, and it is the only way out.
+            .list => {},
         },
     }
 }
@@ -1186,7 +1187,7 @@ test "open while already reading does nothing" {
     try testing.expect(effects.is_empty());
 }
 
-test "dismiss: cancel search, close help, leave the reader, then quit from the list" {
+test "dismiss: cancel search, close help, leave the reader; the list stays open" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
 
@@ -1208,8 +1209,10 @@ test "dismiss: cancel search, close help, leave the reader, then quit from the l
     try testing.expectEqual(View.list, fixture.state.view);
     try testing.expectEqual(@as(u32, 0), fixture.state.reader_scroll);
 
+    // The list is the bottom: nothing under it, and nothing closes it. Ctrl+C
+    // is a signal, not a command, and it is the only way out.
     _ = apply(&fixture.state, &fixture.store, .dismiss);
-    try testing.expect(fixture.state.quit);
+    try testing.expect(!fixture.state.quit);
     try testing.expectEqual(View.list, fixture.state.view);
 }
 

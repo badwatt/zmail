@@ -133,10 +133,10 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
     try testing.expect(std.mem.indexOf(u8, frame[0..total], meta.name) != null);
     try testing.expect(std.mem.indexOf(u8, frame[0..total], "Inbox") != null);
 
-    // Ctrl+Q at the top level quits; the process must exit cleanly.
-    const written = std.c.write(terminal.master, "\x11", 1);
-    try testing.expectEqual(@as(isize, 1), written);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, try child.wait(io));
+    // Ctrl+C is a signal, not a key: it reaches the process even while a socket
+    // is being read, restores the terminal, and leaves with 130.
+    try std.posix.kill(child.id.?, std.posix.SIG.INT);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 130 }, try child.wait(io));
 }
 
 test "a live session with a dead server still quits cleanly" {
@@ -194,11 +194,9 @@ test "a live session with a dead server still quits cleanly" {
         return error.TestExpectedFrame;
     }
 
-    const written = std.c.write(terminal.master, "q", 1);
-    try testing.expectEqual(@as(isize, 1), written);
-    // A dead server is reported, so the exit code is 1 -- but the exit is an
-    // exit, and the terminal is handed back (the alternate screen is left).
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, try child.wait(io));
+    // A dead server is reported, and Ctrl+C still gets out of it.
+    try std.posix.kill(child.id.?, std.posix.SIG.INT);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 130 }, try child.wait(io));
 
     var rest: [4096]u8 = undefined;
     var seen: usize = 0;
