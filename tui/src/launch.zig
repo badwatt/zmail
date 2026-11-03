@@ -39,9 +39,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
     }
 
     try system.enter_raw();
-    // Asked while the terminal is raw and before anything reads keys: the
-    // answer comes on stdin, and a parser would read it as typing.
+    // Asked while the terminal is raw and before anything reads keys: both
+    // answers come on stdin, and a parser would read them as typing.
     graphics.detect(system);
+    background = os.query_background(system);
     try system.write(enter_screen);
 
     const failure = run_inside(gpa, io, options, system);
@@ -1710,12 +1711,17 @@ fn login_message(err: core.imap.client.Error) []const u8 {
     };
 }
 
+/// The colour behind the text, asked once at startup. Everything the theme
+/// needs is derived from it; when the terminal does not say, the built-in
+/// palette is used instead of a guess.
+var background: ?core.oklch.Rgb = null;
+
 fn theme_for_environment() theme_mod.Theme {
     if (os.env("NO_COLOR") != null) return theme_mod.Theme.mono();
     if (os.env("TERM")) |term| {
         if (std.mem.eql(u8, term, "dumb")) return theme_mod.Theme.mono();
     }
-    return theme_mod.Theme.dark();
+    return theme_mod.Theme.detect(false, background);
 }
 
 test "Live keeps one label per account, not the last one parsed" {

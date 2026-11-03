@@ -219,6 +219,29 @@ pub fn edit_text(io: std.Io, initial: []const u8, out: []u8) ?[]const u8 {
     return out[0..length];
 }
 
+/// Asks the terminal what colour it paints behind the text, and waits for an
+/// answer for a moment. Null means "no answer", which is normal: not every
+/// terminal speaks OSC 11, and a multiplexer in the middle may not pass it on.
+///
+/// The reply shares the input stream with keystrokes, so this must run while the
+/// terminal is raw and before anything reads keys -- the same window the
+/// graphics probe uses.
+pub fn query_background(system: system_mod.System) ?core.oklch.Rgb {
+    system.write(core.osc.background_query()) catch return null;
+
+    var buffer: [128]u8 = undefined;
+    var received: usize = 0;
+    var attempts: u8 = 0;
+    while (attempts < 4) : (attempts += 1) {
+        const read = system.read(buffer[received..], 50) catch return null;
+        if (read == 0) continue;
+        received += read;
+        if (core.osc.parse_background(buffer[0..received])) |colour| return colour;
+        if (received == buffer.len) return null;
+    }
+    return null;
+}
+
 /// Wall clock in Unix seconds, from CLOCK_REALTIME. `0` means "unknown", which
 /// only makes relative dates read as "now"; it never affects correctness.
 pub fn now_unix() i64 {
@@ -472,4 +495,31 @@ test "edit_text reports nothing when the editor cannot run" {
 
     var out: [16]u8 = undefined;
     try testing.expect(edit_text(io, "original", &out) == null);
+}
+
+test "query_background asks once and reads the terminal's answer" {
+    var fake = system_mod.Fake{};
+    // What xterm and its friends send back, behind a graphics reply that had to
+    // be read first.
+    fake.push_input("\x1b_Gi=31;OK\x1b\\\x1b]11;rgb:1a1a/1b1b/2525\x1b\\");
+
+    const colour = query_background(fake.system()).?;
+    try testing.expectEqual(@as(u8, 0x1a), colour.r);
+    try testing.expectEqual(@as(u8, 0x1b), colour.g);
+    try testing.expectEqual(@as(u8, 0x25), colour.b);
+    try testing.expect(std.mem.startsWith(u8, fake.output_text(), "\x1b]11;?"));
+}
+
+test "query_background gives up quietly when the terminal says nothing" {
+    var fake = system_mod.Fake{};
+    try testing.expect(query_background(fake.system()) == null);
+
+    // A failure to write is not an error either: the theme falls back.
+    var broken = system_mod.Fake{ .write_failure = error.IoError };
+    try testing.expect(query_background(broken.system()) == null);
+
+    // Garbage that never becomes a reply is drained and dropped.
+    var noisy = system_mod.Fake{};
+    noisy.push_input("not a reply at all");
+    try testing.expect(query_background(noisy.system()) == null);
 }
