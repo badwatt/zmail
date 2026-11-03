@@ -124,12 +124,28 @@ verification is mandatory and uses the system CA bundle. Sending authenticates
 with AUTH PLAIN inside that TLS connection. STARTTLS and a real secret store
 (OS keyring, encrypted file, self-hosted sync) are next.
 
-Writing mail: `c` composes, `r` replies, `Tab` moves between fields, `Ctrl+S`
-sends after a five-second countdown that `Esc` stops, `Ctrl+E` hands the body to
-`$EDITOR` and takes it back, `Esc` cancels. The first version edits at the end of the active field
-(`Ctrl+U` clears it) and sends to one recipient. A reply written from the
-reader quotes the original below the draft, attribution line included; a
-subject with non-ASCII characters leaves as an RFC 2047 encoded word.
+Writing mail: `c` composes, `r` replies, `Tab` moves between fields, `Ctrl+E`
+hands the body to `$EDITOR` and takes it back, and `Ctrl+S` sends — after a
+five-second countdown that `Esc` (or typing) stops, because the one thing mail
+does not allow is taking it back. The composer still edits at the end of the
+active field (`Ctrl+U` clears it) and sends to one recipient. A reply written
+from the reader quotes the original below the draft, attribution line included;
+a non-ASCII subject leaves as an RFC 2047 encoded word.
+
+### Sending from a script
+
+```sh
+zmail send --to alice@example.com --subject "Deploy finished" --body "42 tests, green"
+git format-patch -1 --stdout | zmail send --to devs@example.com --subject "patch" --body - --from work
+```
+
+No terminal is opened and no cache is read: the process loads the config, asks
+the account's `password_command` (or its sealed credential) for the password,
+hands the message to SMTP, and exits. **0 means the server took it, 1 means it
+did not** — a script can tell "sent" from "quietly did nothing". `--body -` reads
+standard input, truncated at the same 128 KiB bound as everything else;
+`--from` picks an account by label or by address, and without it the first
+account in the config sends.
 
 In the demo, sending is real end to end: the message is appended to Sent and the
 status line says `Message sent · 2 opens Sent`. No account needed.

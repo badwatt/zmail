@@ -31,15 +31,43 @@ pub const Launch = struct {
     config_path: ?[]const u8 = null,
 };
 
+/// `zmail send`: one message and out, for scripts, cron, and pipelines.
+pub const Send = struct {
+    to: []const u8 = "",
+    subject: []const u8 = "",
+    /// Ignored when `body_from_stdin` is set.
+    body: []const u8 = "",
+    /// `--body -`: read the body from standard input, bounded like everything.
+    body_from_stdin: bool = false,
+    /// A label or an address. Empty means the first account in the config.
+    from: []const u8 = "",
+};
+
 pub const Action = union(enum) {
     launch: Launch,
+    send: Send,
     print_version,
     print_help,
     usage_error: UsageError,
 };
 
+pub const SendError = error{InvalidRecipient};
+
+/// The message `zmail send` hands to the outbox. The sender is filled in by the
+/// caller, which is the only one that knows which account was chosen.
+pub fn outgoing(request: Send, body: []const u8) SendError!core.outgoing.Outgoing {
+    var message = core.outgoing.Outgoing{ .body = body };
+    message.to = core.address.Address.init(request.to) catch return error.InvalidRecipient;
+    // Longer than the bound: the subject is truncated like any other ingress.
+    message.subject.set(request.subject);
+    return message;
+}
+
 /// Parses `argv`, including the program name at index 0.
 pub fn parse(args: []const []const u8) Action {
+    // A subcommand, not a flag: `send` never opens the terminal.
+    if (args.len > 1 and std.mem.eql(u8, args[1], "send")) return parse_send(args[2..]);
+
     var launch = Launch{};
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
@@ -88,6 +116,61 @@ pub fn parse(args: []const []const u8) Action {
         return .{ .usage_error = .{ .unexpected_argument = arg } };
     }
     return .{ .launch = launch };
+}
+
+/// The flags of `zmail send`. Space- or `=`-separated values, one of each, and
+/// no positionals: a script that mistypes a flag gets an error, not a message
+/// with the wrong recipient.
+fn parse_send(args: []const []const u8) Action {
+    const names = [_][]const u8{ "--to", "--subject", "--body", "--from" };
+    var seen: [names.len]bool = @splat(false);
+    var send = Send{};
+
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return .print_help;
+        if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) return .print_version;
+
+        var matched = false;
+        for (names, 0..) |name, slot| {
+            if (!std.mem.startsWith(u8, arg, name)) continue;
+            if (arg.len > name.len and arg[name.len] != '=') continue;
+
+            if (seen[slot]) return .{ .usage_error = .{ .duplicate_flag = name } };
+            seen[slot] = true;
+
+            var value = arg[name.len..];
+            if (value.len == 0) {
+                if (index + 1 == args.len) return .{ .usage_error = .{ .missing_value = name } };
+                index += 1;
+                value = args[index];
+            } else {
+                value = value[1..]; // the '='
+            }
+            if (value.len == 0) return .{ .usage_error = .{ .missing_value = name } };
+
+            switch (slot) {
+                0 => send.to = value,
+                1 => send.subject = value,
+                2 => {
+                    if (std.mem.eql(u8, value, "-")) {
+                        send.body_from_stdin = true;
+                    } else {
+                        send.body = value;
+                    }
+                },
+                3 => send.from = value,
+                else => unreachable,
+            }
+            matched = true;
+            break;
+        }
+        if (!matched) return .{ .usage_error = .{ .unknown_flag = arg } };
+    }
+
+    if (send.to.len == 0) return .{ .usage_error = .{ .missing_value = "--to" } };
+    return .{ .send = send };
 }
 
 /// Directory part of a path, or "" when the path has none.
@@ -171,6 +254,7 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\{s} {s} - a calm terminal mail client
         \\
         \\Usage: {s} [options]
+        \\       {s} send --to ADDR --subject TEXT [--body TEXT|-] [--from LABEL]
         \\
         \\Options:
         \\  -h, --help       Show this help and exit
@@ -187,7 +271,7 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\Inside zmail, press ? for the key map.
         \\
     ,
-        .{ meta.name, meta.version, meta.name },
+        .{ meta.name, meta.version, meta.name, meta.name },
     ) catch return "";
     return writer.buffered();
 }
@@ -371,6 +455,63 @@ test "render_version names the product and its semver" {
         unreachable;
     try testing.expectEqualStrings(expected, output);
     try testing.expectEqualStrings(meta.name, output[0..meta.name.len]);
+}
+
+test "send: the flags become one message" {
+    const action = parse(&[_][]const u8{
+        meta.name,   "send",
+        "--to",      "alice@example.com",
+        "--subject", "hi",
+        "--body",    "text",
+        "--from",    "work",
+    });
+    const request = action.send;
+    try testing.expectEqualStrings("alice@example.com", request.to);
+    try testing.expectEqualStrings("hi", request.subject);
+    try testing.expectEqualStrings("text", request.body);
+    try testing.expectEqualStrings("work", request.from);
+    try testing.expect(!request.body_from_stdin);
+}
+
+test "send: --body - reads the body from stdin, and --flag=value works" {
+    const action = parse(&[_][]const u8{
+        meta.name, "send", "--to=a@example.com", "--subject=s", "--body", "-",
+    });
+    try testing.expectEqualStrings("a@example.com", action.send.to);
+    try testing.expect(action.send.body_from_stdin);
+    try testing.expectEqualStrings("", action.send.body);
+}
+
+test "send: a bad invocation is a usage error, never a half message" {
+    try testing.expectEqualStrings(
+        "--to",
+        parse(&[_][]const u8{ meta.name, "send", "--subject", "s" }).usage_error.missing_value,
+    );
+    try testing.expectEqualStrings(
+        "--body",
+        parse(&[_][]const u8{ meta.name, "send", "--to", "a@example.com", "--body" }).usage_error.missing_value,
+    );
+    try testing.expectEqualStrings(
+        "--to",
+        parse(&[_][]const u8{ meta.name, "send", "--to", "a@b", "--to", "c@d" }).usage_error.duplicate_flag,
+    );
+    try testing.expectEqualStrings(
+        "--frmo",
+        parse(&[_][]const u8{ meta.name, "send", "--to", "a@example.com", "--frmo", "w" }).usage_error.unknown_flag,
+    );
+}
+
+test "send: the outgoing message carries the address, subject, and body" {
+    const request = Send{ .to = "Alice <alice@example.com>", .subject = "hi", .body = "line one\nline two" };
+    const message = try outgoing(request, request.body);
+    try testing.expectEqualStrings("alice", message.to.local.slice());
+    try testing.expectEqualStrings("example.com", message.to.domain.slice());
+    try testing.expectEqualStrings("hi", message.subject.slice());
+    try testing.expectEqualStrings("line one\nline two", message.body);
+    // Not a reply: there is nothing to answer.
+    try testing.expect(!message.isReply());
+
+    try testing.expectError(error.InvalidRecipient, outgoing(Send{ .to = "not an address" }, ""));
 }
 
 test "render_help documents every option and the demo default" {

@@ -16,12 +16,14 @@ pub const Context = struct {
 
 pub const Hooks = struct {
     launch: *const fn (std.mem.Allocator, std.Io, cli.Launch) anyerror!u8 = launch_mod.run,
+    send: *const fn (std.mem.Allocator, std.Io, cli.Send) anyerror!u8 = launch_mod.send,
 };
 
 pub const Outcome = union(enum) {
     print_stdout: []const u8,
     print_stderr: struct { text: []const u8, exit: u8 },
     launch: cli.Launch,
+    send: cli.Send,
 };
 
 pub fn decide(args: []const []const u8, stdout_buffer: []u8, stderr_buffer: []u8) Outcome {
@@ -33,6 +35,7 @@ pub fn decide(args: []const []const u8, stdout_buffer: []u8, stderr_buffer: []u8
             .exit = 2,
         } },
         .launch => |options| return .{ .launch = options },
+        .send => |request| return .{ .send = request },
     }
 }
 
@@ -82,6 +85,10 @@ pub fn main_with(context: Context, hooks: Hooks, stdout: *std.Io.Writer, stderr:
                 return 1;
             },
             else => return err,
+        },
+        .send => |request| return hooks.send(context.gpa, context.io, request) catch |err| {
+            try stderr.print("{s}: send failed: {s}\n", .{ meta.name, @errorName(err) });
+            return 1;
         },
     }
 }
@@ -243,4 +250,50 @@ test "main_with rejects too many arguments" {
         .args = .{ .vector = &vector },
     }, .{ .launch = stub_launch }, &out, &err));
     try testing.expectEqualStrings(meta.name ++ ": too many arguments\n", err.buffered());
+}
+
+test "decide: send is not a launch, and it keeps the flags it was given" {
+    var out: [1024]u8 = undefined;
+    var err: [256]u8 = undefined;
+    const outcome = decide(&[_][]const u8{ meta.name, "send", "--to", "a@example.com", "--subject", "s" }, &out, &err);
+    try testing.expectEqualStrings("a@example.com", outcome.send.to);
+    try testing.expectEqualStrings("s", outcome.send.subject);
+}
+
+test "main_with sends without a terminal, and reports a failure as exit 1" {
+    var out_buffer: [512]u8 = undefined;
+    var err_buffer: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&out_buffer);
+    var err = std.Io.Writer.fixed(&err_buffer);
+
+    const args = [_][*:0]const u8{
+        meta.name ++ "\x00",
+        "send\x00",
+        "--to\x00",
+        "a@example.com\x00",
+    };
+    const code = try main_with(.{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .args = .{ .vector = &args },
+    }, .{ .send = stub_send }, &out, &err);
+    try testing.expectEqual(@as(u8, 8), code);
+
+    out = std.Io.Writer.fixed(&out_buffer);
+    err = std.Io.Writer.fixed(&err_buffer);
+    const failed = try main_with(.{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .args = .{ .vector = &args },
+    }, .{ .send = stub_send_boom }, &out, &err);
+    try testing.expectEqual(@as(u8, 1), failed);
+    try testing.expect(std.mem.indexOf(u8, err.buffered(), "send failed: Boom") != null);
+}
+
+fn stub_send(_: std.mem.Allocator, _: std.Io, request: cli.Send) anyerror!u8 {
+    return if (request.to.len > 0) 8 else 9;
+}
+
+fn stub_send_boom(_: std.mem.Allocator, _: std.Io, _: cli.Send) !u8 {
+    return error.Boom;
 }

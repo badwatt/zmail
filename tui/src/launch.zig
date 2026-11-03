@@ -532,6 +532,139 @@ const Live = struct {
     }
 };
 
+/// `zmail send`: one message, no terminal, no cache. The exit code is the whole
+/// answer -- 0 when the server took it, 1 when it did not -- so a script can
+/// tell the difference between "sent" and "silently did nothing".
+pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+    const stderr = &stderr_writer.interface;
+    defer stderr.flush() catch {};
+
+    var body_buffer: [core.limits.body_max]u8 = undefined;
+    var body: []const u8 = request.body;
+    if (request.body_from_stdin) {
+        body = read_stdin(io, &body_buffer) catch {
+            try stderr.print("{s}: could not read the body from stdin\n", .{core.meta.name});
+            return 1;
+        };
+    }
+
+    const typed = cli.outgoing(request, body) catch {
+        try stderr.print("{s}: --to is not an address\n", .{core.meta.name});
+        return 1;
+    };
+
+    var path_buffer: [512]u8 = undefined;
+    const path = cli.default_config_path(&path_buffer, os.env("XDG_CONFIG_HOME"), os.env("HOME"));
+    if (path.len == 0) {
+        try stderr.print("{s}: no config path: set XDG_CONFIG_HOME or HOME\n", .{core.meta.name});
+        return 1;
+    }
+
+    var config_buffer: [8193]u8 = undefined;
+    const config_text = read_file(io, path, &config_buffer) catch {
+        try stderr.print("{s}: no config at {s}\n", .{ core.meta.name, path });
+        return 1;
+    };
+    const file = core.config.parse(config_text) catch |err| {
+        try stderr.print("{s}: {s}\n", .{ core.meta.name, config_message(err) });
+        return 1;
+    };
+    const entry = pick_account(&file, request.from) orelse {
+        try stderr.print("{s}: no account matches --from {s}\n", .{ core.meta.name, request.from });
+        return 1;
+    };
+    if (entry.smtp == null) {
+        try stderr.print("{s}: account {s} has no SMTP server\n", .{ core.meta.name, entry.label.slice() });
+        return 1;
+    }
+
+    // One account, built where it lives: the struct carries an IMAP client and
+    // buffers as large as the body limit.
+    const live = gpa.create(Live) catch return 1;
+    defer gpa.destroy(live);
+    live.* = .{};
+    defer live.close();
+
+    const account = live.reserve(gpa, io) orelse return 1;
+    account.gpa = gpa;
+    account.io = io;
+    account.id = core.id.AccountId.from_int(1);
+    account.from = entry.account.address;
+    account.port = entry.account.imap.port;
+    account.smtp_enabled = true;
+    account.label.set(entry.label.slice());
+    account.host.set(entry.account.imap.host.slice());
+    account.username.set(entry.account.username.slice());
+    const smtp = entry.smtp.?;
+    account.smtp_host.set(smtp.host.slice());
+    account.smtp_port = smtp.port;
+
+    read_password(
+        gpa,
+        io,
+        path,
+        entry.label.slice(),
+        file.len == 1,
+        entry.password_command.slice(),
+        &account.password,
+    ) catch {};
+    account.password_ready = !account.password.is_empty();
+    live.add(account);
+
+    if (!account.password_ready) {
+        try stderr.print("{s}: no password for {s}\n", .{ core.meta.name, entry.label.slice() });
+        return 1;
+    }
+
+    const outbox = LiveAccount.openOutbox(account) catch {
+        try stderr.print("{s}: could not connect to {s}:{d}\n", .{
+            core.meta.name, smtp.host.slice(), smtp.port,
+        });
+        return 1;
+    };
+    defer LiveAccount.closeOutbox(account);
+
+    var message = typed;
+    message.account = account.id;
+    message.from = entry.account.address;
+    outbox.send(&message) catch {
+        try stderr.print("{s}: the server refused the message\n", .{core.meta.name});
+        return 1;
+    };
+    return 0;
+}
+
+/// The account `--from` names: a label, or the address it sends from. Empty
+/// means the first one, which is what a one-account config always wants.
+fn pick_account(file: *const core.config.File, wanted: []const u8) ?*const core.config.Entry {
+    if (file.len == 0) return null;
+    if (wanted.len == 0) return &file.entries[0];
+
+    for (file.items(), 0..) |*entry, index| {
+        if (std.mem.eql(u8, entry.label.slice(), wanted)) return &file.entries[index];
+        var buffer: [core.limits.address_max]u8 = undefined;
+        if (std.mem.eql(u8, entry.account.address.addr_spec(&buffer), wanted)) return &file.entries[index];
+    }
+    return null;
+}
+
+/// Everything a pipe writes, up to the body limit. A larger message is
+/// truncated like any other ingress rather than refused: half a diff is still
+/// a diff, and refusing it would lose the mail.
+fn read_stdin(io: std.Io, buffer: []u8) ![]const u8 {
+    var file_buffer: [1024]u8 = undefined;
+    var reader = std.Io.File.stdin().reader(io, &file_buffer);
+    var total: usize = 0;
+    while (total < buffer.len) {
+        const read = try reader.interface.readSliceShort(buffer[total..]);
+        if (read == 0) break;
+        total += read;
+    }
+    return buffer[0..total];
+}
+
 fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
     var path_buffer: [512]u8 = undefined;
     const path = options.config_path orelse cli.default_config_path(
