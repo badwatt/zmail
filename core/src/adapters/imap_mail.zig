@@ -170,9 +170,11 @@ pub const ImapMail = struct {
         const self: *ImapMail = @ptrCast(@alignCast(context));
         if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
         const raw = self.client.fetch_body(try uid_of(id), &self.raw) catch |err| return mapError(err);
-        if (raw.len > out.len) return error.Unavailable;
-        @memcpy(out[0..raw.len], raw);
-        return out[0..raw.len];
+        // Truncate, never refuse: an attachment-heavy message is still a
+        // message, and the text of it is almost always in the part that fits.
+        const length = @min(raw.len, out.len);
+        @memcpy(out[0..length], raw[0..length]);
+        return out[0..length];
     }
 
     fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) port.Error!void {

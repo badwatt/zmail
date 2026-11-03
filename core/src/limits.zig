@@ -39,10 +39,11 @@ pub const mailboxes_max: u32 = 64;
 /// has no limit; 128 bytes holds every real-world name.
 pub const mailbox_name_max: u32 = 128;
 
-/// Maximum bytes of a message body shown in the reader. A shop newsletter runs
-/// to about 120 KiB of mail, most of it markup, so the limit has to hold the
-/// message as it arrived rather than just its text.
-pub const body_max: u32 = 128 * 1024;
+/// Maximum bytes of a message body shown in the reader. Mail from a web client
+/// is not a 2 KiB note any more: a newsletter with inline images runs to a few
+/// hundred KiB of markup and base64, and a message that cannot be framed cannot
+/// be read at all. The text part is almost always in the first part of that.
+pub const body_max: u32 = 512 * 1024;
 
 /// Maximum bytes of the help overlay's filter.
 pub const help_query_max: u32 = 24;
