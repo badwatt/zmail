@@ -118,6 +118,7 @@ fn run_session(
     var dir_buffer: [512]u8 = undefined;
     const cache_dir = cli.default_cache_dir(&dir_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
     var browser = Browser{ .io = io, .cache_dir = cache_dir, .gpa = gpa, .system = system };
+    var editor = Editor{ .io = io };
     const session = gpa.create(session_mod.Session) catch
         return .{ .message = "Not enough memory to start" };
     defer gpa.destroy(session);
@@ -137,6 +138,8 @@ fn run_session(
         .open_url_context = &browser,
         .open_external = openExternalThunk,
         .open_external_context = &browser,
+        .edit_text = editTextThunk,
+        .edit_text_context = &editor,
         .fetch_image = fetchImageThunk,
         .fetch_image_context = &browser,
         .draw_image = drawImageThunk,
@@ -156,6 +159,20 @@ const no_config = "No config yet: run " ++ core.meta.name ++ " once to create on
 /// The Browser behind a Thunk's opaque context.
 fn browser_of(context: *anyopaque) *Browser {
     return @ptrCast(@alignCast(context));
+}
+
+/// The editor behind the session's `edit_text` thunk.
+fn editor_of(context: *anyopaque) *Editor {
+    return @ptrCast(@alignCast(context));
+}
+
+/// The user's editor, as the session sees it: one function, no shell.
+const Editor = struct {
+    io: std.Io,
+};
+
+fn editTextThunk(context: *anyopaque, initial: []const u8, out: []u8) ?[]const u8 {
+    return os.edit_text(editor_of(context).io, initial, out);
 }
 
 /// Clicking a link hands it to whatever opens browsers on this machine.

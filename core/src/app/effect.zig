@@ -34,6 +34,9 @@ pub const Effect = union(enum) {
     empty_mailbox: struct { account: ?AccountId, mailbox: Mailbox },
     /// Hand the message to the outbox. The body is borrowed from compose state.
     send: Outgoing,
+    /// Hand the body to the user's editor. `initial` is borrowed from compose
+    /// state; the front end answers with `Command.compose_body_set`.
+    edit_body: struct { initial: []const u8 },
 };
 
 pub const Effects = struct {

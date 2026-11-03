@@ -98,6 +98,12 @@ pub const Command = union(enum) {
     /// Append the original below the draft, quoted. Sent right after
     /// `compose_reply` when the message is already loaded.
     compose_quote: Quote,
+    /// Hand the body to the user's editor: the front end runs it and answers
+    /// with `compose_body_set`.
+    compose_edit,
+    compose_body_set: struct { text: []const u8 },
+    /// The editor could not be started, or exited with nothing usable.
+    compose_edit_failed,
     /// Internal: the outbox accepted the message.
     send_succeeded,
     /// Internal: the outbox refused it; the draft stays.
@@ -108,7 +114,7 @@ pub const Command = union(enum) {
     pub fn clears_status(self: Command) bool {
         return switch (self) {
             // These set their own status message.
-            .noop, .set_viewport, .send_succeeded, .send_failed => false,
+            .noop, .set_viewport, .send_succeeded, .send_failed, .compose_body_set => false,
             else => true,
         };
     }
@@ -170,11 +176,14 @@ test "every command is classified for status clearing" {
         .{ .command = .compose_previous_field, .clears = true },
         .{ .command = .compose_clear_field, .clears = true },
         .{ .command = .{ .compose_quote = .{} }, .clears = true },
+        .{ .command = .compose_edit, .clears = true },
+        .{ .command = .{ .compose_body_set = .{ .text = "x" } }, .clears = false },
+        .{ .command = .compose_edit_failed, .clears = true },
         .{ .command = .send_succeeded, .clears = false },
         .{ .command = .send_failed, .clears = false },
     };
     for (commands) |case| {
         try testing.expectEqual(case.clears, case.command.clears_status());
     }
-    try testing.expectEqual(@as(usize, 50), commands.len);
+    try testing.expectEqual(@as(usize, 53), commands.len);
 }

@@ -102,6 +102,11 @@ pub const Deps = struct {
     /// first link when there is no HTML.
     open_external: ?*const fn (context: *anyopaque, html: []const u8, link: []const u8) void = null,
     open_external_context: *anyopaque = undefined,
+    /// Hands a buffer to the user's editor and returns what came back, or null
+    /// when no editor is configured or it failed. Blocking: an editor is a
+    /// conversation with the user.
+    edit_text: ?*const fn (context: *anyopaque, initial: []const u8, out: []u8) ?[]const u8 = null,
+    edit_text_context: *anyopaque = undefined,
     /// Paints one image of the message at a cell, from its PNG bytes. False
     /// when the terminal cannot draw it.
     draw_image: ?*const fn (
@@ -282,6 +287,8 @@ pub const Session = struct {
     text_link_count: usize = 0,
     /// MIME decoding scratch, kept here so nothing is allocated per message.
     scratch_bytes: [core.limits.body_max]u8 = undefined,
+    /// What the user's editor wrote, before the core sanitizes it into the body.
+    edited: [core.limits.body_max]u8 = undefined,
 
     size: system_mod.Size = .{},
     now_unix: i64 = 0,
@@ -934,6 +941,27 @@ pub const Session = struct {
         return true;
     }
 
+    /// Hands the terminal to the editor and takes the body back. What the answer
+    /// means is `update`'s rule; this only runs the program.
+    fn edit_body(self: *Session, initial: []const u8) void {
+        const edit = self.deps.edit_text orelse {
+            _ = self.apply(.compose_edit_failed);
+            return;
+        };
+
+        self.deps.system.suspend_ui() catch {};
+        const edited = edit(self.deps.edit_text_context, initial, &self.edited);
+        // The alternate screen comes back empty: everything is redrawn.
+        self.deps.system.resume_ui() catch {};
+        self.needs_render = true;
+
+        const text = edited orelse {
+            _ = self.apply(.compose_edit_failed);
+            return;
+        };
+        _ = self.apply(.{ .compose_body_set = .{ .text = text } });
+    }
+
     /// A reply that starts while the original is loaded gets it quoted below
     /// the draft. What quoting means is `update`'s rule; this only knows which
     /// buffer still holds the text.
@@ -993,6 +1021,11 @@ pub const Session = struct {
             // the UI; everything else waits for the worker.
             switch (effect) {
                 .refresh => {},
+                .edit_body => {
+                    // No spinner: the terminal is handed over to another program.
+                    self.edit_body(effect.edit_body.initial);
+                    continue;
+                },
                 .fetch_body => |args| {
                     if (self.refreshing) {
                         self.pending_body = .{
@@ -1019,6 +1052,7 @@ pub const Session = struct {
                 .oauth_account => |args| self.oauth_account(args.account),
                 .refresh => self.start_refresh(),
                 .send => |outgoing| self.send(&outgoing),
+                .edit_body => unreachable, // handled before the loading wrapper
             }
             self.end_loading(timer);
         }
@@ -2215,6 +2249,60 @@ const RecordingOutbox = struct {
         self.sent += 1;
     }
 };
+
+/// An editor that does not open one: it records what it was given and returns
+/// whatever the test scripted.
+const FakeEditor = struct {
+    text: ?[]const u8 = null,
+    seen: [64]u8 = undefined,
+    seen_len: usize = 0,
+
+    fn edit(context: *anyopaque, initial: []const u8, out: []u8) ?[]const u8 {
+        const self: *FakeEditor = @ptrCast(@alignCast(context));
+        self.seen_len = @min(initial.len, self.seen.len);
+        @memcpy(self.seen[0..self.seen_len], initial[0..self.seen_len]);
+
+        const text = self.text orelse return null;
+        const length = @min(text.len, out.len);
+        @memcpy(out[0..length], text[0..length]);
+        return out[0..length];
+    }
+
+    fn seen_text(self: *const FakeEditor) []const u8 {
+        return self.seen[0..self.seen_len];
+    }
+};
+
+test "ctrl+e puts the body in the editor and takes it back" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+
+    var editor = FakeEditor{ .text = "written\nelsewhere" };
+    rig.session.deps.edit_text = FakeEditor.edit;
+    rig.session.deps.edit_text_context = &editor;
+
+    rig.send("c");
+    rig.send("\t\thello");
+    rig.send("\x05"); // Ctrl+E
+
+    try testing.expectEqualStrings("hello", editor.seen_text());
+    try testing.expectEqualStrings("written\nelsewhere", rig.session.state.compose.body_slice());
+    try testing.expectEqual(core.state.View.compose, rig.session.state.view);
+}
+
+test "an editor that cannot start keeps the draft and says why" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+
+    rig.send("c");
+    rig.send("\t\thello");
+    rig.send("\x05");
+
+    try testing.expectEqualStrings("hello", rig.session.state.compose.body_slice());
+    try testing.expect(rig.session.state.status_alert);
+}
 
 test "a reply opened from the reader quotes the original" {
     var rig: Rig = .{};

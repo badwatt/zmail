@@ -10,6 +10,7 @@ const assert = std.debug.assert;
 
 const limits = @import("../limits.zig");
 const Text = @import("../domain/text.zig").Text;
+const copy_sanitized_body = @import("../domain/text.zig").copy_sanitized_body;
 const Address = @import("../domain/address.zig").Address;
 const MessageId = @import("../domain/id.zig").MessageId;
 const AccountId = @import("../domain/id.zig").AccountId;
@@ -92,6 +93,14 @@ pub const Compose = struct {
             .subject => .to,
             .body => .subject,
         };
+    }
+
+    /// Replaces the body with text that did not arrive as keystrokes: an
+    /// editor's file. Sanitized and cut at a UTF-8 boundary like any other
+    /// ingress, because a file on disk is exactly as trustworthy as the program
+    /// that wrote it.
+    pub fn set_body(self: *Compose, text: []const u8) void {
+        self.body_len = copy_sanitized_body(self.body[0..], text);
     }
 
     /// Appends the original below the draft, the way a reply reads: the
@@ -211,6 +220,20 @@ test "a quote stops at the last line that fits" {
 
     const quoted = compose.body[limits.body_max - 40 .. compose.body_len];
     try testing.expectEqualStrings("\nattr:\n> short\n", quoted);
+}
+
+test "set_body replaces the body, sanitized as if it came from the wire" {
+    var compose = Compose{ .active = true, .field = .body };
+    compose.append('x');
+    compose.set_body("hello\x1bthere\n");
+    try testing.expectEqualStrings("hello there\n", compose.body_slice());
+
+    // A file on disk is sized by nobody: the body stops at its capacity instead.
+    const huge = try testing.allocator.alloc(u8, limits.body_max + 8);
+    defer testing.allocator.free(huge);
+    @memset(huge, 'y');
+    compose.set_body(huge);
+    try testing.expectEqual(limits.body_max, compose.body_len);
 }
 
 test "reset starts an empty compose at the recipient" {

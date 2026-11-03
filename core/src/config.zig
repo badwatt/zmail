@@ -16,42 +16,13 @@ const limits = @import("limits.zig");
 const Text = @import("domain/text.zig").Text;
 const Address = @import("domain/address.zig").Address;
 const account = @import("domain/account.zig");
+const argv_mod = @import("argv.zig");
 
 pub const max_accounts: u8 = 4;
 
-/// Words in a `password_command`: enough for `gopass show -o mail/work`.
-pub const argv_max: u8 = 8;
-
-/// A command line split into arguments. The slices point into the config text
-/// the caller parsed, so they live as long as that buffer does.
-pub const Argv = struct {
-    items: [argv_max][]const u8 = undefined,
-    len: u8 = 0,
-
-    pub fn slice(self: *const Argv) []const []const u8 {
-        assert(self.len <= argv_max);
-        return self.items[0..self.len];
-    }
-};
-
-/// Splits a `password_command` into argv on runs of spaces. No quoting, no
-/// escapes, and above all no shell: a value in a config file must not be able
-/// to become a program with arguments the user did not write. The cost is that
-/// a path with a space in it cannot be expressed, which is the honest limit of
-/// this shortcut.
-pub fn split_argv(value: []const u8, out: *Argv) Error!void {
-    out.len = 0;
-    var rest = value;
-    while (true) {
-        rest = std.mem.trimStart(u8, rest, " ");
-        if (rest.len == 0) return;
-        if (out.len == argv_max) return error.TooManyArguments;
-        const end = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
-        out.items[out.len] = rest[0..end];
-        out.len += 1;
-        rest = rest[end..];
-    }
-}
+/// A `password_command`, split the same way an editor command is.
+pub const Argv = argv_mod.Argv;
+pub const split_argv = argv_mod.split;
 
 pub const Entry = struct {
     label: Text(limits.label_max) = .{},
@@ -528,17 +499,6 @@ test "a password_command is kept as an argv, never as a shell line" {
     try testing.expectEqual(@as(u8, 3), argv.len);
     try testing.expectEqualStrings("pass", argv.slice()[0]);
     try testing.expectEqualStrings("mail/work", argv.slice()[2]);
-}
-
-test "split_argv runs of spaces are one separator, and too many words fail" {
-    var argv: Argv = .{};
-    try split_argv("  pass   show  mail  ", &argv);
-    try testing.expectEqual(@as(usize, 3), argv.slice().len);
-    try testing.expectEqualStrings("mail", argv.slice()[2]);
-
-    // A command with more words than the client will run is refused, rather
-    // than silently truncated into a different command.
-    try testing.expectError(error.TooManyArguments, split_argv("a b c d e f g h i", &argv));
 }
 
 test "a password_command still cannot smuggle a password into the config" {

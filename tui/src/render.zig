@@ -832,6 +832,7 @@ const help_hints = [_]Hint{
 const compose_hints = [_]Hint{
     .{ .keys = "Tab", .action = "next field" },
     .{ .keys = "Ctrl+S", .action = "send" },
+    .{ .keys = "Ctrl+E", .action = "edit body" },
     .{ .keys = "Ctrl+U", .action = "clear field" },
     .{ .keys = "Esc", .action = "cancel" },
 };
@@ -967,6 +968,7 @@ const help_rows = [_]Hint{
     .{ .keys = "Tab / Shift+Tab", .action = "next / previous field" },
     .{ .keys = "Enter", .action = "next field, or a new line in the body" },
     .{ .keys = "Ctrl+S", .action = "send (compose), save (forms)" },
+    .{ .keys = "Ctrl+E", .action = "write the body in $EDITOR" },
     .{ .keys = "Ctrl+U", .action = "clear the field" },
     .{ .keys = "Space", .action = "toggle an option" },
     .{ .keys = "Esc", .action = "cancel, close" },
@@ -983,12 +985,13 @@ const help_rows = [_]Hint{
 /// What the card must mention, checked by a test: a key that works and is not
 /// here is a key nobody will find.
 const required_in_help = [_][]const u8{
-    "Ctrl+Q", "Ctrl+R", "Tab",   "1 - 6",  "a",      "A",          "/",        "j",
-    "k",      "g",      "G",     "Ctrl+D", "Ctrl+F", "Ctrl+N",     "PageDown", "Space",
-    "Enter",  "l",      "Right", "o",      "c",      "r",          "u",        "s",
-    "*",      "d",      "#",     "Delete", "X",      "E",          "click",    "wheel",
-    "q",      "h",      "Esc",   "Left",   "H",      "Ctrl+click", "drag",     "Shift+Tab",
-    "Ctrl+S", "Ctrl+U", "n",     "e",      "Up",     "Down",       "Home",     "End",
+    "Ctrl+Q", "Ctrl+R", "Tab",    "1 - 6",  "a",      "A",          "/",        "j",
+    "k",      "g",      "G",      "Ctrl+D", "Ctrl+F", "Ctrl+N",     "PageDown", "Space",
+    "Enter",  "l",      "Right",  "o",      "c",      "r",          "u",        "s",
+    "*",      "d",      "#",      "Delete", "X",      "E",          "click",    "wheel",
+    "q",      "h",      "Esc",    "Left",   "H",      "Ctrl+click", "drag",     "Shift+Tab",
+    "Ctrl+S", "Ctrl+U", "Ctrl+E", "n",      "e",      "Up",         "Down",     "Home",
+    "End",
 };
 
 const account_rows_max = 8;

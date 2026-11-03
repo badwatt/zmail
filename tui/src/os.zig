@@ -14,6 +14,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 
 const system_mod = @import("system.zig");
+const core = @import("core");
 
 const c = std.c;
 const Winsize = std.posix.winsize;
@@ -156,6 +157,66 @@ pub fn sleep_ms(ms: u64) void {
         .nsec = @intCast((ms % 1000) * 1_000_000),
     };
     _ = std.c.nanosleep(&request, null);
+}
+
+/// The mode every file zmail writes is created with: only its owner reads it.
+const private_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
+
+/// Opens the user's editor on a temporary file seeded with `initial`, waits for
+/// it, and copies what the editor saved into `out`.
+///
+/// The editor comes from `$ZMAIL_EDITOR`, then `$VISUAL`, then `$EDITOR`, then
+/// `vi`, and it runs as an argv list: no shell, so nothing here can turn a
+/// path into code. Returns null when there is nothing to run, or when the file
+/// could not be read back.
+pub fn edit_text(io: std.Io, initial: []const u8, out: []u8) ?[]const u8 {
+    const command = env("ZMAIL_EDITOR") orelse env("VISUAL") orelse env("EDITOR") orelse "vi";
+
+    var argv: core.argv.Argv = .{};
+    core.argv.split(command, &argv) catch return null;
+    if (argv.len == 0) return null;
+
+    // One random name per edit: a file left behind by a crash must never be the
+    // file the next edit opens.
+    var random_suffix: u64 = undefined;
+    io.random(std.mem.asBytes(&random_suffix));
+    var path_buffer: [256]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buffer, "{s}/zmail-edit-{x}", .{
+        env("TMPDIR") orelse "/tmp",
+        random_suffix,
+    }) catch return null;
+
+    const file = std.Io.Dir.cwd().createFile(io, path, .{
+        .exclusive = true,
+        .permissions = private_mode,
+    }) catch return null;
+    var closed = false;
+    defer {
+        if (!closed) file.close(io);
+        std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    }
+    file.writeStreamingAll(io, initial) catch return null;
+    file.close(io);
+    closed = true;
+
+    var words = argv.items;
+    if (argv.len == words.len) return null; // no room left for the path
+    words[argv.len] = path;
+
+    var child = std.process.spawn(io, .{
+        .argv = words[0 .. argv.len + 1],
+        // The editor is the program the user is talking to: it gets the
+        // terminal, not a pipe.
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch return null;
+    _ = child.wait(io) catch return null;
+
+    const edited = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer edited.close(io);
+    const length = edited.readPositionalAll(io, out, 0) catch return null;
+    return out[0..length];
 }
 
 /// Wall clock in Unix seconds, from CLOCK_REALTIME. `0` means "unknown", which
@@ -368,4 +429,47 @@ test "monotonic_ms advances, and sleep_ms waits at least one tick" {
 
     // Zero means "no wait", and must not spin.
     sleep_ms(0);
+}
+
+test "edit_text runs the editor on a temporary file and reads it back" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    // A real program, not a shell: it writes over the file it is given, which
+    // is what an editor does.
+    const script_path = "/tmp/zmail-editor-test.sh";
+    const script = "#!/bin/sh\nprintf 'edited by the editor\\nsecond line' > \"$1\"\n";
+    const script_file = try std.Io.Dir.cwd().createFile(io, script_path, .{
+        .permissions = @fromBackingInt(@intCast(0o700)),
+    });
+    try script_file.writeStreamingAll(io, script);
+    script_file.close(io);
+    defer std.Io.Dir.cwd().deleteFile(io, script_path) catch {};
+
+    const setenv = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    };
+    try testing.expectEqual(@as(c_int, 0), setenv.setenv("ZMAIL_EDITOR", script_path, 1));
+
+    var out: [128]u8 = undefined;
+    const edited = edit_text(io, "original", &out).?;
+    try testing.expectEqualStrings("edited by the editor\nsecond line", edited);
+}
+
+test "edit_text reports nothing when the editor cannot run" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const setenv = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+    };
+    try testing.expectEqual(
+        @as(c_int, 0),
+        setenv.setenv("ZMAIL_EDITOR", "/nonexistent/editor-that-does-not-exist", 1),
+    );
+
+    var out: [16]u8 = undefined;
+    try testing.expect(edit_text(io, "original", &out) == null);
 }

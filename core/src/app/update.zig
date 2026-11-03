@@ -90,6 +90,14 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
             if (state.view == .compose) state.compose.clear_field();
         },
         .compose_quote => |quote| quote_original(state, quote),
+        .compose_edit => edit_compose(state, &effects),
+        .compose_body_set => |set| {
+            if (state.view != .compose) return effects;
+            state.compose.set_body(set.text);
+            // The editor put the cursor where the writing is.
+            state.compose.field = .body;
+        },
+        .compose_edit_failed => state.set_alert("Could not run the editor; set $EDITOR", .{}),
         .send_succeeded => compose_sent(state),
         .send_failed => compose_failed(state),
     }
@@ -539,6 +547,14 @@ fn send_compose(state: *State, effects: *Effects) void {
         .body = state.compose.body_slice(),
         .in_reply_to = state.compose.in_reply_to,
     } });
+}
+
+/// Hands the body to the editor. Running it is I/O, so the front end does that,
+/// but *what* it means -- the body, sanitized, cursor in it -- is a rule, and it
+/// lives here.
+fn edit_compose(state: *State, effects: *Effects) void {
+    if (state.view != .compose) return;
+    effects.add(.{ .edit_body = .{ .initial = state.compose.body_slice() } });
 }
 
 /// Quotes the original below the draft. The attribution is built here, not in
@@ -1579,6 +1595,41 @@ test "compose_quote is ignored outside a reply" {
     _ = apply(&fixture.state, &fixture.store, .compose_cancel);
     _ = apply(&fixture.state, &fixture.store, .{ .compose_quote = .{ .text = "hi", .at = 1_700_000_000 } });
     try testing.expectEqualStrings("", fixture.state.compose.body_slice());
+}
+
+test "compose_edit hands the body to the editor, and takes it back sanitized" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    _ = apply(&fixture.state, &fixture.store, .compose_new);
+    _ = apply(&fixture.state, &fixture.store, .compose_next_field);
+    _ = apply(&fixture.state, &fixture.store, .compose_next_field);
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_char = 'x' });
+
+    const effects = apply(&fixture.state, &fixture.store, .compose_edit);
+    try testing.expectEqual(@as(usize, 1), effects.slice().len);
+    try testing.expectEqualStrings("x", effects.slice()[0].edit_body.initial);
+
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_body_set = .{ .text = "from\x1bthe editor\n" } });
+    try testing.expectEqualStrings("from the editor\n", fixture.state.compose.body_slice());
+    // The editor leaves the cursor where the writing went.
+    try testing.expectEqual(.body, fixture.state.compose.field);
+}
+
+test "compose_edit is refused outside the composer, and a failure says so" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    const effects = apply(&fixture.state, &fixture.store, .compose_edit);
+    try testing.expect(effects.is_empty());
+
+    // The same for the answer: a body arriving with no composer open is dropped.
+    _ = apply(&fixture.state, &fixture.store, .{ .compose_body_set = .{ .text = "late" } });
+    try testing.expectEqualStrings("", fixture.state.compose.body_slice());
+
+    _ = apply(&fixture.state, &fixture.store, .compose_edit_failed);
+    try testing.expect(fixture.state.status_alert);
+    try testing.expectEqualStrings("Could not run the editor; set $EDITOR", fixture.state.status.slice());
 }
 
 test "compose_new opens an empty draft at the recipient" {

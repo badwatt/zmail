@@ -120,6 +120,18 @@ pub fn Text(comptime capacity: u32) type {
 /// Copies `source` into `dest`, truncating at a UTF-8 boundary and replacing
 /// control characters with a space. Returns the number of bytes written.
 pub fn copy_sanitized(dest: []u8, source: []const u8) u32 {
+    return copy(dest, source, false);
+}
+
+/// The same, for a message body: newlines are the one control byte a body is
+/// made of, so they survive. A carriage return is dropped instead of being
+/// turned into a space, which is what a file written on another platform would
+/// otherwise leave at the end of every line.
+pub fn copy_sanitized_body(dest: []u8, source: []const u8) u32 {
+    return copy(dest, source, true);
+}
+
+fn copy(dest: []u8, source: []const u8, keep_newlines: bool) u32 {
     assert(dest.len <= std.math.maxInt(u32));
     var out: u32 = 0;
     var index: u32 = 0;
@@ -142,6 +154,20 @@ pub fn copy_sanitized(dest: []u8, source: []const u8) u32 {
             index += 1;
             continue;
         };
+        if (codepoint == '\r' and keep_newlines) {
+            index = sequence_end;
+            continue;
+        }
+        if (codepoint == '\n' and keep_newlines) {
+            // Not through writeByte: that one asserts on controls, and a body
+            // line break is a control byte by the letter of the rule.
+            if (out < dest.len) {
+                dest[out] = '\n';
+                out += 1;
+            }
+            index = sequence_end;
+            continue;
+        }
         if (isControl(codepoint)) {
             writeByte(dest, &out, ' ');
         } else {
@@ -386,6 +412,18 @@ test "copy_sanitized: a control byte past the capacity is dropped" {
     var dest: [1]u8 = @splat(0);
     const written = copy_sanitized(&dest, "\x1b\x1b");
     try testing.expectEqualStrings(" ", dest[0..written]);
+}
+
+test "copy_sanitized_body: line breaks survive, carriage returns do not" {
+    var dest: [16]u8 = @splat(0);
+    const written = copy_sanitized_body(&dest, "one\r\ntwo\x1b\n");
+    try testing.expectEqualStrings("one\ntwo \n", dest[0..written]);
+}
+
+test "copy_sanitized_body: a newline past the capacity is dropped, not written" {
+    var dest: [2]u8 = @splat(0);
+    const written = copy_sanitized_body(&dest, "ab\ncd");
+    try testing.expectEqualStrings("ab", dest[0..written]);
 }
 
 test "isControl: covers C0, DEL, C1 and the printable boundary" {

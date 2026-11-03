@@ -167,7 +167,7 @@ written, the path, and where the password goes. `Enter` saves, `Esc` goes back,
  Looks good to me.
  See you Monday.
 ────────────────────────────────────────────────────────
- Tab next field  ·  Ctrl+S send  ·  Ctrl+U clear field  ·  Esc cancel
+ Tab next field  ·  Ctrl+S send  ·  Ctrl+E edit  ·  Esc cancel
 ```
 
 | Key | Action |
@@ -177,6 +177,7 @@ written, the path, and where the password goes. `Enter` saves, `Esc` goes back,
 | `Tab` / `Shift+Tab` | next / previous field |
 | `Backspace` | delete the last character of the active field |
 | `Ctrl+U` | clear the active field |
+| `Ctrl+E` | write the body in `$EDITOR` and take it back |
 | `Ctrl+S` | send (validates the recipient first) |
 | `Esc` | cancel the draft |
 
@@ -220,6 +221,13 @@ the original is open, it is quoted below the draft as well: an attribution line,
 then every line prefixed with `> `. Replying from the list quotes nothing — the
 body was never fetched. The draft survives a failed send. Non-ASCII text is sent
 as UTF-8, and a non-ASCII subject leaves as an RFC 2047 encoded word.
+
+`Ctrl+E` is the way out of the one-line-at-the-end editor: it writes the body to
+a temporary file, runs `$ZMAIL_EDITOR`, `$VISUAL`, `$EDITOR`, or `vi` (as an argv
+list, never through a shell) with the terminal handed over, and reads the file
+back. What comes back is sanitized and bounded exactly like mail, because a file
+on disk is not a keystroke. A message that fails to start the editor says so and
+keeps the draft.
 
 Empty fields show a dim hint (`someone@example.com`, `(no subject)`, `Write your
 message.`), and the cursor sits in the first free cell. In demo mode, sending

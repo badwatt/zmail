@@ -39,6 +39,7 @@ fn compose_key(key: Key) ?Command {
         .ctrl => |letter| switch (letter) {
             's' => .compose_send,
             'u' => .compose_clear_field,
+            'e' => .compose_edit,
             'c', 'q' => .quit,
             else => null,
         },
@@ -390,6 +391,9 @@ test "c composes and r replies from the list and the reader" {
     try check(.{ .key = .{ .char = 'r' }, .context = reader, .expected = .compose_reply });
 }
 
+test "ctrl+e in the composer asks for the editor" {
+    try check(.{ .key = .{ .ctrl = 'e' }, .context = .{ .view = .compose }, .expected = .compose_edit });
+}
 test "compose mode: typing, fields, send, cancel" {
     const writing: Context = .{ .view = .compose };
     try check(.{ .key = .{ .char = 'a' }, .context = writing, .expected = .{ .compose_char = 'a' } });
