@@ -30,6 +30,18 @@ const System = system_mod.System;
 /// tests and correct in the real client.
 pub const Now = *const fn () i64;
 
+/// Which message the reader is showing, so a request for another one can blank
+/// the page instead of leaving the previous message under the new subject.
+const ShownMessage = struct {
+    account: core.id.AccountId,
+    mailbox: Mailbox,
+    id: MessageId,
+
+    fn matches(self: ShownMessage, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) bool {
+        return self.account == account and self.mailbox == mailbox and self.id == id;
+    }
+};
+
 /// Deterministic clock used by tests and as a safe default.
 pub fn fixed_now() i64 {
     return 1_700_000_000;
@@ -226,6 +238,8 @@ pub const Session = struct {
     shown: [core.limits.body_max]u8 = undefined,
     shown_len: u32 = 0,
     body_loaded: bool = false,
+    /// The message those buffers belong to, or null before the first open.
+    shown_message: ?ShownMessage = null,
     wrapped: wrap.Wrapped = .{},
     /// The message as it arrived, kept so both views can be rendered without a
     /// second fetch.
@@ -1040,6 +1054,7 @@ pub const Session = struct {
             switch (effect) {
                 .refresh => {},
                 .fetch_body => |args| {
+                    self.begin_body(args.account, args.mailbox, args.id);
                     if (self.refreshing) {
                         self.pending_body = .{
                             .account = args.account,
@@ -1097,11 +1112,36 @@ pub const Session = struct {
         return true;
     }
 
+    /// A body was asked for. If it is not the message already on screen, the
+    /// page is blanked before the network is touched: the reader must never show
+    /// one message's words under another message's subject, not even for the
+    /// second the fetch takes.
+    fn begin_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
+        if (self.shown_message) |shown| {
+            if (shown.matches(account, mailbox, id)) return;
+        }
+
+        self.raw_len = 0;
+        self.body_len = 0;
+        self.shown_len = 0;
+        self.html_len = 0;
+        self.html_view = false;
+        self.html_ready = false;
+        self.image_slot_count = 0;
+        self.image_painted = 0;
+        self.text_link_count = 0;
+        self.html_link_count = 0;
+        self.html_kind_count = 0;
+        self.html_anchor_count = 0;
+        self.body_loaded = false;
+        self.wrapped = .{};
+    }
+
     fn fetch_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
         // The local copy first: opening a message you have read is instant.
         if (self.deps.bodies) |bodies| {
             if (bodies.load(account, mailbox, id, &self.raw) catch null) |cached| {
-                self.set_raw(cached);
+                self.set_raw(account, mailbox, id, cached);
                 return;
             }
         }
@@ -1123,13 +1163,14 @@ pub const Session = struct {
             return;
         };
         if (self.deps.bodies) |bodies| bodies.save(account, mailbox, id, raw) catch {};
-        self.set_raw(raw);
+        self.set_raw(account, mailbox, id, raw);
     }
 
     /// Renders both views from one message: the text one (what the reader shows
     /// by default) and, when there is an HTML part, the reading view made from
     /// it. `H` switches between them without touching the network.
-    fn set_raw(self: *Session, raw: []const u8) void {
+    fn set_raw(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId, raw: []const u8) void {
+        self.shown_message = .{ .account = account, .mailbox = mailbox, .id = id };
         self.html_view = false;
         const length = @min(raw.len, self.raw.len);
         if (raw.ptr != &self.raw) @memcpy(self.raw[0..length], raw[0..length]);
@@ -2086,7 +2127,7 @@ const Rig = struct {
 
     /// Puts `raw` in the reader, without going through the network.
     fn open_reader(self: *Rig, raw: []const u8) !void {
-        self.session.set_raw(raw);
+        self.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
         self.session.state.view = .reader;
         self.session.state.opened_account = core.id.AccountId.from_int(1);
         self.session.state.opened = MessageId.from_int(1);
@@ -3535,6 +3576,62 @@ test "an effect paints the spinner, even when it is instant" {
     try testing.expect(!rig.session.state.loading);
 }
 
+test "opening another message blanks the page instead of keeping the last one" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    try rig.open_reader("Content-Type: text/plain\r\n\r\nthe first message");
+    try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "the first message") != null);
+
+    // A refresh holds the connection, so the next body waits -- and the frame
+    // in the meantime must not carry the previous message's words.
+    rig.fake_system.push_input("\x12");
+    _ = rig.session.step();
+    try testing.expect(rig.session.refreshing);
+
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(2),
+    } }});
+
+    try testing.expectEqual(@as(u32, 0), rig.session.shown_len);
+    try testing.expect(!rig.session.body_loaded);
+
+    // What the screen would say now: the placeholder, not the last message.
+    rig.fake_system.output_len = 0;
+    rig.session.render();
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Loading...") != null);
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "the first message") == null);
+
+    // And when it lands, it is the second message that is on screen.
+    rig.session.settle_refresh_for_test();
+    try testing.expect(rig.session.body_loaded);
+    // The second message's own words, from the fake's template for id 2.
+    try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "Heads up: the build is green again") != null);
+}
+
+test "asking again for the message already on screen keeps it: no flash" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    try rig.open_reader("Content-Type: text/plain\r\n\r\nthe first message");
+
+    // A refresh holds the connection, so the fetch below waits: whatever the
+    // reader shows at that moment is what the user sees.
+    rig.fake_system.push_input("\x12");
+    _ = rig.session.step();
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(1),
+    } }});
+
+    try testing.expect(rig.session.body_loaded);
+    try testing.expectEqualStrings("the first message", rig.session.reader_text());
+    rig.session.settle_refresh_for_test();
+}
+
 test "a body asked for during a refresh is delivered when it finishes" {
     var rig: Rig = .{};
     try rig.start();
@@ -3901,7 +3998,7 @@ test "mail with an HTML part opens as HTML, and H goes back to the text" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(raw);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
 
     // What a mail client shows: the HTML part, laid out.
     try testing.expect(rig.session.html_view);
@@ -3929,7 +4026,7 @@ test "mail with no HTML part stays on its text" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw("Content-Type: text/plain\n\njust words");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\n\njust words");
 
     try testing.expect(!rig.session.html_view);
     try testing.expectEqualStrings("just words", rig.session.reader_text());
@@ -3943,7 +4040,7 @@ test "H on a text-only message says there is no HTML" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw("Content-Type: text/plain\n\njust words");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\n\njust words");
 
     rig.send("H");
     try testing.expectEqualStrings("This message has no HTML version", rig.session.state.status.slice());
@@ -3970,7 +4067,7 @@ test "a message with an HTML part renders both views from one fetch" {
     defer rig.deinit();
     _ = rig.session.step();
     rig.session.state.view = .reader;
-    rig.session.set_raw(raw);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
 
     // Both views come from the same fetch, and HTML is the one shown first.
     try testing.expectEqualStrings(
@@ -3992,7 +4089,7 @@ test "a link split by the wrap is still one link, and clicks anywhere on it" {
     try rig.start_with_links(&sink);
 
     const body = "see https://example.com/a/really/long/path here";
-    rig.session.set_raw(body);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), body);
     rig.session.state.view = .reader;
     rig.session.state.opened = MessageId.from_int(1);
     // A narrow width is what breaks the address across lines.
@@ -4147,7 +4244,7 @@ test "a message whose sender wrapped the address shows one whole link" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(raw);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
     rig.session.needs_render = true;
     _ = rig.session.step();
 
@@ -4303,7 +4400,7 @@ test "an image that came with the message is painted where its marker landed" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(raw);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
 
     // The marker is in the laid-out text, so the reader has somewhere to paint.
     try testing.expect(std.mem.indexOf(u8, rig.session.html_text[0..rig.session.html_len], "[IMG:logo@x]") != null);
@@ -4330,7 +4427,7 @@ test "an image with an address is not fetched, so it is not painted" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw("Content-Type: text/html\n\n<p><img src=\"https://example.com/x.png\" alt=\"Foto\"></p>");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/x.png\" alt=\"Foto\"></p>");
 
     rig.session.needs_render = true;
     _ = rig.session.step();
@@ -4391,7 +4488,7 @@ test "a picture with an address is downloaded once and painted" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw("Content-Type: text/html\n\n<p><img src=\"https://example.com/logo.png\"></p>");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/logo.png\"></p>");
 
     rig.session.needs_render = true;
     _ = rig.session.step();
@@ -4413,7 +4510,7 @@ test "clicking a reference number opens the address it points at" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw("Content-Type: text/plain\n\nRead [1]the docs\n\nReferences:\n\n[1] https://example.com/a\n");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\n\nRead [1]the docs\n\nReferences:\n\n[1] https://example.com/a\n");
     rig.session.needs_render = true;
     _ = rig.session.step();
 
@@ -4463,14 +4560,14 @@ test "a marker with the same name in another message is another picture" {
 
     // Two parts, both called "logo", with different bytes.
     const first = "From: a@b\r\nContent-Type: text/plain\r\n\r\nhi";
-    rig.session.set_raw(first);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), first);
     try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
 
     // The cache remembers what the message carried…
     _ = rig.session.image_png("logo");
     try testing.expectEqual(@as(u8, 1), rig.session.image_slot_count);
     // …and forgets it as soon as another message is opened.
-    rig.session.set_raw(first);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), first);
     try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
 }
 
@@ -4596,7 +4693,7 @@ test "a text body with HTML spacing entities is readable" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    rig.session.set_raw("Content-Type: text/plain\r\n\r\n&emsp;&#8203;Hola&nbsp;mundo");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\r\n\r\n&emsp;&#8203;Hola&nbsp;mundo");
     // "&emsp;" is a space, "&#8203;" is nothing, "&nbsp;" is a space.
     try testing.expectEqualStrings(" Hola mundo", rig.session.reader_text());
 }
