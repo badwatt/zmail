@@ -18,6 +18,9 @@ pub const Color = union(enum) {
     default,
     /// xterm 256-color palette index.
     ansi256: u8,
+    /// Truecolor. A theme derived from the terminal's own background cannot be
+    /// squeezed into a fixed palette without losing the very thing it derives.
+    rgb: struct { r: u8, g: u8, b: u8 },
 };
 
 pub const Attr = packed struct(u8) {
@@ -413,10 +416,12 @@ fn write_sgr(writer: *std.Io.Writer, style: Style, colored: bool) std.Io.Writer.
         switch (style.fg) {
             .default => {},
             .ansi256 => |index| try writer.print(";38;5;{d}", .{index}),
+            .rgb => |c| try writer.print(";38;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
         }
         switch (style.bg) {
             .default => {},
             .ansi256 => |index| try writer.print(";48;5;{d}", .{index}),
+            .rgb => |c| try writer.print(";48;2;{d};{d};{d}", .{ c.r, c.g, c.b }),
         }
     }
     try writer.writeAll("m");
@@ -602,6 +607,28 @@ test "Screen: each row opens with an SGR so styles never bleed across rows" {
 
     const second_row = std.mem.indexOf(u8, output, "\r\n") orelse return error.TestExpectedRows;
     try testing.expect(std.mem.startsWith(u8, output[second_row + 2 ..], "\x1b[0m"));
+}
+
+test "truecolor is written as 38;2 and 48;2" {
+    var screen = Screen.init(8, 2);
+    screen.put(0, 0, 'x', .{ .fg = .{ .rgb = .{ .r = 156, .g = 162, .b = 200 } } });
+    screen.put(1, 0, 'y', .{
+        .fg = .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } },
+        .bg = .{ .rgb = .{ .r = 25, .g = 25, .b = 37 } },
+    });
+
+    var buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try screen.encode_row(0, &writer, true);
+    const output = writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, output, "38;2;156;162;200") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "38;2;1;2;3") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "48;2;25;25;37") != null);
+
+    // Without color, neither form appears.
+    writer = std.Io.Writer.fixed(&buffer);
+    try screen.encode_row(0, &writer, false);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;2") == null);
 }
 
 test "Screen: write_frame omits colors in monochrome mode" {
