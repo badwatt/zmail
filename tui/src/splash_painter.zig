@@ -210,7 +210,7 @@ fn write_sgr(writer: *std.Io.Writer, theme: theme_mod.Theme, level: f32) std.Io.
 const testing = std.testing;
 
 test "the painter draws the mark where the splash put it, and stops" {
-    var fake: system_mod.Fake = .{};
+    var fake: system_mod.Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
     var painter = Painter{};
 
     // The frame is drawn here rather than waited for: a test that sleeps is a test
@@ -296,7 +296,7 @@ test "the screen's encoder writes each kind of colour" {
 test "the mark at its largest scale still fits a row" {
     // This is the crash that brought the four-times size in: a row of the mark is
     // three bytes a cell, and the buffer was sized for the two-times one.
-    var fake: system_mod.Fake = .{};
+    var fake: system_mod.Fake = .{ .size_value = .{ .columns = 170, .rows = 45 } };
     var painter = Painter{};
     painter.set_up(fake.system(), .{ .columns = 170, .rows = 45 }, theme_mod.Theme.from_background(.{ .r = 20, .g = 20, .b = 24 }), false, 0, "home");
     painter.paint();
@@ -310,7 +310,7 @@ test "the thread paints on its own, and stops when asked" {
     // The other tests draw by hand so they measure the drawing, not the machine.
     // This one is the opposite: the thread is the point, so it waits for it -- and
     // waits no longer than it has to.
-    var fake: system_mod.Fake = .{};
+    var fake: system_mod.Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
     var painter = Painter{};
     painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
     defer painter.finish();

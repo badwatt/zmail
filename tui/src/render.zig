@@ -1630,7 +1630,7 @@ test "frame shows reader hints and a scroll percentage" {
     try row_contains(&out, 23, "75%");
 }
 
-test "the boot splash is a splash.wordmark, the account, and a footer" {
+test "the boot splash is a wordmark, the account, and a footer" {
     var f = try fixture();
     defer f.deinit();
     f.state.booting = true;
@@ -1639,8 +1639,8 @@ test "the boot splash is a splash.wordmark, the account, and a footer" {
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
     // middle = 12: the big mark on 5..14, status on 17, address on 18, footer 23.
-    try row_contains(&out, 5, "██████████████  ████      ████  ██████████████  ██████  ██████");
-    try row_contains(&out, 14, "██████████████  ████      ████  ██████  ██████  ██████  ████████████");
+    try row_contains(&out, 5, "█ ████████████  █ ██      ████  █ ████████████  █ ████  █ ████");
+    try row_contains(&out, 14, "█ ████████████  █ ██      ████  █ ████  █ ████  █ ████  █ ██████████");
     try row_contains(&out, 23, "connecting to work");
     try row_contains(&out, 17, "alice@example.com");
     // The version, from the manifest, right under the mark.

@@ -216,11 +216,21 @@ fn fits(scale: u8, columns: u16, rows: u16) bool {
 /// One cell of the mark, for the places that draw it themselves.
 pub fn mark_cell(scale: u8, row: u16, column: u16) u21 {
     const source = wordmark.small[row / scale][column / scale];
-    if (source == ' ' or scale == 1) return source;
-    // A half block repeated sideways is a pair of stripes, not an edge: enlarged,
-    // every stroke is solid.
-    return 0x2588;
+    if (source == ' ') return ' ';
+    // The drawing's spine is a half block: one cell wide, the left half of it. Enlarged,
+    // half a cell is half of the cells it became -- a whole one would double the weight
+    // of every stroke and close the counters, which is how the M turns into a blob.
+    if (source == spine_block) {
+        if (scale == 1) return spine_block;
+        const half: u16 = (@as(u16, scale) + 1) / 2;
+        return if (column % scale < half) solid_block else ' ';
+    }
+    return if (scale == 1) source else solid_block;
 }
+
+/// The two glyphs the drawing is made of: a full cell, and the left half of one.
+const solid_block: u21 = 0x2588;
+const spine_block: u21 = 0x2590;
 
 /// The first screen: the wordmark breathing, the version, the account, and the two
 /// corners of the last row. Everything here is a pure function of the clock since the
