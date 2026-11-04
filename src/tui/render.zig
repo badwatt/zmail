@@ -831,7 +831,8 @@ fn render_footer(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 
 fn position_text(state: *const State, buffer: []u8) []const u8 {
     if (state.view == .reader) {
-        return std.fmt.bufPrint(buffer, "{d}%", .{reader_percent(state)}) catch "";
+        const percent = reader_percent(state) orelse return "";
+        return std.fmt.bufPrint(buffer, "{d}%", .{percent}) catch "";
     }
     if (state.view == .compose) return "";
     return std.fmt.bufPrint(buffer, "{d}/{d}", .{ list_position(state), state.visible_len }) catch "";
@@ -845,11 +846,12 @@ fn list_position(state: *const State) u32 {
 /// How far through the message the reader is: zero at the top, a hundred when the
 /// last line is on screen. What is measured is the scroll, not the reading -- at the
 /// top of a long mail the eye is at the beginning, whatever is visible below it.
-fn reader_percent(state: *const State) u32 {
-    if (state.body_rows == 0) return 0;
+///
+/// Null when there is nothing to scroll. A number that cannot move is not a position,
+/// and a mail that fits on the screen would wear a "100%" for as long as it is open.
+fn reader_percent(state: *const State) ?u32 {
     const scrollable = state.max_reader_scroll();
-    // Nothing to scroll: the whole message is the window, so its end is visible.
-    if (scrollable == 0) return 100;
+    if (state.body_rows == 0 or scrollable == 0) return null;
     return @min(100, state.reader_scroll * 100 / scrollable);
 }
 
@@ -1649,15 +1651,16 @@ test "the reader's percentage is where you are, not how much you have seen" {
     state.reader_scroll = 10;
     try testing.expectEqualStrings("100%", position_text(&state, &buffer));
 
-    // A message shorter than the window is all of it: there is nothing to scroll,
-    // and the end of it is on screen.
+    // A message shorter than the window is all of it: there is nothing to scroll, so
+    // there is no position to report, and the footer says nothing rather than "100%"
+    // for the whole time the reader is open.
     state.body_rows = 4;
     state.reader_scroll = 0;
-    try testing.expectEqualStrings("100%", position_text(&state, &buffer));
+    try testing.expectEqualStrings("", position_text(&state, &buffer));
 
-    // Nothing loaded yet is not a position.
+    // Nothing loaded yet is not a position either.
     state.body_rows = 0;
-    try testing.expectEqualStrings("0%", position_text(&state, &buffer));
+    try testing.expectEqualStrings("", position_text(&state, &buffer));
 }
 
 test "the boot splash is a wordmark, the account, and a footer" {
