@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const tui = @import("lib.zig");
+const core = @import("core");
 
 /// A panic lands here before it lands on the terminal.
 ///
@@ -33,8 +34,8 @@ fn writePanicLog(message: []const u8, first_trace_address: ?usize) void {
     defer _ = std.c.close(fd);
 
     var buffer: [512]u8 = undefined;
-    const text = std.fmt.bufPrint(&buffer, "zmail panic: {s}\ntrace address: {?d}\n", .{
-        message, first_trace_address,
+    const text = std.fmt.bufPrint(&buffer, "{s} panic: {s}\ntrace address: {?d}\n", .{
+        core.meta.name, message, first_trace_address,
     }) catch message;
     _ = std.c.write(fd, text.ptr, text.len);
 }

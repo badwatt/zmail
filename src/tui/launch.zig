@@ -287,7 +287,7 @@ fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 
         "--max-filesize",
         "4194304",
         "--user-agent",
-        "zmail",
+        core.meta.name,
         "--header",
         "Accept: image/png",
         "--url",
