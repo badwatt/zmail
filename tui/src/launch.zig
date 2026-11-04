@@ -440,8 +440,9 @@ const LiveAccount = struct {
             self.failure = "Could not connect to an IMAP server over TLS";
             return error.Unavailable;
         };
-        const opened = if (self.token.access.is_empty())
+        const opened: core.imap.client.Error!void = if (self.token.access.is_empty())
             core.imap_mail.ImapMail.open(
+                &self.imap,
                 self.imap_transport.transport(),
                 self.id,
                 self.username.slice(),
@@ -449,12 +450,13 @@ const LiveAccount = struct {
             )
         else
             core.imap_mail.ImapMail.open_token(
+                &self.imap,
                 self.imap_transport.transport(),
                 self.id,
                 self.username.slice(),
                 self.token.access.slice(),
             );
-        self.imap = opened catch |err| {
+        opened catch |err| {
             self.imap_transport.deinit();
             self.failure = login_message(err);
             // A refused login is not "unavailable": say so.
@@ -1395,8 +1397,9 @@ const FileAccounts = struct {
 
         self.transport.open(self.gpa, self.io, entry.account.imap.host.slice(), entry.account.imap.port) catch
             return error.Unavailable;
-        const opened = if (fresh and has_token != null)
+        const opened: core.imap.client.Error!void = if (fresh and has_token != null)
             core.imap_mail.ImapMail.open_token(
+                &self.imap,
                 self.transport.transport(),
                 account,
                 entry.account.username.slice(),
@@ -1404,12 +1407,13 @@ const FileAccounts = struct {
             )
         else
             core.imap_mail.ImapMail.open(
+                &self.imap,
                 self.transport.transport(),
                 account,
                 entry.account.username.slice(),
                 password.expose(),
             );
-        self.imap = opened catch |err| {
+        opened catch |err| {
             self.transport.deinit();
             return switch (err) {
                 error.LoginFailed, error.Rejected, error.ProtocolError => error.Unavailable,

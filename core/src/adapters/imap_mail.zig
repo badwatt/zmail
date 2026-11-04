@@ -42,22 +42,31 @@ pub const ImapMail = struct {
     entry_count: u32 = 0,
 
     /// Logs in. The caller owns the transport from here on.
-    pub fn open(transport: transport_mod.Transport, account: AccountId, user: []const u8, password: []const u8) client_mod.Error!ImapMail {
-        var imap = ImapMail{ .client = client_mod.Client.init(transport), .account = account };
-        try imap.client.login(user, password);
-        return imap;
+    /// Logs in, in place. The struct is megabytes -- two framers, the raw message
+    /// and its scratch -- so it is never returned by value: a copy of it is a stack
+    /// overflow waiting for the platform with the smaller stack, which is what macOS
+    /// turned out to be.
+    pub fn open(
+        self: *ImapMail,
+        transport: transport_mod.Transport,
+        account: AccountId,
+        user: []const u8,
+        password: []const u8,
+    ) client_mod.Error!void {
+        self.* = .{ .client = client_mod.Client.init(transport), .account = account };
+        try self.client.login(user, password);
     }
 
     /// Opens with an OAuth2 token instead of a password.
     pub fn open_token(
+        self: *ImapMail,
         transport: transport_mod.Transport,
         account: AccountId,
         user: []const u8,
         token: []const u8,
-    ) client_mod.Error!ImapMail {
-        var imap = ImapMail{ .client = client_mod.Client.init(transport), .account = account };
-        try imap.client.login_token(user, token);
-        return imap;
+    ) client_mod.Error!void {
+        self.* = .{ .client = client_mod.Client.init(transport), .account = account };
+        try self.client.login_token(user, token);
     }
 
     pub fn close(self: *ImapMail) void {
@@ -278,7 +287,9 @@ test "open logs in and fetch selects the mailbox once" {
         "* 2 FETCH (UID 11 ENVELOPE (NIL \"second\" NIL NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
         "a3 OK fetched\r\n" };
 
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
 
@@ -304,7 +315,9 @@ test "open logs in and fetch selects the mailbox once" {
 
 test "fetch of an empty mailbox does not ask for envelopes" {
     var scripted: Scripted = .{ .input = login_ok ++ "* 0 EXISTS\r\na2 OK\r\n" };
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
 
     var messages: [4]Message = undefined;
@@ -319,7 +332,9 @@ test "fetch truncates to the caller's buffer" {
         "* 2 FETCH (UID 2 ENVELOPE (NIL \"b\" NIL NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
         "a3 OK\r\n";
     var scripted: Scripted = .{ .input = script };
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
 
     var messages: [1]Message = undefined;
@@ -334,7 +349,9 @@ test "switching mailbox selects again" {
         "* 1 FETCH (UID 1)\r\na3 OK\r\n" ++
         "* 1 EXISTS\r\na4 OK\r\n" ++
         "* 1 FETCH (UID 2)\r\na5 OK\r\n" };
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
 
@@ -353,7 +370,9 @@ test "body, flags, and move reach the right commands" {
         "* 1 FETCH (BODY[1.MIME] {74}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64 BODY[1] {12}\r\naGkgdGhlcmU=)\r\na4 OK\r\n" ++
         "a5 OK\r\n" ++
         "a6 OK\r\n" };
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
 
@@ -379,7 +398,9 @@ test "a message whose shape is not understood is read whole, not refused" {
             "a3 BAD no\r\n" ++
             "* 1 FETCH (BODY[]<0> {45}\r\n" ++ message ++ ")\r\na4 OK\r\n",
     };
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
 
     var body: [64]u8 = undefined;
@@ -394,7 +415,9 @@ test "the raw message is handed over as sent, cut to the caller's buffer" {
         "* 1 EXISTS\r\na2 OK selected\r\n" ++
         "* 1 FETCH (BODY[]<0> {45}\r\n" ++ message ++ ")\r\na3 OK\r\n" ++
         "* 1 FETCH (BODY[]<0> {45}\r\n" ++ message ++ ")\r\na4 OK\r\n" };
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
 
     var out: [128]u8 = undefined;
@@ -411,7 +434,9 @@ test "delete flags the message and expunges it, falling back without UIDPLUS" {
         "a4 NO [CANNOT] UID EXPUNGE unsupported\r\n" ++
         "a5 OK expunged\r\n" };
 
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     try imap.mail().delete_message(.inbox, MessageId.from_int(7));
 
@@ -429,7 +454,9 @@ test "delete uses UID EXPUNGE when the server supports it, and empty clears all"
         "a5 OK flagged all\r\n" ++
         "a6 OK expunged all\r\n" };
 
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     try imap.mail().delete_message(.inbox, MessageId.from_int(7));
     try imap.mail().empty_mailbox(.inbox);
@@ -444,7 +471,9 @@ test "delete in a mailbox the server does not have is NotFound" {
         "* LIST (\\Sent) \"/\" \"Sent Items\"\r\n" ++
         "a3 OK LIST done\r\n" };
 
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     try testing.expectError(
         error.NotFound,
@@ -457,7 +486,9 @@ test "open_token logs in with a bearer token" {
     var scripted: Scripted = .{ .input = login_ok ++ "* 1 EXISTS\r\na2 OK selected\r\n" ++
         "* 1 FETCH (UID 3 ENVELOPE (NIL \"token mail\" NIL NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
         "a3 OK fetched\r\n" };
-    var imap = try ImapMail.open_token(scripted.transport(), AccountId.from_int(1), "me", "ya29.t");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open_token(imap, scripted.transport(), AccountId.from_int(1), "me", "ya29.t");
     defer imap.close();
 
     var messages: [2]Message = undefined;
@@ -468,7 +499,9 @@ test "open_token logs in with a bearer token" {
 
 test "login failure is reported as Rejected through the port, and open fails" {
     var scripted: Scripted = .{ .input = "* OK ready\r\na1 NO bad credentials\r\n" };
-    try testing.expectError(error.LoginFailed, ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "wrong"));
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try testing.expectError(error.LoginFailed, ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "wrong"));
 }
 
 test "a mailbox the server does not have is empty, not an error" {
@@ -484,7 +517,9 @@ test "a mailbox the server does not have is empty, not an error" {
         "* 1 FETCH (UID 4 ENVELOPE (NIL \"hi\" NIL NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
         "a5 OK fetched\r\n" };
 
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
 
@@ -505,7 +540,9 @@ test "a mailbox absent from LIST is empty, and its body is NotFound" {
         "* LIST (\\Sent) \"/\" \"Sent Items\"\r\n" ++
         "a3 OK LIST done\r\n" };
 
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
 
@@ -529,7 +566,9 @@ test "every client error maps onto one of the port's three cases" {
 
 test "close logs out and closes the transport" {
     var scripted: Scripted = .{ .input = login_ok ++ "* BYE bye\r\na2 OK\r\n" };
-    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     imap.close();
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "LOGOUT") != null);
     try testing.expectEqual(@as(u32, 1), scripted.close_calls);
