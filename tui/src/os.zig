@@ -97,7 +97,9 @@ pub const Posix = struct {
         // The bar first: it belongs to the window, not to the screen we are
         // leaving, so it has to come down before the screen does -- and only if
         // there is one, so a terminal that never spoke this gets no stray escape.
-        progress_mod.clear(self.system());
+        // A signal handler cannot join a thread, so the bar is written down here
+        // and the thread, if any, dies with the process a line later.
+        progress_mod.abandon(self.system());
         writeThunk(self, leave_screen) catch {};
         leaveRawThunk(self) catch {};
     }

@@ -227,8 +227,6 @@ pub const Session = struct {
     /// When the bar went up, and what it is showing: the minimum-visible window is
     /// measured from the first.
     progress_since_ms: i64 = 0,
-    progress_at_ms: i64 = 0,
-    progress_percent: u8 = 0,
 
     gpa: std.mem.Allocator,
     deps: Deps,
@@ -514,7 +512,7 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
-        progress_mod.clear(self.deps.system);
+        progress_mod.end();
         // A running worker touches `refresh_scratch`; wait for it before freeing.
         if (self.refreshing) {
             while (!self.refresh_job.finished()) std.atomic.spinLoopHint();
@@ -796,7 +794,7 @@ pub const Session = struct {
         };
         // A browser is the user's turn, not ours: a bar that says "working" while
         // they read the mail would be a lie.
-        progress_mod.show(self.deps.system, .paused, 0, os.monotonic_ms());
+        progress_mod.pause();
         if (self.html_part_len > 0) {
             // The part itself: a browser that is handed our text rendering sees
             // one collapsed paragraph with no styling at all.
@@ -1067,36 +1065,14 @@ pub const Session = struct {
     /// Shortest time the terminal's bar is allowed on screen: anything shorter
     /// reads as a glitch rather than as work.
     const progress_visible_ms: i64 = 400;
-    /// The bar advances by this much, every `progress_step_ms`, while a wait goes
-    /// on. A percentage would be a measurement we do not have, and the
-    /// indeterminate state does not move in every terminal (Ghostty keeps its
-    /// value unchanged, and only animates it in some builds), so the bar fills:
-    /// movement is the signal, and the number is the clock that produces it.
-    const progress_step: u8 = 4;
-    const progress_step_ms: i64 = 100;
-    /// It stops here until the work ends: a bar that reaches the end and then
-    /// keeps waiting is a lie about being nearly done.
-    const progress_cap: u8 = 90;
 
     fn sync_progress(self: *Session) void {
-        self.sync_progress_at(os.monotonic_ms());
-    }
-
-    /// The clock is the caller's, so a test can watch the bar fill without
-    /// waiting two seconds for it.
-    fn sync_progress_at(self: *Session, now: i64) void {
         if (self.state.loading or self.state.booting or self.refreshing) {
-            if (self.progress_since_ms == 0) {
-                self.progress_since_ms = now;
-                self.progress_percent = progress_step;
-            } else if (now - self.progress_at_ms >= progress_step_ms) {
-                self.progress_percent = @min(self.progress_percent + progress_step, progress_cap);
-            }
-            self.progress_at_ms = now;
-            progress_mod.show(self.deps.system, .normal, self.progress_percent, now);
-            // At the cap the number no longer changes, so the repeat is what keeps
-            // the bar from being forgotten.
-            progress_mod.keep_alive(self.deps.system, now);
+            if (self.progress_since_ms == 0) self.progress_since_ms = os.monotonic_ms();
+            // The bar moves itself: the wait it reports is often one blocking
+            // call that nothing here could tick through.
+            progress_mod.begin(self.deps.system);
+            progress_mod.unpause();
             return;
         }
         if (self.progress_since_ms == 0) return;
@@ -1104,9 +1080,9 @@ pub const Session = struct {
         // Work that took a blink is still work, and a bar that appears and
         // vanishes inside one frame is read as a glitch. It stays up long enough
         // to be seen; every later tick finds the window closed and takes it down.
-        if (now - self.progress_since_ms < progress_visible_ms) return;
+        if (os.monotonic_ms() - self.progress_since_ms < progress_visible_ms) return;
 
-        progress_mod.clear(self.deps.system);
+        progress_mod.end();
         self.progress_since_ms = 0;
     }
 
@@ -1413,7 +1389,7 @@ pub const Session = struct {
         };
         // The flow talks to a human in a browser: give the terminal back first,
         // or the URL lands on a screen nobody is looking at.
-        progress_mod.show(self.deps.system, .paused, 0, os.monotonic_ms());
+        progress_mod.pause();
         self.deps.system.suspend_ui() catch {};
         var problem: core.text.Text(256) = .{};
         accounts.oauth_login(account, &problem) catch {
@@ -5077,7 +5053,7 @@ test "the terminal's bar goes up while loading, stays, and comes down after" {
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
-    try testing.expectEqualStrings("\x1b]9;4;1;4\x1b\\", rig.fake_system.output_text());
+    try testing.expectEqualStrings("\x1b]9;4;1;8\x1b\\", rig.fake_system.output_text());
 
     // Sixty ticks a second: the bar is not re-sent on every one of them.
     rig.session.needs_render = false;
@@ -5144,7 +5120,7 @@ test "the splash counts as loading, and so does a refresh" {
     try testing.expectEqual(core.progress.State.clear, progress_mod.state());
 }
 
-test "the bar fills while the wait goes on, and stops before the end" {
+test "a wait raises the bar, keeps it for a moment, and takes it down" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -5156,19 +5132,23 @@ test "the bar fills while the wait goes on, and stops before the end" {
     rig.session.state.booting = false;
     rig.session.state.loading = true;
     rig.session.progress_since_ms = 0;
+    rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    // Up, and already moving: the number comes from the module's own thread.
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;1;") != null);
+    try testing.expectEqual(core.progress.State.normal, progress_mod.state());
 
-    // Two seconds of waiting, a tick every 100ms: the bar moves with the clock,
-    // which is the whole point -- the indeterminate state stands still.
-    var now: i64 = 1_000;
-    var drawn: u32 = 0;
-    while (now <= 3_500) : (now += 100) {
-        rig.session.needs_render = false;
-        rig.fake_system.output_len = 0;
-        rig.session.sync_progress_at(now);
-        if (rig.fake_system.output_text().len > 0) drawn += 1;
-    }
-    // One write per step, each with a bigger number than the last.
-    try testing.expectEqual(@as(u32, 26), drawn);
-    try testing.expectEqual(@as(u8, 90), rig.session.progress_percent);
+    // Work that took a blink still shows for the window, then goes.
+    rig.session.state.loading = false;
+    rig.session.needs_render = false;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    try testing.expectEqual(core.progress.State.normal, progress_mod.state());
+
+    rig.session.progress_since_ms = os.monotonic_ms() - Session.progress_visible_ms - 1;
+    rig.session.needs_render = false;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    try testing.expectEqual(core.progress.State.clear, progress_mod.state());
 }

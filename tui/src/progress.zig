@@ -1,42 +1,63 @@
-//! Whether this terminal gets a progress bar, and which state it is in.
+//! The terminal's own progress bar, and the thing that keeps it moving.
 //!
-//! Loading is everywhere in this app -- the first screen, a refresh, a body, a
-//! send -- and every one of them is the same thing to a terminal: work. The state
-//! lives here so a wait cannot raise a bar that nothing takes down, and a tick
-//! cannot write the same eight bytes sixty times a second.
+//! Ghostty and kitty draw a bar in the window for `OSC 9;4`. Two things matter
+//! from this side:
 //!
-//! The clock is the caller's. That keeps this module testable and keeps the
-//! "how long has this been up" question with the thing that owns the loop.
+//! Movement. The indeterminate state (`3`) leaves the value alone, and only some
+//! terminals animate it, so what moves is a percentage that changes. A bar that
+//! fills to a hundred would say "nearly done" for as long as the wait lasts -- the
+//! one thing a wait cannot know -- so it swings between two values instead: always
+//! moving, never claiming the end.
+//!
+//! Independence from the loop. The longest wait in this app blocks the event loop
+//! (the first connection, and any fetch behind it), which is exactly when nothing
+//! would repaint. The bar therefore has its own thread, and the session only has
+//! to say when the work starts and when it ends.
+//!
+//! Off until the process boundary says the terminal can take it: a pipe, a log, or
+//! `TERM=dumb` must not receive escape sequences.
 
 const std = @import("std");
 const core = @import("core");
+const os = @import("os.zig");
 const system_mod = @import("system.zig");
 const System = system_mod.System;
 
-/// Off until the process boundary says the terminal can take it: a pipe, a log,
-/// or `TERM=dumb` must not receive escape sequences.
+/// Between these, by `step`, every `step_ms`: the bar's swing.
+pub const floor: u8 = 8;
+pub const ceiling: u8 = 92;
+pub const step: u8 = 12;
+pub const step_ms: i64 = 80;
+
 var enabled: bool = false;
-
-/// What the terminal was last told. `clear` means "nothing on screen", which is
-/// also the state after a failed write: best effort, and the next tick retries.
+/// The port to write through: the session's, which is the process's.
+var port: ?System = null;
+var active: bool = false;
+var paused: bool = false;
+var percent: u8 = floor;
+var rising: bool = true;
+/// What the terminal was last told, so a tick that changes nothing writes nothing.
 var shown: core.progress.State = .clear;
+var shown_percent: u8 = floor;
 
-/// The percent last sent, and when: a bar that moves is redrawn, one that does
-/// not is not, and one that sits for a long wait is repeated.
-var shown_percent: u8 = 0;
-var shown_at_ms: i64 = 0;
-
-/// How often a bar is repeated while the work goes on. Ghostty animates the
-/// indeterminate bar from the updates themselves, so a bar that is sent once
-/// stands still: the number here is the animation's frame rate, not a timeout.
-/// 100ms is what zix sends, and it is what the tab needs to move.
-pub const repeat_ms: i64 = 100;
+var thread: ?std.Thread = null;
+var stop = std.atomic.Value(bool).init(true);
+var hold = std.atomic.Value(bool).init(false);
 
 pub fn enable(value: bool) void {
+    // Turning it off stops the thread: a test that enables it must not leave
+    // something writing to a port that has gone out of scope.
+    if (!value) {
+        stop.store(true, .release);
+        if (thread) |joined| {
+            joined.join();
+            thread = null;
+        }
+        active = false;
+        paused = false;
+        shown = .clear;
+    }
     enabled = value;
-    shown = .clear;
-    shown_percent = 0;
-    shown_at_ms = 0;
 }
 
 pub fn is_enabled() bool {
@@ -49,47 +70,111 @@ pub fn state() core.progress.State {
     return shown;
 }
 
-/// Tells the terminal what is happening. Silence when the terminal does not speak
-/// this, and silence when it is already saying the same thing.
-pub fn show(system: System, next: core.progress.State, percent: u8, now_ms: i64) void {
-    if (!enabled) return;
-    const done: u8 = @min(percent, 100);
-    if (next == shown) {
-        // A percent only moves the bar where the terminal reads one.
-        if (!carries_percent(next) or done == shown_percent) return;
-    }
-
-    write(system, next, done, now_ms);
+pub fn current_percent() u8 {
+    return percent;
 }
 
-/// Writes and remembers. The only path to the terminal, so the state and the
-/// screen cannot disagree.
-fn write(system: System, next: core.progress.State, percent: u8, now_ms: i64) void {
+/// Puts the bar up and starts moving it. Called when work begins, from whatever
+/// thread begins it -- but only ever from the session's.
+pub fn begin(system: System) void {
+    if (!enabled) return;
+    port = system;
+    if (active) {
+        unpause();
+        return;
+    }
+    active = true;
+    paused = false;
+    percent = floor;
+    rising = true;
+    write(system, .normal, percent);
+    stop.store(false, .release);
+    if (thread == null) thread = std.Thread.spawn(.{}, keep_moving, .{}) catch null;
+}
+
+/// Takes it down. Whatever the wait did, the bar goes: a bar left behind says
+/// "busy" forever.
+pub fn end() void {
+    if (!active) return;
+    active = false;
+    stop.store(true, .release);
+    if (thread) |joined| {
+        joined.join();
+        thread = null;
+    }
+    if (port) |system| write(system, .clear, 0);
+}
+
+/// Waiting for a human (a browser, an editor): the bar holds still and says so,
+/// instead of spinning while nobody is working.
+pub fn pause() void {
+    if (!active or paused) return;
+    paused = true;
+    hold.store(true, .release);
+    if (port) |system| write(system, .paused, 0);
+}
+
+pub fn unpause() void {
+    if (!active or !paused) return;
+    paused = false;
+    hold.store(false, .release);
+    if (port) |system| write(system, .normal, percent);
+}
+
+/// One step of the swing, exposed so the shape of the movement is testable
+/// without waiting for a thread.
+pub fn advance() void {
+    if (rising) {
+        const next = percent + step;
+        if (next >= ceiling) {
+            percent = ceiling;
+            rising = false;
+        } else {
+            percent = next;
+        }
+    } else if (percent <= floor + step) {
+        percent = floor;
+        rising = true;
+    } else {
+        percent -= step;
+    }
+}
+
+/// Takes the bar down without joining the thread: the one caller is the Ctrl+C
+/// handler, which cannot wait for anything. The process ends right afterwards, so
+/// there is nothing to leave tidy.
+pub fn abandon(system: System) void {
+    stop.store(true, .release);
+    active = false;
+    write(system, .clear, 0);
+}
+
+fn keep_moving() void {
+    while (!stop.load(.acquire)) {
+        // Sliced sleep: stopping joins in one slice, not in a whole step.
+        var waited: i64 = 0;
+        while (waited < step_ms and !stop.load(.acquire)) : (waited += 10) os.sleep_ms(10);
+        if (stop.load(.acquire)) return;
+        if (hold.load(.acquire)) continue;
+
+        advance();
+        // A twenty-byte write to a terminal is one syscall, so it lands between
+        // frames and not inside one: the two threads do not need a lock to keep
+        // the escape sequences whole.
+        if (port) |system| write(system, .normal, percent);
+    }
+}
+
+fn write(system: System, next: core.progress.State, value: u8) void {
+    const same = next == shown and (next != .normal and next != .failure or value == shown_percent);
+    if (same) return;
+
     var buffer: [core.progress.max_sequence]u8 = undefined;
-    const bytes = core.progress.sequence(next, percent, &buffer);
+    const bytes = core.progress.sequence(next, value, &buffer);
     if (bytes.len == 0) return;
     system.write(bytes) catch return;
     shown = next;
-    shown_percent = percent;
-    shown_at_ms = now_ms;
-}
-
-/// Takes the bar down, whatever it was showing.
-pub fn clear(system: System) void {
-    show(system, .clear, 0, 0);
-}
-
-/// Repeats a bar that has been up for a while, so a long wait does not lose it.
-pub fn keep_alive(system: System, now_ms: i64) void {
-    if (!enabled or shown == .clear) return;
-    if (now_ms - shown_at_ms < repeat_ms) return;
-    // Sent whether or not the state changed: repeating it is the whole point.
-    write(system, shown, shown_percent, now_ms);
-}
-
-/// The two states whose sequence carries a number.
-fn carries_percent(value: core.progress.State) bool {
-    return value == .normal or value == .failure;
+    shown_percent = value;
 }
 
 const testing = std.testing;
@@ -97,66 +182,82 @@ const testing = std.testing;
 test "nothing is written until the terminal is known to take it" {
     var fake: system_mod.Fake = .{};
     enable(false);
-    show(fake.system(), .indeterminate, 0, 0);
-    clear(fake.system());
-    keep_alive(fake.system(), 60_000);
+    begin(fake.system());
+    end();
+    pause();
+    unpause();
     try testing.expectEqualStrings("", fake.output_text());
     try testing.expectEqual(core.progress.State.clear, state());
     try testing.expect(!is_enabled());
 }
 
-test "a state is written once, and the bar is taken down at the end" {
+test "the bar goes up, swings, and comes down" {
     var fake: system_mod.Fake = .{};
     enable(true);
     defer enable(false);
-    try testing.expect(is_enabled());
 
-    show(fake.system(), .indeterminate, 0, 0);
-    try testing.expectEqualStrings("\x1b]9;4;3;0\x1b\\", fake.output_text());
-    try testing.expectEqual(core.progress.State.indeterminate, state());
+    begin(fake.system());
+    try testing.expectEqualStrings("\x1b]9;4;1;8\x1b\\", fake.output_text());
+    try testing.expectEqual(core.progress.State.normal, state());
+    try testing.expectEqual(@as(u8, 8), current_percent());
 
-    // The loop ticks many times a second: the same state is not re-sent.
+    // The swing: up to the ceiling, then back, and never a hundred.
     fake.output_len = 0;
-    show(fake.system(), .indeterminate, 0, 10);
-    show(fake.system(), .indeterminate, 0, 20);
-    try testing.expectEqualStrings("", fake.output_text());
+    var highest: u8 = 0;
+    var lowest: u8 = 100;
+    var steps: u32 = 0;
+    while (steps < 40) : (steps += 1) {
+        advance();
+        highest = @max(highest, current_percent());
+        lowest = @min(lowest, current_percent());
+    }
+    try testing.expectEqual(ceiling, highest);
+    try testing.expectEqual(floor, lowest);
+    try testing.expect(highest < 100);
 
-    // The percent is what changes when there is one.
-    show(fake.system(), .normal, 40, 30);
-    show(fake.system(), .normal, 80, 40);
-    show(fake.system(), .normal, 80, 50);
-    try testing.expectEqualStrings("\x1b]9;4;1;40\x1b\\\x1b]9;4;1;80\x1b\\", fake.output_text());
-
-    fake.output_len = 0;
-    clear(fake.system());
-    try testing.expectEqualStrings("\x1b]9;4;0;0\x1b\\", fake.output_text());
-    clear(fake.system());
-    try testing.expectEqualStrings("\x1b]9;4;0;0\x1b\\", fake.output_text());
+    end();
+    try testing.expectEqual(core.progress.State.clear, state());
+    // The last thing the terminal hears is the bar going away.
+    try testing.expect(std.mem.endsWith(u8, fake.output_text(), "\x1b]9;4;0;0\x1b\\"));
 }
 
-test "a wait that goes on repeats its bar, which is what animates it" {
+test "the thread moves the bar with the loop blocked" {
     var fake: system_mod.Fake = .{};
     enable(true);
     defer enable(false);
 
-    show(fake.system(), .indeterminate, 0, 1_000);
-    fake.output_len = 0;
+    begin(fake.system());
+    // Nothing ticks here: this is the blocking wait the bar exists for.
+    os.sleep_ms(step_ms * 3 + 40);
+    end();
 
-    // Inside the window: nothing, or the bar would be sent a hundred times a
-    // second by a busy loop.
-    keep_alive(fake.system(), 1_000 + repeat_ms - 1);
-    try testing.expectEqualStrings("", fake.output_text());
+    const written = fake.output_text();
+    var count: usize = 0;
+    var rest = written;
+    while (std.mem.indexOf(u8, rest, "\x1b]9;4;1;")) |at| {
+        count += 1;
+        rest = rest[at + 8 ..];
+    }
+    try testing.expect(count >= 3);
+}
 
-    // Past it: said again, with the state that was up.
-    keep_alive(fake.system(), 1_000 + repeat_ms);
-    try testing.expectEqualStrings("\x1b]9;4;3;0\x1b\\", fake.output_text());
+test "waiting for a human holds the bar still" {
+    var fake: system_mod.Fake = .{};
+    enable(true);
+    defer enable(false);
 
-    // Down means no bar to keep alive.
-    fake.output_len = 0;
-    clear(fake.system());
-    fake.output_len = 0;
-    keep_alive(fake.system(), 1_000 + repeat_ms * 3);
-    try testing.expectEqualStrings("", fake.output_text());
+    begin(fake.system());
+    pause();
+    const after_pause = fake.output_len;
+    try testing.expectEqual(core.progress.State.paused, state());
+
+    // Held: the thread keeps its hands off.
+    os.sleep_ms(step_ms * 2);
+    try testing.expectEqual(after_pause, fake.output_len);
+
+    unpause();
+    try testing.expectEqual(core.progress.State.normal, state());
+    end();
 }
 
 test "a terminal that refuses the escape does not stop the work" {
@@ -164,10 +265,20 @@ test "a terminal that refuses the escape does not stop the work" {
     enable(true);
     defer enable(false);
 
-    show(fake.system(), .indeterminate, 0, 0);
-    // Nothing was said, so it will be tried again: the state only moves when the
-    // terminal has been told.
+    begin(fake.system());
     try testing.expectEqual(core.progress.State.clear, state());
-    keep_alive(fake.system(), 60_000);
+    end();
+}
+
+test "turning it off stops the thread even in the middle of a wait" {
+    var fake: system_mod.Fake = .{};
+    enable(true);
+    begin(fake.system());
+    os.sleep_ms(step_ms + 20);
+
+    // No end(): disabling has to stop the thread itself, or it outlives the port
+    // it writes to.
+    enable(false);
+    try testing.expect(!is_enabled());
     try testing.expectEqual(core.progress.State.clear, state());
 }
