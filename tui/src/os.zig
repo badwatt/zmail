@@ -32,6 +32,13 @@ const TIOCSWINSZ: c_ulong = switch (builtin.os.tag) {
 
 extern "c" fn ioctl(fd: c_int, request: c_ulong, arg: *Winsize) c_int;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn openpty(
+    amaster: *c_int,
+    aslave: *c_int,
+    name: ?[*]u8,
+    termp: ?*anyopaque,
+    winp: ?*Winsize,
+) c_int;
 extern "c" fn clock_gettime(clock_id: c_int, tp: *std.posix.timespec) c_int;
 
 const O_NOCTTY_RDWR: c_int = 0o2 | 0o400;
@@ -290,6 +297,15 @@ const Pty = struct {
             extern "c" fn unlockpt(fd: c_int) c_int;
             extern "c" fn ptsname(fd: c_int) ?[*:0]const u8;
         };
+
+        // macOS needs `openpty`: it grants and unlocks the pair as one call, and a
+        // slave created any other way is not a terminal the child can use.
+        if (builtin.os.tag == .macos) {
+            var master: c_int = -1;
+            var slave: c_int = -1;
+            if (openpty(&master, &slave, null, null, null) != 0) return error.SkipZigTest;
+            return .{ .master = master, .slave = slave };
+        }
 
         const master = openpt.posix_openpt(O_NOCTTY_RDWR);
         if (master < 0) return error.SkipZigTest;

@@ -90,7 +90,30 @@ const pty = struct {
 
 /// Allocates a pseudo-terminal pair: the master is ours, the slave is the
 /// child's terminal.
+extern "c" fn openpty(
+    amaster: *c_int,
+    aslave: *c_int,
+    name: ?[*]u8,
+    termp: ?*anyopaque,
+    winp: ?*anyopaque,
+) c_int;
+
 fn open_pty() !struct { master: c_int, slave: c_int } {
+    // macOS: `openpty` grants and unlocks, and gives the terminal a size in the same
+    // call -- a slave created by hand is not a terminal there.
+    if (@import("builtin").os.tag == .macos) {
+        var master: c_int = -1;
+        var slave: c_int = -1;
+        const window = extern struct { row: u16, col: u16, xpixel: u16, ypixel: u16 }{
+            .row = 24,
+            .col = 80,
+            .xpixel = 0,
+            .ypixel = 0,
+        };
+        if (openpty(&master, &slave, null, null, @ptrCast(&window)) != 0) return error.SkipZigTest;
+        return .{ .master = master, .slave = slave };
+    }
+
     // O_RDWR | O_NOCTTY | O_NONBLOCK: the master is read after the child is
     // gone, and with the slave still open in this process there is no end of
     // file to wait for -- a blocking read there waits forever.
