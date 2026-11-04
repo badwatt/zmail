@@ -36,6 +36,17 @@ jobs:
       - name: Release build
         run: zig build -Doptimize=ReleaseSafe
 
+  # The claim this repository makes about macOS is only worth the machine that
+  # checks it: a real Mac, running the same suite, including the pty test.
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+      - run: zig build fmt:check
+      - run: zig build test --summary all
+
   coverage:
     runs-on: ubuntu-latest
     # A suite that hangs must fail in minutes, not in the runner's six hours.

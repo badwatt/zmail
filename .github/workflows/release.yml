@@ -70,13 +70,26 @@ jobs:
       - name: Build
         run: |
           NAME=$(awk '/\.name/{gsub(/[",.]/, "", $3); print $3}' build.zig.zon)
-          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux --prefix zig-out-x86_64 &
-          zig build -Doptimize=ReleaseSafe -Dtarget=aarch64-linux --prefix zig-out-aarch64 &
+          # Four targets, cross-compiled: Zig carries the macOS libSystem stubs, so
+          # this needs no Mac and no SDK. All four are what the release offers.
+          # Linux is musl, so the binary is static: a glibc build would pin the
+          # release to whoever has a new enough glibc. macOS links libSystem, which
+          # is where its kernel interfaces are, and cannot be static.
+          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
+            zig build -Doptimize=ReleaseSafe -Dtarget="$target" --prefix "zig-out-$target" &
+          done
           wait
           mkdir -p zig-out/bin
-          mv "zig-out-x86_64/bin/$NAME" "zig-out/bin/$NAME-x86_64-linux"
-          mv "zig-out-aarch64/bin/$NAME" "zig-out/bin/$NAME-aarch64-linux"
-          rm -rf zig-out-x86_64 zig-out-aarch64
+          for target in x86_64-linux-musl aarch64-linux-musl x86_64-macos aarch64-macos; do
+            # The name carries the platform people recognise, not the libc.
+            case "$target" in
+              *-musl) asset="${target%-musl}" ;;
+              *) asset="$target" ;;
+            esac
+            mv "zig-out-$target/bin/$NAME" "zig-out/bin/$NAME-$asset"
+            rm -rf "zig-out-$target"
+          done
+          ls -l zig-out/bin
       - name: Get previous tag
         id: prev
         run: |

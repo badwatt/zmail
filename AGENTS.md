@@ -25,6 +25,11 @@
 ## Technical Constraints
 
 - Zig 0.17.0+.
+- **Linux and macOS.** The terminal code is POSIX, not Linux: `builtin.os.tag`
+  switches where the kernels differ (the `ioctl` request, the pty), never a
+  `#ifdef`-style fork of the logic. `SIGPIPE` is ignored at startup because macOS
+  has no `MSG_NOSIGNAL`. CI runs the whole suite on a real Mac; the release ships
+  static `musl` Linux binaries and libSystem-linked macOS ones.
 - **The dependency arrow points inward.** `core/` must not import `tui/`, and
   must not perform I/O, read the clock, or know about terminals. Adapters depend
   on the core; the core depends on nothing.

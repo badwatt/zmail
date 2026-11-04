@@ -28,6 +28,13 @@ zig build run        # live by default: the config, or the setup assistant
 zmail --demo         # the built-in demo inbox: no account, no network
 ```
 
+Linux and macOS, both architectures, from one binary per platform: releases ship
+`x86_64`/`aarch64` for each. The Linux build is static (musl rules, no libc to
+carry); the macOS build links the system's libSystem, which is where the kernel
+interfaces live. Nothing else changes between them -- the terminal code is POSIX
+rather than Linux, and the macOS build of the suite runs in CI so the claim is
+checked and not asserted.
+
 Once the cache is warm, startup opens no socket: the first frame is the mail you
 already had, and `Ctrl+R` pulls from the server in the background (a spinner
 sits where the position is). `A` opens the accounts overlay (pick a scope, add, remove);
@@ -235,8 +242,8 @@ only thing that can cut one.
 1. Bump `.version` in `build.zig.zon` and commit it.
 2. Push to `main`. The `release` workflow starts because the manifest changed,
    tags that version (a tag that already exists stops it there), builds
-   `ReleaseSafe` binaries for x86_64 and aarch64 Linux, and publishes them with
-   `SHA256SUMS` and a changelog grouped by commit prefix.
+   `ReleaseSafe` binaries for x86_64 and aarch64, on **Linux and macOS**, and
+   publishes them with `SHA256SUMS` and a changelog grouped by commit prefix.
 
 Pushing code without touching the manifest runs the CI and nothing else. A
 release that failed halfway can be retried with **Run workflow**

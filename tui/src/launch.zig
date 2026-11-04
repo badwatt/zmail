@@ -25,6 +25,7 @@ const Failure = struct {
 };
 
 pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
+    ignore_sigpipe();
     var posix = os.Posix.init(std.posix.STDIN_FILENO, std.posix.STDOUT_FILENO);
     const system = posix.system();
 
@@ -70,6 +71,22 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
 /// key can only be honoured when that call returns. A signal is not blocked by
 /// anything: the handler puts the terminal back the way it was found and leaves,
 /// which is what "quit now" has to mean when "now" is inside a TLS read.
+/// A socket that closes under a write is an error, not a corpse.
+///
+/// `SIGPIPE` terminates the process by default, and the one place it is raised is a
+/// `write` to a server that has gone -- a mail server that times out, a link that
+/// drops. Linux lets a caller opt out per call with `MSG_NOSIGNAL`; macOS has no
+/// such flag and only this, so ignoring the signal is the portable answer. Every
+/// write in this program checks its result, so there is nothing left to notice.
+fn ignore_sigpipe() void {
+    const ignored = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &ignored, null);
+}
+
 fn install_panic_button(posix: *os.Posix) void {
     interrupting = posix;
 
@@ -584,6 +601,8 @@ const Live = struct {
 /// answer -- 0 when the server took it, 1 when it did not -- so a script can
 /// tell the difference between "sent" and "silently did nothing".
 pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
+    // A CLI that pipes nowhere still talks to an SMTP server that can go away.
+    ignore_sigpipe();
     var stderr_buffer: [1024]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
