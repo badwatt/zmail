@@ -405,7 +405,10 @@ pub fn text_columns(text: []const u8) u16 {
     return count;
 }
 
-fn write_sgr(writer: *std.Io.Writer, style: Style, colored: bool) std.Io.Writer.Error!void {
+/// The SGR sequence for `style`. The only place in the program that writes one: the
+/// splash painter hands its colours through here too, rather than keeping a second
+/// encoder that would drift from this one.
+pub fn write_sgr(writer: *std.Io.Writer, style: Style, colored: bool) std.Io.Writer.Error!void {
     try writer.writeAll("\x1b[0");
     if (style.attrs.bold) try writer.writeAll(";1");
     if (style.attrs.dim) try writer.writeAll(";2");

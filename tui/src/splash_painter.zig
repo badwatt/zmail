@@ -115,8 +115,8 @@ pub const Painter = struct {
         // and the mark's colour has to be the last thing said before its glyphs --
         // otherwise the wordmark is written in the terminal's default and the breath
         // is a shape that never changes.
-        self.paint_line();
-        self.paint_corner();
+        self.paint_text(self.line[0..self.line_len], self.line_row, self.line_left, 160);
+        self.paint_text(self.right[0..self.right_len], self.right_row, self.right_left, 32);
 
         var sequence: [64]u8 = undefined;
         var writer = std.Io.Writer.fixed(&sequence);
@@ -152,20 +152,17 @@ pub const Painter = struct {
             self.system.write(row_text[0..length]) catch return;
         }
     }
-    fn paint_line(self: *Painter) void {
-        if (self.line_len == 0) return;
-        const text = self.line[0..self.line_len];
-        const width: u16 = @intCast(@min(screen.text_columns(text), 160));
+    /// A corner sentence, lit by the band the screen would draw across it: one SGR
+    /// per stretch of the same level, so a twenty-cell word is a handful of writes
+    /// rather than forty.
+    fn paint_text(self: *Painter, text: []const u8, row: u16, left: u16, limit: u16) void {
+        if (text.len == 0) return;
+        const width: u16 = @intCast(@min(screen.text_columns(text), limit));
 
         var move: [32]u8 = undefined;
-        const at = std.fmt.bufPrint(&move, "\x1b[{d};{d}H", .{
-            self.line_row + 1,
-            self.line_left + 1,
-        }) catch return;
+        const at = std.fmt.bufPrint(&move, "\x1b[{d};{d}H", .{ row + 1, left + 1 }) catch return;
         self.system.write(at) catch return;
 
-        // One SGR per stretch of the same level, so a twenty-cell word is a handful
-        // of writes rather than forty.
         const elapsed = os.monotonic_ms() - self.started_ms;
         var current: ?u8 = null;
         var cells: u16 = 0;
@@ -176,7 +173,7 @@ pub const Painter = struct {
             if (current == null or current.? != level) {
                 var sgr: [48]u8 = undefined;
                 var writer = std.Io.Writer.fixed(&sgr);
-                write_style(&writer, render.shimmer_style(&self.theme, level)) catch return;
+                screen.write_sgr(&writer, render.shimmer_style(&self.theme, level), self.theme.colored) catch return;
                 self.system.write(writer.buffered()) catch return;
                 current = level;
             }
@@ -188,63 +185,13 @@ pub const Painter = struct {
         // Back to plain for the next frame's cursor moves.
         self.system.write("\x1b[0m") catch return;
     }
-    fn paint_corner(self: *Painter) void {
-        if (self.right_len == 0) return;
-        const text = self.right[0..self.right_len];
-        const width: u16 = @intCast(@min(screen.text_columns(text), 32));
 
-        var move: [32]u8 = undefined;
-        const at = std.fmt.bufPrint(&move, "\x1b[{d};{d}H", .{
-            self.right_row + 1,
-            self.right_left + 1,
-        }) catch return;
-        self.system.write(at) catch return;
-
-        const elapsed = os.monotonic_ms() - self.started_ms;
-        var current: ?u8 = null;
-        var cells: u16 = 0;
-        var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
-        while (it.nextCodepoint()) |codepoint| {
-            if (cells >= width) break;
-            const level = render.shimmer_level(cells, width, elapsed);
-            if (current == null or current.? != level) {
-                var sgr: [48]u8 = undefined;
-                var writer = std.Io.Writer.fixed(&sgr);
-                write_style(&writer, render.shimmer_style(&self.theme, level)) catch return;
-                self.system.write(writer.buffered()) catch return;
-                current = level;
-            }
-            var encoded: [4]u8 = undefined;
-            const length = std.unicode.utf8Encode(codepoint, &encoded) catch continue;
-            self.system.write(encoded[0..length]) catch return;
-            cells += screen.cell_width(codepoint);
-        }
-        self.system.write("\x1b[0m") catch return;
-    }
 };
 
-/// The words under the mark, lit by the same band the screen would draw.
-/// `Ctrl+C quits`, with the band crossing it the other way.
-fn write_style(writer: *std.Io.Writer, style: screen.Style) std.Io.Writer.Error!void {
-    try writer.writeAll("\x1b[0m");
-    switch (style.fg) {
-        .rgb => |rgb| try writer.print("\x1b[38;2;{d};{d};{d}m", .{ rgb.r, rgb.g, rgb.b }),
-        .ansi256 => |index| try writer.print("\x1b[38;5;{d}m", .{index}),
-        .default => {},
-    }
-    if (style.attrs.bold) try writer.writeAll("\x1b[1m");
-    if (style.attrs.dim) try writer.writeAll("\x1b[2m");
-}
-
+/// The colour of the next step of the breath, through the screen's encoder so there
+/// is one SGR builder in the program.
 fn write_sgr(writer: *std.Io.Writer, theme: theme_mod.Theme, level: f32) std.Io.Writer.Error!void {
-    const style = render.breath_style(&theme, level);
-    try writer.writeAll("\x1b[0m");
-    switch (style.fg) {
-        .rgb => |rgb| try writer.print("\x1b[38;2;{d};{d};{d}m", .{ rgb.r, rgb.g, rgb.b }),
-        .ansi256 => |index| try writer.print("\x1b[38;5;{d}m", .{index}),
-        .default => {},
-    }
-    if (style.attrs.bold) try writer.writeAll("\x1b[1m");
+    return screen.write_sgr(writer, render.breath_style(&theme, level), theme.colored);
 }
 
 const testing = std.testing;
@@ -262,7 +209,7 @@ test "the painter draws the mark where the splash put it, and stops" {
     // A cursor move to the mark's first row, and the mark's own glyphs.
     try testing.expect(std.mem.indexOf(u8, written, "\x1b[") != null);
     try testing.expect(std.mem.indexOf(u8, written, "█") != null);
-    try testing.expect(std.mem.indexOf(u8, written, "\x1b[38;") != null);
+    try testing.expect(std.mem.indexOf(u8, written, ";38;") != null);
     // The words under the mark are carried too: they move with it. Their runs are
     // separated by colour changes, so the text is found with the escapes stripped.
     var plain: [4096]u8 = undefined;
@@ -299,36 +246,36 @@ test "the colour of one frame: truecolor, a palette index, or nothing at all" {
 
     var writer = std.Io.Writer.fixed(&buffer);
     try write_sgr(&writer, theme_mod.Theme.from_background(.{ .r = 20, .g = 20, .b = 24 }), 1.0);
-    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;2;") != null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), ";38;2;") != null);
 
     writer = std.Io.Writer.fixed(&buffer);
     try write_sgr(&writer, theme_mod.Theme.dark(), 1.0);
-    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;5;") != null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), ";38;5;") != null);
 
     // Monochrome: no colour at all, and the weight carries the change.
     writer = std.Io.Writer.fixed(&buffer);
     try write_sgr(&writer, theme_mod.Theme.mono(), 1.0);
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;") == null);
-    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[1m") != null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), ";1m") != null);
 }
 
-test "the line's three levels of light, in the three kinds of colour" {
+test "the screen's encoder writes each kind of colour" {
     var buffer: [64]u8 = undefined;
 
     var writer = std.Io.Writer.fixed(&buffer);
     const rgb_style = (screen.Style{}).with_fg(.{ .rgb = .{ .r = 1, .g = 2, .b = 3 } });
-    try write_style(&writer, rgb_style);
-    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;2;1;2;3") != null);
+    try screen.write_sgr(&writer, rgb_style, true);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), ";38;2;1;2;3") != null);
 
     writer = std.Io.Writer.fixed(&buffer);
     const palette_style = (screen.Style{}).with_fg(.{ .ansi256 = 74 });
-    try write_style(&writer, palette_style);
-    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;5;74") != null);
+    try screen.write_sgr(&writer, palette_style, true);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), ";38;5;74") != null);
 
     writer = std.Io.Writer.fixed(&buffer);
-    try write_style(&writer, (screen.Style{}).with_dim());
+    try screen.write_sgr(&writer, (screen.Style{}).with_dim(), true);
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;") == null);
-    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m") != null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), ";2m") != null);
 }
 
 test "the mark at its largest scale still fits a row" {
