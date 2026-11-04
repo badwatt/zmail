@@ -19,6 +19,9 @@ const system_mod = @import("system.zig");
 const theme_mod = @import("theme.zig");
 const System = system_mod.System;
 
+/// One row of the mark, in bytes, at its largest scale.
+const mark_row_bytes: usize = 35 * render.mark_max_scale * 3;
+
 /// Frames per second while the loop is away. Ten is what the loop itself manages;
 /// more only makes the terminal busier at a time when nobody is typing.
 pub const frame_ms: u64 = 90;
@@ -27,7 +30,7 @@ pub const Painter = struct {
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     system: System = undefined,
-    placement: render.MarkPlacement = .{ .left = 0, .top = 0, .height = 0, .width = 0, .large = false },
+    placement: render.MarkPlacement = .{ .left = 0, .top = 0, .height = 0, .width = 0, .scale = 1 },
     /// `connecting to <accounts>`, copied: the caller's text lives on the stack.
     line: [160]u8 = undefined,
     line_row: u16 = 0,
@@ -123,16 +126,20 @@ pub const Painter = struct {
         // Simple and idempotent: every row, its address, its glyphs.
         var row: u16 = 0;
         while (row < placement.height) : (row += 1) {
-            var row_text: [256]u8 = undefined;
+            // The widest row the mark can be: thirty-five cells of drawing at the
+            // largest scale, every cell three bytes of block character.
+            var row_text: [mark_row_bytes]u8 = undefined;
             var length: usize = 0;
             var column: u16 = 0;
             while (column < placement.width) : (column += 1) {
-                const cell = render.mark_cell(placement.large, row, column);
+                const cell = render.mark_cell(placement.scale, row, column);
                 if (cell == ' ') {
+                    if (length == row_text.len) break;
                     row_text[length] = ' ';
                     length += 1;
                     continue;
                 }
+                if (length + 4 > row_text.len) break;
                 const encoded = std.unicode.utf8Encode(cell, row_text[length..][0..4]) catch continue;
                 length += encoded;
             }
@@ -322,4 +329,17 @@ test "the line's three levels of light, in the three kinds of colour" {
     try write_style(&writer, (screen.Style{}).with_dim());
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;") == null);
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m") != null);
+}
+
+test "the mark at its largest scale still fits a row" {
+    // This is the crash that brought the four-times size in: a row of the mark is
+    // three bytes a cell, and the buffer was sized for the two-times one.
+    var fake: system_mod.Fake = .{};
+    var painter = Painter{};
+    painter.start(fake.system(), .{ .columns = 170, .rows = 45 }, theme_mod.Theme.from_background(.{ .r = 20, .g = 20, .b = 24 }), false, 0, "home");
+    _ = std.c.nanosleep(&std.posix.timespec{ .sec = 0, .nsec = 120 * std.time.ns_per_ms }, null);
+    painter.finish();
+
+    try testing.expectEqual(@as(u8, 4), painter.placement.scale);
+    try testing.expect(fake.output_len > 0);
 }

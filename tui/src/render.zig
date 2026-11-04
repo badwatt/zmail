@@ -230,12 +230,10 @@ const wordmark_rows = [_][]const u8{
 /// the two from drifting apart.
 const wordmark = Words{
     .small = decode(5, 35, wordmark_rows),
-    .large = masthead(5, 35, decode(5, 35, wordmark_rows)),
 };
 
 const Words = struct {
     small: [5][35]u21,
-    large: [10][70]u21,
 };
 
 fn decode(
@@ -254,31 +252,6 @@ fn decode(
             out[y][cell] = std.unicode.utf8Decode(line[index..stop]) catch ' ';
             index = stop;
             cell += 1;
-        }
-    }
-    return out;
-}
-
-/// The masthead: the same word at twice the size, in solid blocks.
-///
-/// Every cell is drawn twice across and twice down, and every drawn cell becomes a
-/// full block. The half block (`▐`) that gives the small mark its spine is what makes
-/// the letters read at one size, but doubled sideways it becomes a speckled pair --
-/// `▐▐` is a stripe, not an edge -- so at this size the strokes are solid.
-fn masthead(
-    comptime rows: usize,
-    comptime width: usize,
-    comptime grid: [rows][width]u21,
-) [rows * 2][width * 2]u21 {
-    @setEvalBranchQuota(8000);
-    var out: [rows * 2][width * 2]u21 = @splat(@splat(' '));
-    for (grid, 0..) |line, y| {
-        for (line, 0..) |cell, x| {
-            if (cell == ' ') continue;
-            out[y * 2][x * 2] = '█';
-            out[y * 2][x * 2 + 1] = '█';
-            out[y * 2 + 1][x * 2] = '█';
-            out[y * 2 + 1][x * 2 + 1] = '█';
         }
     }
     return out;
@@ -367,28 +340,19 @@ pub fn breath_style(theme: *const Theme, level: f32) Style {
     }
 }
 
-fn draw_wordmark(out: *Screen, top: u16, elapsed_ms: i64, theme: *const Theme) void {
-    // The big one where there is room for it: an 80-column terminal gets the
-    // masthead at twice the size, a narrow one keeps the small mark rather than
-    // a cropped one.
-    if (out.columns >= wordmark.large[0].len + 6 and out.rows >= 18) {
-        return draw_grid(out, &wordmark.large, top, elapsed_ms, theme);
-    }
-    draw_grid(out, &wordmark.small, top, elapsed_ms, theme);
-}
+fn draw_wordmark(out: *Screen, placement: MarkPlacement, elapsed_ms: i64, theme: *const Theme) void {
+    const level = breath_level_at(elapsed_ms);
+    if (level < hidden_level) return;
 
-fn draw_grid(out: *Screen, grid: anytype, top: u16, elapsed_ms: i64, theme: *const Theme) void {
-    const width: u16 = @intCast(grid[0].len);
-    const left = (out.columns -| width) / 2;
-
-    for (grid, 0..) |line, index| {
-        const row = top +| @as(u16, @intCast(index));
-        if (row >= out.rows) return;
-        const level = breath_level_at(elapsed_ms);
-        if (level < hidden_level) continue;
-        for (line, 0..) |cell, column| {
+    var row: u16 = 0;
+    while (row < placement.height) : (row += 1) {
+        const y = placement.top +| row;
+        if (y >= out.rows) return;
+        var column: u16 = 0;
+        while (column < placement.width) : (column += 1) {
+            const cell = mark_cell(placement.scale, row, column);
             if (cell == ' ') continue;
-            out.put(left +| @as(u16, @intCast(column)), row, cell, breath_style(theme, level));
+            out.put(placement.left +| column, y, cell, breath_style(theme, level));
         }
     }
 }
@@ -404,27 +368,51 @@ pub const MarkPlacement = struct {
     top: u16,
     height: u16,
     width: u16,
-    large: bool,
+    /// 1, 2 or 3: how many cells of the drawing each stroke is worth.
+    scale: u8,
 };
 
+/// The largest scale the drawing is ever asked for.
+pub const mark_max_scale: u16 = 4;
+
 pub fn splash_mark(columns: u16, rows: u16) MarkPlacement {
-    const large = columns >= wordmark.large[0].len + 6 and rows >= 18;
-    const height: u16 = if (large) wordmark.large.len else wordmark.small.len;
-    const width: u16 = if (large) wordmark.large[0].len else wordmark.small[0].len;
+    // The biggest drawing that fits with air around it: the name is the first thing
+    // on screen and it should use the screen.
+    const scale: u8 = if (fits(mark_max_scale, columns, rows))
+        4
+    else if (fits(3, columns, rows))
+        3
+    else if (fits(2, columns, rows))
+        2
+    else
+        1;
+    const height: u16 = @intCast(wordmark.small.len * scale);
+    const width: u16 = @intCast(wordmark.small[0].len * scale);
     const middle = rows / 2;
     return .{
         .left = (columns -| width) / 2,
         .top = middle -| (height / 2) -| 2,
         .height = height,
         .width = width,
-        .large = large,
+        .scale = scale,
     };
 }
 
+/// Whether the drawing at `scale` fits with room to breathe: three columns of air
+/// each side, and the sentence, the version and the footer under it.
+fn fits(scale: u8, columns: u16, rows: u16) bool {
+    const width: u16 = @intCast(wordmark.small[0].len * scale);
+    const height: u16 = @intCast(wordmark.small.len * scale);
+    return columns >= width + 6 and rows >= height + 8;
+}
+
 /// One cell of the mark, for the places that draw it themselves.
-pub fn mark_cell(large: bool, row: u16, column: u16) u21 {
-    if (large) return wordmark.large[row][column];
-    return wordmark.small[row][column];
+pub fn mark_cell(scale: u8, row: u16, column: u16) u21 {
+    const source = wordmark.small[row / scale][column / scale];
+    if (source == ' ' or scale == 1) return source;
+    // A half block repeated sideways is a pair of stripes, not an edge: enlarged,
+    // every stroke is solid.
+    return 0x2588;
 }
 
 fn render_splash(inputs: Inputs, out: *Screen) void {
@@ -437,7 +425,7 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     const placement = splash_mark(out.columns, out.rows);
     const mark_rows = placement.height;
     const mark_top = placement.top;
-    draw_wordmark(out, mark_top, elapsed, theme);
+    draw_wordmark(out, placement, elapsed, theme);
 
     // The version, quiet, right under the mark: the one thing a first screen can
     // honestly say about itself, and it comes from the manifest -- the release is
@@ -2864,14 +2852,20 @@ test "the breath moves from the first tick, at a speed the eye can see" {
 }
 
 test "both sizes of the mark answer their own cells" {
-    const large = splash_mark(120, 24);
-    try testing.expect(large.large);
-    try testing.expect(mark_cell(true, 0, 0) != 0);
+    const huge = splash_mark(120, 24);
+    try testing.expectEqual(@as(u8, 3), huge.scale);
+    // As big as the screen allows, up to four cells a stroke.
+    const widest = splash_mark(170, 45);
+    try testing.expectEqual(@as(u8, 4), widest.scale);
+    const large = splash_mark(90, 24);
+    try testing.expectEqual(@as(u8, 2), large.scale);
+    try testing.expect(mark_cell(2, 0, 0) != 0);
 
-    const small = splash_mark(30, 24);
-    try testing.expect(!small.large);
-    try testing.expect(mark_cell(false, 0, 0) != 0);
+    const small = splash_mark(36, 24);
+    try testing.expectEqual(@as(u8, 1), small.scale);
+    try testing.expect(mark_cell(1, 0, 0) != 0);
     // The masthead is the same word at twice the size, in both directions.
     try testing.expectEqual(small.width * 2, large.width);
+    try testing.expectEqual(small.width * 3, huge.width);
     try testing.expectEqual(small.height * 2, large.height);
 }
