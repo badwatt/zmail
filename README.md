@@ -258,9 +258,13 @@ live), the whole test suite including the end-to-end PTY test, and a
 
 `release` only starts when `build.zig.zon` changes; see [Releasing](#releasing).
 
-CodeQL is not here on purpose: the repository is private without code scanning
-enabled, and Zig is not one of its languages — it would only ever read the
-workflows themselves.
+CodeQL is not here on purpose: Zig is not one of its languages, so it would only
+ever read the workflows themselves.
+
+## License
+
+[MIT](LICENSE). Use it, change it, ship it, sell it -- keeping the copyright notice and
+the licence text with it, which is what makes a fork still say whose work it grew from.
 
 ## Status
 
