@@ -185,6 +185,13 @@ pub const ImageJob = struct {
 
     fn runImage(job: *ImageJob) void {
         if (job.fetch(job.context, job.url.slice(), job.buffer)) |bytes| {
+            // The fetcher hands back a slice of the buffer, not necessarily from its
+            // first byte: an HTTP client that parses headers in place leaves the body
+            // further in. The session reads the picture from the front, so it is
+            // moved there -- forwards, because the two overlap.
+            if (bytes.ptr != job.buffer.ptr) {
+                std.mem.copyForwards(u8, job.buffer[0..bytes.len], bytes);
+            }
             job.len = @intCast(bytes.len);
             job.ok = true;
         }

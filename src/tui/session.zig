@@ -5417,7 +5417,9 @@ test "a picture that is not a PNG is downloaded once and named as such" {
     // A GIF: the terminal cannot paint it, and the reader says so instead of showing
     // a marker that never becomes anything.
     const gif = [_]u8{ 'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0, 0, 0 };
-    var sink: RemoteFetch = .{ .png = &gif };
+    // With headers in front, the way the real client answers: the picture is a slice
+    // further into the buffer, and it used to be read from the front.
+    var sink: RemoteFetch = .{ .png = &gif, .lead = 20 };
     rig.session.deps.fetch_image = RemoteFetch.fetch;
     rig.session.deps.fetch_image_context = &sink;
     rig.session.deps.draw_image = ImageSink.draw;
@@ -5461,14 +5463,18 @@ test "a picture is named by what its bytes are" {
 const RemoteFetch = struct {
     fetches: u8 = 0,
     png: []const u8,
+    /// Bytes of headers to leave in front, as the real client does: the body it hands
+    /// back is a slice of the buffer, not its first byte.
+    lead: usize = 0,
 
     fn fetch(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 {
         const self: *RemoteFetch = @ptrCast(@alignCast(context));
         self.fetches += 1;
         _ = url;
-        if (self.png.len > out.len) return null;
-        @memcpy(out[0..self.png.len], self.png);
-        return out[0..self.png.len];
+        if (self.lead + self.png.len > out.len) return null;
+        @memset(out[0..self.lead], 'H');
+        @memcpy(out[self.lead..][0..self.png.len], self.png);
+        return out[self.lead..][0..self.png.len];
     }
 };
 
