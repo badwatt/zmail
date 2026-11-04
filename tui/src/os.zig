@@ -556,11 +556,17 @@ test "query_background gives up quietly when the terminal says nothing" {
     try testing.expect(query_background(noisy.system()) == null);
 }
 
-test "suspending and resuming never fail, even when the terminal has gone" {
-    // Descriptors that are not open: the terminal went away while the reader was
-    // opening a browser. The escapes cannot be written, and the caller must still
-    // be able to carry on -- it is on its way out of the screen either way.
-    var posix = Posix.init(-1, -1);
+test "suspending and resuming write the escapes and never fail" {
+    // /dev/null is not a terminal: the raw-mode calls cannot work, and the
+    // escapes have nowhere to go. Neither may fail the caller -- it is on its way
+    // to a browser.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const file = try std.Io.Dir.cwd().openFile(io, "/dev/null", .{ .mode = .read_write });
+    defer file.close(io);
+
+    var posix = Posix.init(file.handle, file.handle);
     const system = posix.system();
     try system.suspend_ui();
     try system.resume_ui();

@@ -856,6 +856,25 @@ test "renaming needs an account too" {
     try expect_effects(&effects, &.{.{ .rename_account = .{ .account = AccountId.from_int(1) } }});
 }
 
+test "signing in with OAuth needs an account, then opens the browser for it" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.accounts.add(AccountId.from_int(1), "home", .{}, .{});
+
+    fixture.state.accounts_cursor = 0;
+    _ = apply(&fixture.state, &fixture.store, .accounts_oauth);
+    try testing.expectEqualStrings("Pick an account to sign in", fixture.state.status.slice());
+
+    fixture.state.accounts_cursor = 9;
+    _ = apply(&fixture.state, &fixture.store, .accounts_oauth);
+    try testing.expectEqualStrings("No account there", fixture.state.status.slice());
+
+    fixture.state.accounts_cursor = 1;
+    const effects = apply(&fixture.state, &fixture.store, .accounts_oauth);
+    try expect_effects(&effects, &.{.{ .oauth_account = .{ .account = AccountId.from_int(1) } }});
+    try testing.expectEqualStrings("Opening the browser for home…", fixture.state.status.slice());
+}
+
 test "editing needs an account: the first row is not one" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);

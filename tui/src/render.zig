@@ -1950,18 +1950,20 @@ test "the wordmark is lit by the derived theme, not by a fixed palette" {
     frame(f.inputs(80, 24), &out);
 
     var lit: u32 = 0;
+    var ansi: u32 = 0;
     for (5..15) |y| {
         for (0..80) |x| {
             switch (out.cells[y][x].style.fg) {
                 .rgb => lit += 1,
                 // A 256-colour index here would mean the first screen kept its
                 // own palette while the rest of the app followed the terminal.
-                .ansi256 => return error.TestUnexpectedColour,
+                .ansi256 => ansi += 1,
                 .default => {},
             }
         }
     }
     try testing.expect(lit > 0);
+    try testing.expectEqual(@as(u32, 0), ansi);
 }
 
 test "the splash breathes without color when color is off" {
@@ -2225,10 +2227,7 @@ test "the help card names every key that works" {
                 break;
             }
         }
-        if (!found) {
-            std.debug.print("missing from help: {s}\n", .{label});
-            return error.TestUnexpectedResult;
-        }
+        try testing.expect(found);
     }
 }
 
@@ -2299,4 +2298,160 @@ test "the address of the hovered link shows in a popup" {
         var buffer: [256]u8 = undefined;
         try testing.expect(std.mem.indexOf(u8, plain.row_text(row, &buffer), "https://example.com/a") == null);
     }
+}
+
+/// The rows of a screen as one buffer, newline separated, so a test can look for
+/// text without knowing which row it landed on.
+fn screen_text(out: *const Screen, buffer: []u8) []const u8 {
+    var len: usize = 0;
+    for (0..out.rows) |y| {
+        const line = out.row_text(@intCast(y), buffer[len..]);
+        len += line.len;
+        buffer[len] = '\n';
+        len += 1;
+    }
+    return buffer[0..len];
+}
+
+/// The form's field order, which the session owns; a test only needs the shape.
+const FormField = enum(u8) {
+    address,
+    imap_host,
+    imap_port,
+    smtp_host,
+    smtp_port,
+    sign_in,
+    password,
+    advanced,
+    username,
+    client_id,
+};
+
+test "the account form shows the OAuth client id and the username when advanced is open" {
+    const theme = theme_mod.Theme.dark();
+    var setup = core.setup.Setup.init();
+    setup.address.set("me@example.com");
+    setup.set_oauth(true);
+    setup.show_advanced = true;
+    setup.oauth_client_id.set("abc-123");
+    setup.username.set("me");
+
+    var out = Screen.init(80, 24);
+    var text: [4096]u8 = undefined;
+    settings(&setup, FormField.client_id, false, theme, &out);
+    const drawn = screen_text(&out, &text);
+    try testing.expect(std.mem.indexOf(u8, drawn, "Client ID") != null);
+    try testing.expect(std.mem.indexOf(u8, drawn, "abc-123") != null);
+    try testing.expect(std.mem.indexOf(u8, drawn, "Username") != null);
+
+    // The username row reads as the address when none was typed.
+    setup.username.clear();
+    settings(&setup, FormField.username, false, theme, &out);
+    try testing.expect(std.mem.indexOf(u8, screen_text(&out, &text), "me@example.com") != null);
+}
+
+test "the account form says what went wrong, and what Enter does on the last row" {
+    const theme = theme_mod.Theme.dark();
+    var setup = core.setup.Setup.init();
+    setup.problem.set("the server refused the password");
+
+    var out = Screen.init(80, 24);
+    var text: [4096]u8 = undefined;
+    settings(&setup, FormField.password, false, theme, &out);
+    try testing.expect(std.mem.indexOf(u8, screen_text(&out, &text), "the server refused the password") != null);
+
+    // With no OAuth and nothing unfolded, Advanced is the last row of the form,
+    // and there Enter saves instead of moving on.
+    setup.problem.clear();
+    settings(&setup, FormField.advanced, false, theme, &out);
+    try testing.expect(std.mem.indexOf(u8, screen_text(&out, &text), "Enter saves") != null);
+}
+
+test "a quote is drawn dimmer than the words around it" {
+    const theme = theme_mod.Theme.dark();
+    const kinds = [_]core.html.Kind{ .body, .quote };
+    const lines = [_][]const u8{ "the words", "the quoted words" };
+
+    var out: Screen = .{};
+    out.resize(40, 1);
+    const inputs = Inputs{
+        .state = undefined,
+        .store = undefined,
+        .theme = &theme,
+        .body = "",
+        .wrapped = undefined,
+        .columns = 40,
+        .rows = 1,
+        .now_unix = 0,
+        .line_index = 1,
+        .kinds = &kinds,
+    };
+    // line_style is what decides: the quote row is dim, the body row is not.
+    draw_line_with_links(inputs, &out, lines[1], 0, 40);
+    try testing.expectEqual(theme.dim, out.cells[0][1].style);
+    const body_row = Inputs{
+        .state = undefined,
+        .store = undefined,
+        .theme = &theme,
+        .body = "",
+        .wrapped = undefined,
+        .columns = 40,
+        .rows = 1,
+        .now_unix = 0,
+        .line_index = 0,
+        .kinds = &kinds,
+    };
+    out.resize(40, 1);
+    draw_line_with_links(body_row, &out, lines[0], 0, 40);
+    try testing.expectEqual(theme.text, out.cells[0][1].style);
+}
+
+test "a drag over the body paints only what the drag covers" {
+    const theme = theme_mod.Theme.dark();
+    const lines = [_][]const u8{ "first line", "second line" };
+
+    var out: Screen = .{};
+    out.resize(20, 2);
+    const drag = selection.Selection{
+        .anchor = .{ .line = 0, .column = 6 },
+        .cursor = .{ .line = 1, .column = 5 },
+    };
+
+    // The drag starts on the first line at column 6 and ends on the second at
+    // column 5, so "line" on the first and "second" on the second are painted.
+    for (lines, 0..) |line, y| {
+        const inputs = Inputs{
+            .state = undefined,
+            .store = undefined,
+            .theme = &theme,
+            .body = "",
+            .wrapped = undefined,
+            .columns = 20,
+            .rows = 2,
+            .now_unix = 0,
+            .line_index = @intCast(y),
+            .selection = drag,
+        };
+        try testing.expect(draw_line_selection(inputs, &out, line, @intCast(y), 20));
+    }
+    // Nothing is drawn left of column 1.
+    try testing.expectEqual(theme.text, out.cells[0][1].style);
+    try testing.expectEqual(theme.selection, out.cells[0][7].style);
+    try testing.expectEqual(theme.selection, out.cells[1][1].style);
+    try testing.expectEqual(theme.text, out.cells[1][7].style);
+
+    // A line the drag does not reach is not painted by it.
+    const outside = Inputs{
+        .state = undefined,
+        .store = undefined,
+        .theme = &theme,
+        .body = "",
+        .wrapped = undefined,
+        .columns = 20,
+        .rows = 2,
+        .now_unix = 0,
+        .line_index = 5,
+        .selection = drag,
+    };
+    try testing.expect(!draw_line_selection(outside, &out, lines[0], 0, 20));
 }
