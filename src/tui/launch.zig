@@ -205,6 +205,8 @@ fn run_session(
         .open_external_context = &browser,
         .edit_text = editTextThunk,
         .edit_text_context = &editor,
+        .fetch_image = fetchImageThunk,
+        .fetch_image_context = &browser,
         // Wired only where the terminal said it can paint: the session then has an
         // honest answer for a key that asks for pictures.
         .draw_image = if (graphics.supported()) drawImageThunk else null,
@@ -251,6 +253,54 @@ const Browser = struct {
 
 /// Writes the page a second time with each anchor's address in the text, for
 /// the browsers whose dump prints no references.
+/// Downloads one picture the message points at, with `curl`.
+///
+/// Not with `src/net/tls.zig`: that client was written for a token endpoint, one small
+/// POST, and it answers "Unavailable" to hosts that are perfectly happy -- github,
+/// brave's asset host -- and 302 with no body where a plain request gets 200 and the
+/// picture. `curl` is a web client; being one is its job.
+///
+/// Only ever called from the image worker, and it brings its own event loop: the one the
+/// rest of the program uses is not something to poke from a thread, and the abort this
+/// replaced was exactly that.
+fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 {
+    const self = browser_of(context);
+
+    var threaded: std.Io.Threaded = .init(self.gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const argv = [_][]const u8{
+        "curl",
+        "--silent",
+        "--show-error",
+        "--fail",
+        "--location",
+        "--max-time",
+        "20",
+        // The size the reader can hold, so a runaway response is cut rather than
+        // buffered: a picture bigger than the screen is not a picture at this size.
+        "--max-filesize",
+        "4194304",
+        "--user-agent",
+        "zmail",
+        "--header",
+        "Accept: image/png",
+        "--url",
+        url,
+    };
+    const result = std.process.run(self.gpa, io, .{
+        .argv = &argv,
+        .stdout_limit = .limited(out.len),
+        .stderr_limit = .limited(256),
+    }) catch return null;
+    defer self.gpa.free(result.stdout);
+    defer self.gpa.free(result.stderr);
+    if (!result.term.success() or result.stdout.len == 0) return null;
+    @memcpy(out[0..result.stdout.len], result.stdout);
+    return out[0..result.stdout.len];
+}
+
 /// One image of the message, painted where the layout left its marker.
 ///
 /// Two ways to draw it, and the plain one goes first. Half blocks are text: every
