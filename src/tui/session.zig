@@ -256,6 +256,10 @@ pub const Session = struct {
     /// The body as the frame wraps it: the message's text with the rows each picture
     /// needs inserted after its marker. A terminal cannot reflow around a picture, so
     /// the text is moved out of its way instead of being printed only to be covered.
+    /// Who else was on the message, from the headers of the raw bytes.
+    details: core.headers.Details = .{},
+    /// Whether the reader is showing all of them, instead of the one line of From.
+    show_details: bool = false,
     gapped: [core.limits.body_max]u8 = undefined,
     gapped_len: u32 = 0,
     /// Every place a picture pushed the text down, as "before this offset, this many
@@ -820,6 +824,7 @@ pub const Session = struct {
                 'H' => return self.toggle_html(),
                 'o' => return self.open_external_message(),
                 'i' => return self.toggle_images(),
+                'v' => return self.toggle_details(),
                 else => {},
             }
         }
@@ -912,6 +917,13 @@ pub const Session = struct {
 
     /// Pictures on or off. A receipt's tracking pixels are a decision, not a side
     /// effect of opening it.
+    /// Every header the reader knows, or the one line of From.
+    fn toggle_details(self: *Session) bool {
+        self.show_details = !self.show_details;
+        self.repaint();
+        return true;
+    }
+
     fn toggle_images(self: *Session) bool {
         self.show_images = !self.show_images;
         // Whatever was decoded belongs to the frame that asked for it.
@@ -1652,6 +1664,7 @@ pub const Session = struct {
         self.hovered = null;
         self.hover_url.clear();
 
+        self.details = core.headers.parse(self.raw[0..self.raw_len]);
         self.html_len = 0;
         self.html_ready = false;
         self.html_link_count = 0;
@@ -2257,6 +2270,8 @@ pub const Session = struct {
             .store = &self.store,
             .theme = &self.deps.theme,
             .body = body,
+            .details = &self.details,
+            .show_details = self.show_details,
             .wrapped = if (self.body_loaded) &self.wrapped else null,
             .links = self.reader_links(),
             .hovered = self.hovered,
@@ -6282,4 +6297,51 @@ test "clicking a link works with the mark in front of it" {
         .button = .left,
     }) orelse unreachable;
     try testing.expectEqual(on_words, on_mark);
+}
+
+test "the reader knows who else was on the message" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    try rig.open_reader("From: Alice <alice@example.com>\nTo: bob@example.com, Carol <carol@example.com>\n" ++
+        "Cc: dave@example.com\nReply-To: replies@example.com\nDate: Tue, 4 Nov 2026 10:00:00 +0000\n" ++
+        "Message-ID: <abc@example.com>\nSubject: hi\n\nbody");
+
+    try testing.expectEqualStrings("bob@example.com, Carol <carol@example.com>", rig.session.details.to.slice());
+    try testing.expectEqualStrings("dave@example.com", rig.session.details.cc.slice());
+    try testing.expectEqualStrings("replies@example.com", rig.session.details.reply_to.slice());
+    try testing.expectEqualStrings("<abc@example.com>", rig.session.details.message_id.slice());
+}
+
+test "v shows every header, and v again puts them away" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    try rig.open_reader("From: Alice <alice@example.com>\nTo: bob@example.com\nSubject: hi\n\nbody");
+
+    rig.fake_system.push_input("v");
+    _ = rig.session.step();
+    try testing.expect(rig.session.show_details);
+
+    rig.session.needs_render = true;
+    rig.session.invalidate_screen();
+    rig.session.render();
+    var row_text: [256]u8 = undefined;
+    var row: u16 = 0;
+    var found_title = false;
+    var found_to = false;
+    while (row < rig.session.screen.rows) : (row += 1) {
+        const text = rig.session.screen.row_text(row, &row_text);
+        if (std.mem.indexOf(u8, text, "Details") != null) found_title = true;
+        if (std.mem.indexOf(u8, text, "bob@example.com") != null) found_to = true;
+    }
+    try testing.expect(found_title);
+    try testing.expect(found_to);
+
+    rig.fake_system.push_input("v");
+    _ = rig.session.step();
+    try testing.expect(!rig.session.show_details);
 }

@@ -43,6 +43,10 @@ pub const Inputs = struct {
     line_index: ?u32 = null,
     /// What kind of line each rendered HTML line is: headings, quotes, bullets.
     kinds: []const core.html.Kind = &.{},
+    /// Who else was on the message; empty when the reader has no body yet.
+    details: *const core.headers.Details = &.{},
+    /// Showing every header, instead of the one line of From.
+    show_details: bool = false,
     /// Rows hidden behind a picture: the reader leaves them empty so the image
     /// is not drawn over text.
     cover: []const u8 = &.{},
@@ -524,6 +528,7 @@ fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     out.hline(0, lay.reader_rule_y, lay.columns, '─', inputs.theme.border);
     render_body(inputs, lay, out);
     render_hover_popup(inputs, lay, out);
+    if (inputs.show_details) render_details(inputs, lay, out);
     out.hline(0, lay.bottom_rule_y, lay.columns, '─', inputs.theme.border);
 }
 
@@ -547,15 +552,18 @@ fn render_reader_meta(inputs: Inputs, lay: layout_mod.Layout, header: Header, ou
     const address = header.from.addr_spec(&address_buffer);
     const named = header.from.name.len > 0 and address.len > 0;
 
-    var buffer: [256]u8 = undefined;
+    // The one line says who wrote it and to whom: the recipient is the question a reader
+    // asks of a message they did not send. Everything else waits behind `v`.
+    var buffer: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     if (named) {
-        writer.print("From {s} <{s}>  ·  {s}  ·  {s}", .{
-            header.from.name.slice(), address, date, size,
-        }) catch {};
+        writer.print("From {s} <{s}>", .{ header.from.name.slice(), address }) catch {};
     } else {
-        writer.print("From {s}  ·  {s}  ·  {s}", .{ address, date, size }) catch {};
+        writer.print("From {s}", .{address}) catch {};
     }
+    const to = inputs.details.to.slice();
+    if (to.len > 0) writer.print("  to {s}", .{to}) catch {};
+    writer.print("  ·  {s}  ·  {s}", .{ date, size }) catch {};
     _ = out.put_text(1, lay.reader_meta_y, writer.buffered(), lay.columns - 2, inputs.theme.dim);
 }
 
@@ -943,6 +951,8 @@ const help_rows = [_]Hint{
     .{ .keys = "", .action = "-- the reader" },
     .{ .keys = "q / h / Esc / Left", .action = "back to the list" },
     .{ .keys = "H", .action = "HTML view, or the plain text one" },
+    .{ .keys = "v", .action = "every header: to, cc, reply-to, date, id" },
+    .{ .keys = "i", .action = "the pictures the message carries" },
     .{ .keys = "o", .action = "open the mail in a browser" },
     .{ .keys = "Ctrl+click", .action = "open the link under the pointer" },
     .{ .keys = "drag", .action = "select, then copy (and the primary selection)" },
@@ -1032,6 +1042,46 @@ fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         rect.width -| 4,
         inputs.theme.dim,
     );
+}
+
+/// Every header the reader has, over the message it belongs to: the list a mail client
+/// hides behind "show details", in the place where the message is.
+fn render_details(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    const details = inputs.details;
+    var from_buffer: [core.limits.address_max]u8 = undefined;
+    const stored = if (inputs.state.opened_account.is_known())
+        inputs.store.get_const(inputs.state.opened_account, inputs.state.opened)
+    else
+        null;
+    const from = if (stored) |message| message.from else inputs.state.opened_from;
+    const from_address = from.addr_spec(&from_buffer);
+    const card_width: u16 = @min(76, lay.columns - 4);
+    const rect = Rect{
+        .x = (lay.columns -| card_width) / 2,
+        .y = lay.reader_body_y,
+        .width = card_width,
+        .height = @min(10, lay.reader_rows),
+    };
+    out.card(rect, inputs.theme.text, inputs.theme.border);
+    _ = out.put_text(rect.x + 2, rect.y, " Details ", card_width -| 4, inputs.theme.accent.with_bold());
+
+    var row: u16 = rect.y + 1;
+    const rows = [_]struct { label: []const u8, value: []const u8 }{
+        .{ .label = "From", .value = from_address },
+        .{ .label = "To", .value = details.to.slice() },
+        .{ .label = "Cc", .value = details.cc.slice() },
+        .{ .label = "Reply-To", .value = details.reply_to.slice() },
+        .{ .label = "Date", .value = details.date.slice() },
+        .{ .label = "Id", .value = details.message_id.slice() },
+    };
+    for (rows) |entry| {
+        if (row >= rect.bottom() -| 1) break;
+        if (entry.value.len == 0) continue;
+        _ = out.put_text(rect.x + 2, row, entry.label, 10, inputs.theme.dim);
+        _ = out.put_text(rect.x + 12, row, entry.value, card_width -| 14, inputs.theme.text);
+        row += 1;
+    }
+    _ = out.put_text(rect.x + 2, rect.bottom() -| 1, " v closes ", card_width -| 4, inputs.theme.dim);
 }
 
 fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
@@ -2561,4 +2611,36 @@ test "every link gets a mark, and only one each" {
     // One per link, even the one that wraps: three links, three marks.
     try testing.expectEqual(@as(usize, 3), marks);
     try testing.expectEqual(@as(usize, 3), count);
+}
+
+test "the meta line says who the message was sent to" {
+    var store = try core.store.Store.init(testing.allocator, 4);
+    defer store.deinit(testing.allocator);
+    var state: State = .{ .list_rows = 20 };
+    state.view = .reader;
+    state.opened_subject.set("hi");
+    state.opened_from = try core.address.Address.init("Alice <alice@example.com>");
+
+    var details_copy = core.headers.Details{};
+    details_copy.to.set("bob@example.com");
+
+    var out: Screen = .{};
+    frame(.{
+        .state = &state,
+        .store = &store,
+        .theme = &Theme.dark(),
+        .body = "",
+        .wrapped = null,
+        .details = &details_copy,
+        .columns = 100,
+        .rows = 24,
+        .now_unix = 1_700_000_000,
+    }, &out);
+    var row_buffer: [512]u8 = undefined;
+    var line: u16 = 0;
+    var found = false;
+    while (line < out.rows) : (line += 1) {
+        if (std.mem.indexOf(u8, out.row_text(line, &row_buffer), "to bob@example.com") != null) found = true;
+    }
+    try testing.expect(found);
 }

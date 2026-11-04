@@ -28,6 +28,8 @@ pub const domain_max: u32 = 255;
 
 /// Maximum bytes of an addr-spec (`local@domain`), per RFC 5321.
 pub const address_max: u32 = 254;
+/// A header's value: `To:` can list a crowd, and `Message-ID:` is not short either.
+pub const header_max: u32 = 512;
 
 /// Maximum bytes of a host name (IMAP/SMTP server), per RFC 1035.
 pub const host_max: u32 = 253;

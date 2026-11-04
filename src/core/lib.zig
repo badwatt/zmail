@@ -54,6 +54,7 @@ pub const png = @import("png.zig");
 pub const scope_port = @import("ports/scope.zig");
 pub const links = @import("links.zig");
 pub const mime = @import("mime.zig");
+pub const headers = @import("headers.zig");
 pub const sealed = @import("sealed.zig");
 pub const oauth = @import("oauth.zig");
 pub const lazy_mail = @import("adapters/lazy.zig").LazyMail;

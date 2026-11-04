@@ -150,6 +150,7 @@ pub fn render_body(message: *const Message, out: []u8) []const u8 {
     const timestamp = civil_from_unix(message.timestamp_unix);
     writer.print(
         \\
+        \\To: me@zmail.local
         \\Date: {d}-{d:0>2}-{d:0>2}
         \\Subject: {s}
         \\
@@ -177,6 +178,8 @@ pub fn render_body(message: *const Message, out: []u8) []const u8 {
 /// The first message arrives as a real MIME message with an HTML part, so the
 /// HTML view has something to render in the demo.
 const html_message =
+    "To: me@zmail.local, a colleague <colleague@example.com>\n" ++
+    "Cc: team@example.com\n" ++
     "Content-Type: multipart/alternative; boundary=\"demo\"\n" ++
     "\n" ++
     "--demo\n" ++
