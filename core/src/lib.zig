@@ -10,6 +10,7 @@ pub const limits = @import("limits.zig");
 pub const argv = @import("argv.zig");
 pub const oklch = @import("oklch.zig");
 pub const osc = @import("osc.zig");
+pub const progress = @import("progress.zig");
 /// Accounts a single zmail process can talk to at once.
 pub const app_max_accounts: u8 = 4;
 pub const meta = @import("meta.zig");
@@ -66,6 +67,7 @@ test {
     _ = @import("argv.zig");
     _ = @import("oklch.zig");
     _ = @import("osc.zig");
+    _ = @import("progress.zig");
     _ = @import("meta.zig");
     _ = @import("domain/text.zig");
     _ = @import("domain/id.zig");

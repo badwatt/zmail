@@ -9,6 +9,7 @@ const net = @import("net");
 
 const cli = @import("cli.zig");
 const graphics = @import("graphics.zig");
+const progress = @import("progress.zig");
 const halfblocks = @import("halfblocks.zig");
 const os = @import("os.zig");
 const session_mod = @import("session.zig");
@@ -44,6 +45,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
     // answers come on stdin, and a parser would read them as typing.
     graphics.detect(system);
     background = os.query_background(system);
+    // A pipe, a log, or a `dumb` terminal must not be sent a progress bar; one
+    // that shows it must be told when the work stops, which is what restoreNow
+    // and deinit are for.
+    progress.enable(!std.mem.eql(u8, os.env("TERM") orelse "", "dumb"));
     try system.write(enter_screen);
 
     const failure = run_inside(gpa, io, options, system);

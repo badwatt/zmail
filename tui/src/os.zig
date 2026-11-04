@@ -15,6 +15,7 @@ const assert = std.debug.assert;
 
 const system_mod = @import("system.zig");
 const core = @import("core");
+const progress_mod = @import("progress.zig");
 
 const c = std.c;
 const Winsize = std.posix.winsize;
@@ -93,6 +94,10 @@ pub const Posix = struct {
     /// Puts the terminal back the way it was found, from anywhere: the sequence
     /// a signal handler has to be able to run.
     pub fn restoreNow(self: *Posix) void {
+        // The bar first: it belongs to the window, not to the screen we are
+        // leaving, so it has to come down before the screen does -- and only if
+        // there is one, so a terminal that never spoke this gets no stray escape.
+        progress_mod.clear(self.system());
         writeThunk(self, leave_screen) catch {};
         leaveRawThunk(self) catch {};
     }

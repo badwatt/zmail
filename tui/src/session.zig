@@ -13,6 +13,7 @@ const clipboard_mod = @import("clipboard.zig");
 const keymap = @import("keymap.zig");
 const layout_mod = @import("layout.zig");
 const render_mod = @import("render.zig");
+const progress_mod = @import("progress.zig");
 const screen_mod = @import("screen.zig");
 const system_mod = @import("system.zig");
 const theme_mod = @import("theme.zig");
@@ -502,6 +503,7 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
+        progress_mod.clear(self.deps.system);
         // A running worker touches `refresh_scratch`; wait for it before freeing.
         if (self.refreshing) {
             while (!self.refresh_job.finished()) std.atomic.spinLoopHint();
@@ -517,6 +519,7 @@ pub const Session = struct {
     /// Advances the loop by one step. Returns false when the session is over.
     pub fn step(self: *Session) bool {
         self.poll_refresh();
+        self.sync_progress();
         // While a refresh runs the spinner must move, so every tick redraws.
         if (self.refreshing) self.needs_render = true;
 
@@ -776,6 +779,9 @@ pub const Session = struct {
         const open = self.deps.open_external orelse {
             return self.say("No way to open it from here", .{});
         };
+        // A browser is the user's turn, not ours: a bar that says "working" while
+        // they read the mail would be a lie.
+        progress_mod.show(self.deps.system, .paused, 0, os.monotonic_ms());
         if (self.html_part_len > 0) {
             // The part itself: a browser that is handed our text rendering sees
             // one collapsed paragraph with no styling at all.
@@ -1034,6 +1040,25 @@ pub const Session = struct {
         else
             "";
         scope.save(label) catch {};
+    }
+
+    /// The tab's progress bar, if the terminal has one.
+    ///
+    /// Loading is the only thing this app does that a terminal cares about, and
+    /// every kind of it -- the first screen, a refresh, a body, a send -- ends up
+    /// in these three flags. Reconciling in one place means a wait cannot leave a
+    /// bar behind, which is the failure that matters: a bar that never goes away
+    /// says "busy" forever.
+    fn sync_progress(self: *Session) void {
+        const now = os.monotonic_ms();
+        if (self.state.loading or self.state.booting or self.refreshing) {
+            progress_mod.show(self.deps.system, .indeterminate, 0, now);
+            // A wait long enough to outlive the terminal's memory of it says so
+            // again, which is what keeps the bar up for a slow server.
+            progress_mod.keep_alive(self.deps.system, now);
+        } else {
+            progress_mod.clear(self.deps.system);
+        }
     }
 
     /// Test hook: the tail of the loading wrapper, without the effect.
@@ -1337,6 +1362,7 @@ pub const Session = struct {
         };
         // The flow talks to a human in a browser: give the terminal back first,
         // or the URL lands on a screen nobody is looking at.
+        progress_mod.show(self.deps.system, .paused, 0, os.monotonic_ms());
         self.deps.system.suspend_ui() catch {};
         var problem: core.text.Text(256) = .{};
         accounts.oauth_login(account, &problem) catch {
@@ -4977,4 +5003,79 @@ test "a refresh that would have to open the connection does it here, not in a wo
     try testing.expect(!rig.session.refreshing);
     try testing.expectEqual(before + 1, rig.fake_mail.fetch_calls);
     try testing.expect(rig.session.state.row_count() > 0);
+}
+
+test "the terminal's bar goes up while loading, stays, and comes down after" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.settle_refresh_for_test();
+    rig.session.state.booting = false;
+
+    // The process boundary enables this; a terminal that cannot take the escape
+    // never sees a byte of it (the test above in progress.zig holds that end).
+    progress_mod.enable(true);
+    defer progress_mod.enable(false);
+
+    rig.session.state.loading = true;
+    rig.session.needs_render = false;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    try testing.expectEqualStrings("\x1b]9;4;3;0\x1b\\", rig.fake_system.output_text());
+
+    // Sixty ticks a second: the bar is not re-sent on every one of them.
+    rig.session.needs_render = false;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    try testing.expectEqualStrings("", rig.fake_system.output_text());
+
+    // The work ended: the bar comes down, once.
+    rig.session.state.loading = false;
+    rig.session.needs_render = false;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    try testing.expectEqualStrings("\x1b]9;4;0;0\x1b\\", rig.fake_system.output_text());
+
+    rig.session.needs_render = false;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    try testing.expectEqualStrings("", rig.fake_system.output_text());
+}
+
+test "the splash counts as loading, and so does a refresh" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    progress_mod.enable(true);
+    defer progress_mod.enable(false);
+
+    _ = rig.session.step();
+    rig.session.settle_refresh_for_test();
+
+    // The first screen: the terminal shows the same "working" the wordmark does.
+    rig.session.state.booting = true;
+    rig.session.needs_render = false;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;3;0\x1b\\") != null);
+
+    // A refresh in the background is work too, even with nothing booting: the bar
+    // is already up, so it stays up and is not re-sent.
+    rig.session.state.booting = false;
+    rig.fake_system.output_len = 0;
+    rig.session.start_refresh();
+    rig.session.needs_render = false;
+    _ = rig.session.step();
+    try testing.expectEqual(core.progress.State.indeterminate, progress_mod.state());
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;3;0") == null);
+
+    // And it comes down when the refresh does.
+    rig.session.settle_refresh_for_test();
+    rig.session.needs_render = false;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    // The frame and the clear come out of the same tick.
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;0;0\x1b\\") != null);
+    try testing.expectEqual(core.progress.State.clear, progress_mod.state());
 }
