@@ -123,7 +123,6 @@ pub const TlsTransport = struct {
             var slices = [_][]u8{buffer};
             const count = self.tls.reader.readVec(&slices) catch return error.Unavailable;
             if (count > 0) return count;
-
         }
         return 0;
     }

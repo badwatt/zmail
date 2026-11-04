@@ -24,17 +24,17 @@ microseconds and what will let a GUI reuse it unchanged.
 
 ## The hexagon
 
-**Domain (`core/src/domain`).** Value types with the invariants baked in:
+**Domain (`src/core/domain`).** Value types with the invariants baked in:
 `Text(capacity)` (truncating, control-neutralizing), `Address`, `Mailbox`,
 `Message`, `Flags`, `Store` (fixed-capacity cache, newest first), `Secret`,
 `Account`/`Server`, and `time` (relative stamps and calendar dates).
 
-**Ports (`core/src/ports`).** `mail.Mail` is a vtable with four operations:
+**Ports (`src/core/ports`).** `mail.Mail` is a vtable with four operations:
 fetch envelopes for a mailbox, fetch one body, set flags, move a message. The
 port is small on purpose: it is the entire surface an IMAP adapter, an SMTP
 adapter, or a test double must satisfy.
 
-**Application (`core/src/app`).**
+**Application (`src/core/app`).**
 
 - `command.Command` is a user intent with no keyboard or mouse in it.
 - `state.State` is the aggregate: view (`list`, `reader`, `help`), mode
@@ -44,7 +44,7 @@ adapter, or a test double must satisfy.
 - `effect.Effect` is the bounded list of work the front end must do:
   `fetch_body`, `sync_flags`, `move_message`, `refresh`.
 
-**MIME (`core/src/mime.zig`).** The bridge between wire format and prose, pure
+**MIME (`src/core/mime.zig`).** The bridge between wire format and prose, pure
 and allocation-free: RFC 2047 encoded words (subjects, display names), transfer
 encodings (base64, quoted-printable), charsets (UTF-8, ASCII, ISO-8859-1,
 Windows-1252), multipart walking that prefers `text/plain` and falls back to
@@ -62,7 +62,7 @@ opens only the connections the cache could not replace, after that first frame
 is on screen. The connections themselves are lazy (`adapters/lazy.zig`): the
 `Mail` and `Outbox` ports open on their first call, so a warm start performs no
 I/O at all and a failed connection is an ordinary port error instead of a
-startup failure. The process boundary (`tui/src/launch.zig`) keeps the
+startup failure. The process boundary (`src/tui/launch.zig`) keeps the
 password, the TLS transports, and the error messages that the opener needs.
 
 **Warming the connection.** A start from cache opens no socket, so the *first*
@@ -73,7 +73,7 @@ opened, and a body asked for while the worker is busy is deferred (the reader
 shows the envelope immediately and the text arrives when the fetch finishes),
 never blocked and never refused.
 
-**Refreshing.** `Ctrl+R` starts one worker thread (`tui/src/refresh.zig`): it
+**Refreshing.** `Ctrl+R` starts one worker thread (`src/tui/refresh.zig`): it
 fetches the current mailbox for every account into a second buffer, and the UI
 thread swaps the result into the store when an atomic flag says done. The store
 is only ever touched by the UI thread, other mail requests are refused while the
@@ -88,7 +88,7 @@ empty, not an error.
 
 **Caching.** `cache.zig` is the versioned TSV codec; `ports/cache.zig` is the
 port; the session reads it at startup and on mailbox switches and writes it
-after every network refresh. `net/src/cache_file.zig` is the file adapter
+after every network refresh. `src/net/cache_file.zig` is the file adapter
 (one file per account and mailbox under the cache directory).
 
 **Adapters.** `adapters/memory_mail.zig` is the demo account and the tests'
@@ -97,7 +97,7 @@ protocol client; it is tested with a scripted server, not a network. The TLS
 transport is the only adapter still missing, and it plugs into the `Transport`
 port without touching either adapter.
 
-**Protocol (`core/src/protocol/imap`).** Pure functions over byte buffers:
+**Protocol (`src/core/protocol/imap`).** Pure functions over byte buffers:
 
 | File | Responsibility |
 |------|----------------|
@@ -110,7 +110,7 @@ port without touching either adapter.
 `client.zig` talks to `ports/transport.zig` (`read`/`write`/`close`), never to a
 socket, so a whole IMAP conversation is a unit test with a scripted peer.
 
-**Network tree (`net/src`).** `tls.zig` is the only code that opens a socket.
+**Network tree (`src/net`).** `tls.zig` is the only code that opens a socket.
 It implements the `Transport` port over `std.Io.net` + `std.crypto.tls.Client`:
 system CA bundle, hostname verification, no insecure mode. Two details matter:
 
@@ -120,7 +120,7 @@ system CA bundle, hostname verification, no insecure mode. Two details matter:
 - TLS is only entered when a whole encrypted record is buffered, because its own
   read would block without a timeout. A partial record waits for the next poll.
 
-`net/` is deliberately outside the kcov include pattern (`core/src,tui/src`).
+`src/net/` is deliberately outside the kcov include pattern (`src/core,src/tui`).
 It cannot be unit tested without a real TLS peer; it is verified by an opt-in
 live run (a real IMAP server, expected login refusal with a wrong password)
 plus the scripted-conversation tests one layer above it.
@@ -173,8 +173,8 @@ not clear the status line, so a resize never erases "Archived".
 reports, and fails unless every measured line is covered. Two files are
 excluded **by name**, and only these two:
 
-- `tui/src/launch.zig` — raw mode, alternate screen, and session lifecycle.
-- `tui/src/main.zig` — three lines of process wiring.
+- `src/tui/launch.zig` — raw mode, alternate screen, and session lifecycle.
+- `src/tui/main.zig` — three lines of process wiring.
 
 Both are executed by the end-to-end test that spawns the real binary on a
 pseudo-terminal, asserts the first frame contains the app name and the Inbox

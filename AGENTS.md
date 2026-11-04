@@ -6,10 +6,10 @@
 - **Commit freely**: commit anytime without asking.
 - **Push requires approval**: never push. always ask first.
 - **Coverage**: 100% line coverage via kcov, no exceptions inside the gate.
-  The gate covers `core/src` and `tui/src`, except three files named for a stated
-  reason: `tui/src/launch.zig`, `tui/src/main.zig`, and `tui/src/refresh.zig` --
+  The gate covers `src/core` and `src/tui`, except three files named for a stated
+  reason: `src/tui/launch.zig`, `src/tui/main.zig`, and `src/tui/refresh.zig` --
   the process boundary, run by the end-to-end pty test in another process, which
-  kcov cannot instrument. `net/src` is outside the include pattern: it needs a
+  kcov cannot instrument. `src/net` is outside the include pattern: it needs a
   real TLS peer, and is verified with an opt-in live run. See
   `docs/ARCHITECTURE.md`.
 
@@ -36,8 +36,8 @@
 - **All behaviour lives in `core/app/update.zig`.** Front ends translate input
   into `core.command.Command` and execute `core.effect.Effect`. If a rule needs
   to exist for a future GUI too, it goes in the update function, not in the TUI.
-- Dependency injection via `tui/src/system.zig` (terminal),
-  `core/src/ports/mail.zig` (mail), and `core/src/ports/transport.zig`
+- Dependency injection via `src/tui/system.zig` (terminal),
+  `src/core/ports/mail.zig` (mail), and `src/core/ports/transport.zig`
   (network). Tests use `system.Fake`, `adapters/memory_mail.zig`, and
   `ports/transport.zig`'s `Scripted` peer; never the real terminal or network.
 - External commands run as argv lists, never through a shell.
@@ -55,7 +55,7 @@
   assertions for programmer errors (including the negative space), functions
   under 70 lines, no recursion, comments that explain *why*.
 - 100-column lines, 4-space indent, `zig fmt`.
-- Sanitization happens on ingress (`core/src/domain/text.zig`), not on render.
+- Sanitization happens on ingress (`src/core/domain/text.zig`), not on render.
 
 ## Commits
 

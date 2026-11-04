@@ -134,8 +134,8 @@ test "percent_basis_points is exact at the edges" {
 test "print_report writes one line per file plus a summary" {
     var report = try parse(
         \\{"files": [
-        \\  {"file": "core/src/a.zig", "covered_lines": 10, "total_lines": 10},
-        \\  {"file": "tui/src/b.zig", "covered_lines": 9, "total_lines": 10}
+        \\  {"file": "src/core/a.zig", "covered_lines": 10, "total_lines": 10},
+        \\  {"file": "src/tui/b.zig", "covered_lines": 9, "total_lines": 10}
         \\]}
     );
     defer report.deinit(testing.allocator);
@@ -145,8 +145,8 @@ test "print_report writes one line per file plus a summary" {
     try coverage.print_report(&report, &writer);
 
     const output = writer.buffered();
-    try testing.expect(std.mem.indexOf(u8, output, "ok    core/src/a.zig (10 lines)") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "GAP   tui/src/b.zig (9/10 lines)") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "ok    src/core/a.zig (10 lines)") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "GAP   src/tui/b.zig (9/10 lines)") != null);
     try testing.expect(std.mem.indexOf(u8, output, "coverage: 95.00% (19/20 lines), 1 file(s) with gaps") != null);
 }
 
@@ -164,10 +164,10 @@ test "print_report reports a perfect score" {
 
 test "a complete report passes, and a report with gaps does not" {
     try testing.expectEqual(@as(u8, 0), coverage.check(testing.allocator,
-        \\{"files": [{"file": "core/src/a.zig", "covered_lines": "10", "total_lines": "10"}]}
+        \\{"files": [{"file": "src/core/a.zig", "covered_lines": "10", "total_lines": "10"}]}
     ));
     try testing.expectEqual(@as(u8, 1), coverage.check(testing.allocator,
-        \\{"files": [{"file": "core/src/a.zig", "covered_lines": "9", "total_lines": "10"}]}
+        \\{"files": [{"file": "src/core/a.zig", "covered_lines": "9", "total_lines": "10"}]}
     ));
 }
 

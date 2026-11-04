@@ -15,7 +15,7 @@ the coverage gate stays at 100%.
 
 The port exists; this milestone fills it in.
 
-- **Protocol codec, pure and tested (done: M2.1).** `core/src/protocol/imap/`:
+- **Protocol codec, pure and tested (done: M2.1).** `src/core/protocol/imap/`:
   a tokenizer (atoms, quoted strings, literals), commands rendered into bounded
   buffers with quoting and tag validation, and response parsing for tagged
   status, `EXISTS`/`RECENT`/`EXPUNGE`, capabilities, and `FETCH` attributes
@@ -28,7 +28,7 @@ The port exists; this milestone fills it in.
 - **The adapter (done: M2.2).** `adapters/imap_mail.zig` implements
   `ports/mail.Mail` on top of the client, selecting a mailbox once and mapping
   every protocol error onto `Unavailable` / `NotFound` / `Rejected`.
-- **TLS transport (done: M2.3).** `net/src/tls.zig` implements the `Transport`
+- **TLS transport (done: M2.3).** `src/net/tls.zig` implements the `Transport`
   port over a socket and `std.crypto.tls.Client`, with the system CA bundle and
   hostname verification. Reads poll first and drain buffered records so a
   greeting that arrives with the handshake is not lost.
@@ -57,7 +57,7 @@ The port exists; this milestone fills it in.
 
 ## M3 — writing mail (done: M3.1, next: M3.2)
 
-- **SMTP over TLS (done).** `core/src/protocol/smtp/`: reply parsing, commands,
+- **SMTP over TLS (done).** `src/core/protocol/smtp/`: reply parsing, commands,
   AUTH PLAIN, a streaming client with CRLF normalization and dot-stuffing, and
   `adapters/smtp_outbox.zig` behind the `Outbox` port. The demo has a memory
   outbox that appends to Sent.
@@ -68,7 +68,7 @@ The port exists; this milestone fills it in.
   credential file per account, a unified list with an `a` scope switch, and a
   TSV envelope cache under `~/.cache/zmail`. Switching to a loaded mailbox no
   longer refetches it, and startup reads the cache before the network.
-- **Real mail bodies (done).** `core/src/mime.zig` decodes encoded-word
+- **Real mail bodies (done).** `src/core/mime.zig` decodes encoded-word
   subjects and names, base64 and quoted-printable, the common charsets, and
   multipart trees (plain first, HTML stripped as a fallback). Bodies are
   fetched with `BODY.PEEK[]` from the message's own mailbox, so reading Sent
@@ -105,7 +105,7 @@ The port exists; this milestone fills it in.
   words, then fetches only that part -- its MIME headers and its content in one
   round trip. A certificate as a PDF is no longer downloaded to be thrown away,
   and a message whose shape is not understood falls back to a preface fetch
-  (`BODY.PEEK[]<0.N>`) rather than failing to open. `core/src/protocol/imap/`
+  (`BODY.PEEK[]<0.N>`) rather than failing to open. `src/core/protocol/imap/`
   `bodystructure.zig` is the parser: bounded depth and part count, no recursion,
   because the message is written by whoever sent it.
 - **Writing that survives contact with a real mailbox (done).** A reply from the

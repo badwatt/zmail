@@ -56,7 +56,7 @@ fn metaModule(b: *std.Build) *std.Build.Module {
 /// The domain module: pure Zig, no libc, no syscalls.
 fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     const mod = b.createModule(.{
-        .root_source_file = b.path("core/src/lib.zig"),
+        .root_source_file = b.path("src/core/lib.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -69,7 +69,7 @@ fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 /// opt-in live test instead of by unit tests.
 fn netModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
     const mod = b.createModule(.{
-        .root_source_file = b.path("net/src/lib.zig"),
+        .root_source_file = b.path("src/net/lib.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -81,7 +81,7 @@ fn netModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 /// The TUI module. Links libc for termios; only the OS adapter uses it.
 fn tuiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module) *std.Build.Module {
     const mod = b.createModule(.{
-        .root_source_file = b.path("tui/src/lib.zig"),
+        .root_source_file = b.path("src/tui/lib.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -93,7 +93,7 @@ fn tuiModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
 fn addExe(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, core: *std.Build.Module, net: *std.Build.Module) *std.Build.Step.Compile {
     const mod = b.createModule(.{
-        .root_source_file = b.path("tui/src/main.zig"),
+        .root_source_file = b.path("src/tui/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -178,9 +178,9 @@ fn addE2eTest(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 /// Runs both test binaries under kcov, merges the reports, and fails unless
 /// every measured line is covered.
 ///
-/// The process boundary is excluded by name, not by accident: `tui/src/launch.zig`
-/// and `tui/src/refresh.zig` (the only thread)
-/// (raw mode, alternate screen, session lifecycle) and `tui/src/main.zig` (three
+/// The process boundary is excluded by name, not by accident: `src/tui/launch.zig`
+/// and `src/tui/refresh.zig` (the only thread)
+/// (raw mode, alternate screen, session lifecycle) and `src/tui/main.zig` (three
 /// lines of wiring) are executed by the end-to-end PTY test, not by unit tests.
 ///
 /// kcov is provided by nix-shell because kcov is a development tool, not a
@@ -210,8 +210,8 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         \\rm -rf .coverage coverage
         \\mkdir -p .coverage
         \\export CORE_BIN="$1" TUI_BIN="$2" REPORT_BIN="$3"
-        \\export PATTERN="core/src,tui/src"
-        \\export SKIP="tui/src/launch.zig,tui/src/main.zig,tui/src/refresh.zig"
+        \\export PATTERN="src/core,src/tui"
+        \\export SKIP="src/tui/launch.zig,src/tui/main.zig,src/tui/refresh.zig"
         \\steps='
         \\# A kcov from nix carries its own glibc in LD_LIBRARY_PATH, while the binary
         \\# under test was linked against the system one: the mixture does not load.
@@ -245,7 +245,7 @@ fn addDocsCheck(b: *std.Build) void {
     check.addArg(b.fmt(
         \\set -e
         \\grep -q "Zig {s}" README.md AGENTS.md
-        \\if grep -rn --include=*.zig -e '"zmail' core tui build tests | grep -v 'zmail-cache'; then
+        \\if grep -rn --include=*.zig -e '"zmail' src build tests | grep -v 'zmail-cache'; then
         \\  echo "the product name is a literal; read it from build.zig.zon" >&2
         \\  exit 1
         \\fi
@@ -258,8 +258,7 @@ fn addFmt(b: *std.Build) void {
     const paths: []const std.Build.LazyPath = &.{
         b.path("build.zig"),
         b.path("build"),
-        b.path("core"),
-        b.path("tui"),
+        b.path("src"),
         b.path("tests"),
     };
     const fmt = b.addFmt(.{ .paths = paths });

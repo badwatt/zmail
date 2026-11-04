@@ -53,5 +53,5 @@ pub const KeyFile = struct {
     }
 };
 
-pub const file_mode: std.Io.File.Permissions = @enumFromInt(0o600);
-pub const directory_mode: std.Io.Dir.Permissions = @enumFromInt(0o700);
+pub const file_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
+pub const directory_mode: std.Io.Dir.Permissions = @fromBackingInt(@intCast(0o700));

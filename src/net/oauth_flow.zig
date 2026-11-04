@@ -11,6 +11,16 @@ const Transport = @import("tls.zig").TlsTransport;
 
 pub const Error = error{ Unavailable, Cancelled };
 
+/// What the browser shows when the round trip worked. Built here so the length is
+/// the length: it was a hand-written 36 against a 37-byte page, which is a page that
+/// never finishes loading. The name comes from the manifest.
+const signed_in_body = core.meta.name ++ ": signed in. Close this window.\n";
+const signed_in_reply = std.fmt.comptimePrint(
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\n" ++
+        "Connection: close\r\n\r\n{s}",
+    .{ signed_in_body.len, signed_in_body },
+);
+
 pub const Options = struct {
     provider: core.oauth.Provider = .microsoft,
     /// Microsoft tenant: `common`, `consumers`, `organizations`, or an id.
@@ -101,9 +111,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: Options, out: *core.oaut
             }
             var reply_buffer: [256]u8 = undefined;
             var writer = stream.writer(io, &reply_buffer);
-            writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n" ++
-                "Content-Length: 36\r\nConnection: close\r\n\r\n" ++
-                "zmail: signed in. Close this window.\n") catch {};
+            writer.interface.writeAll(signed_in_reply) catch {};
             writer.interface.flush() catch {};
         } else |_| {}
     }
@@ -246,3 +254,16 @@ test "a refresh needs a client id and a refresh token" {
     token.refresh.set("refresh");
     try std.testing.expect(!refresh(std.testing.allocator, undefined, .custom, "client", &token));
 }
+
+test "the signed-in page says how long it is" {
+    // The number used to be written by hand against a page one byte longer than the
+    // header claimed: the browser stops at the length it was given.
+    const header_end = std.mem.indexOf(u8, signed_in_reply, "\r\n\r\n").?;
+    const body = signed_in_reply[header_end + 4 ..];
+    var wanted: [32]u8 = undefined;
+    const line = try std.fmt.bufPrint(&wanted, "Content-Length: {d}", .{body.len});
+    try testing.expect(std.mem.indexOf(u8, signed_in_reply, line) != null);
+    try testing.expect(std.mem.indexOf(u8, body, core.meta.name) != null);
+}
+
+const testing = std.testing;

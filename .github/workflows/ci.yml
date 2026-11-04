@@ -51,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     # A suite that hangs must fail in minutes, not in the runner's six hours.
     timeout-minutes: 15
-    # The gate asks for 100% of core/src and tui/src, and it gets it: the three
+    # The gate asks for 100% of src/core and src/tui, and it gets it: the three
     # files outside it are the process boundary, run by the end-to-end pty test.
     continue-on-error: false
     steps:

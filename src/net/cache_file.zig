@@ -110,8 +110,8 @@ pub const FileCache = struct {
     }
 };
 
-const file_mode: std.Io.File.Permissions = @enumFromInt(0o600);
-const directory_mode: std.Io.Dir.Permissions = @enumFromInt(0o700);
+const file_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
+const directory_mode: std.Io.Dir.Permissions = @fromBackingInt(@intCast(0o700));
 
 fn mailbox_file_name(mailbox: Mailbox) []const u8 {
     return switch (mailbox) {

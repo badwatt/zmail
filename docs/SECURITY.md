@@ -15,7 +15,7 @@ Rules are enforced in code, with tests, not in documentation alone.
 
 ### Mail content can never reach the terminal raw
 
-Every text ingress goes through `core/src/domain/text.zig`:
+Every text ingress goes through `src/core/domain/text.zig`:
 
 - C0 controls (`0x00`–`0x1f`), DEL, and C1 controls (`U+0080`–`U+009F`, which
   some terminals interpret as CSI) are replaced with a space;
@@ -68,7 +68,7 @@ milestone. There is no analytics, no update check, and no crash reporting.
 
 ### Live connections
 
-- **TLS with mandatory verification.** `net/src/tls.zig` has no insecure mode:
+- **TLS with mandatory verification.** `src/net/tls.zig` has no insecure mode:
   the system CA bundle validates the chain and the hostname is checked against
   the certificate. Plaintext is refused by config validation unless the user
   writes `allow_plaintext = true` for a local server.

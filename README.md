@@ -184,7 +184,7 @@ dependency).
 - `core/` holds the domain and the application state machine and performs no
   I/O at all. `tui/` is one adapter on top of it. A GUI can be a second adapter.
 
-Messages are rendered as text, not raw MIME: `core/src/mime.zig` decodes
+Messages are rendered as text, not raw MIME: `src/core/mime.zig` decodes
 encoded-word subjects and names, base64 and quoted-printable bodies, the common
 charsets (UTF-8, ISO-8859-1, Windows-1252), and walks multipart trees (prefers
 `text/plain`, falls back to stripped HTML). Every buffer is bounded; a message
