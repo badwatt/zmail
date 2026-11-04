@@ -53,15 +53,9 @@
 
 - Follow `docs/TIGER_STYLE.md`: snake_case functions, explicit integer widths,
   assertions for programmer errors (including the negative space), functions
-  under 70 lines, no recursion.
+  under 70 lines, no recursion, comments that explain *why*.
 - 100-column lines, 4-space indent, `zig fmt`.
 - Sanitization happens on ingress (`src/core/domain/text.zig`), not on render.
-- **Documentation, not commentary.** Where `TIGER_STYLE.md` asks for `//` comments, this
-  project keeps the same content in doc comments instead: `///` and `//!` say what
-  something is and why it exists, as part of the API. `//` comments are not written -- no
-  narration of the next line, no restating the code, no notes to the reviewer. A block that
-  needs one wants a better name or a smaller function; a decision that needs its reason
-  kept keeps it in the doc comment of what decided it, or in the commit message.
 
 ## Commits
 

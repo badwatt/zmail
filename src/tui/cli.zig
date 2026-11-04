@@ -60,12 +60,14 @@ pub const SendError = error{InvalidRecipient};
 pub fn outgoing(request: Send, body: []const u8) SendError!core.outgoing.Outgoing {
     var message = core.outgoing.Outgoing{ .body = body };
     message.to = core.address.Address.init(request.to) catch return error.InvalidRecipient;
+    // Longer than the bound: the subject is truncated like any other ingress.
     message.subject.set(request.subject);
     return message;
 }
 
 /// Parses `argv`, including the program name at index 0.
 pub fn parse(args: []const []const u8) Action {
+    // A subcommand, not a flag: `send` never opens the terminal.
     if (args.len > 1 and std.mem.eql(u8, args[1], "send")) return parse_send(args[2..]);
 
     var launch = Launch{};
@@ -147,7 +149,7 @@ fn parse_send(args: []const []const u8) Action {
                 index += 1;
                 value = args[index];
             } else {
-                value = value[1..];
+                value = value[1..]; // the '='
             }
             if (value.len == 0) return .{ .usage_error = .{ .missing_value = name } };
 
@@ -289,6 +291,10 @@ pub fn render_usage_error(buffer: []u8, err: UsageError) []const u8 {
     writer.print("Run '{s} --help' for usage.\n", .{meta.name}) catch return "";
     return writer.buffered();
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const no_args = [_][]const u8{meta.name};
@@ -512,6 +518,7 @@ test "send: the outgoing message carries the address, subject, and body" {
     try testing.expectEqualStrings("example.com", message.to.domain.slice());
     try testing.expectEqualStrings("hi", message.subject.slice());
     try testing.expectEqualStrings("line one\nline two", message.body);
+    // Not a reply: there is nothing to answer.
     try testing.expect(!message.isReply());
 
     try testing.expectError(error.InvalidRecipient, outgoing(Send{ .to = "not an address" }, ""));

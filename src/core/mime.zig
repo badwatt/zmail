@@ -41,6 +41,8 @@ pub fn decode_encoded_words(input: []const u8, out: []u8) []const u8 {
         }
         const byte = input[index];
         if (just_decoded and (byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n')) {
+            // Whitespace between two encoded words is dropped; after the last
+            // one it is ordinary text and must survive.
             var next = index;
             while (next < input.len and (input[next] == ' ' or input[next] == '\t' or
                 input[next] == '\r' or input[next] == '\n')) next += 1;
@@ -71,6 +73,7 @@ pub fn decode_encoded_words(input: []const u8, out: []u8) []const u8 {
 pub fn to_display(input: []const u8, out: []u8) []const u8 {
     var writer = std.Io.Writer.fixed(out);
     if (std.unicode.utf8ValidateSlice(input)) {
+        // Valid UTF-8 still needs the control bytes neutralized.
         stream_text(input, .utf8, &writer) catch {};
     } else {
         stream_text(input, .windows1252, &writer) catch {};
@@ -80,6 +83,7 @@ pub fn to_display(input: []const u8, out: []u8) []const u8 {
 
 /// Returns the byte length of the encoded word starting at `start`, or null.
 fn decode_word(input: []const u8, start: usize) ?usize {
+    // =?charset?[BbQq]?text?=
     const rest = input[start + 2 ..];
     const charset_end = std.mem.indexOfScalar(u8, rest, '?') orelse return null;
     if (charset_end == 0) return null;
@@ -135,6 +139,8 @@ pub fn encode_header_value(value: []const u8, out: []u8) []const u8 {
     var index: usize = 0;
     while (index < value.len) {
         var end = @min(index + encode_chunk_max, value.len);
+        // A word is decoded on its own, so it must end on a codepoint boundary:
+        // half a sequence would decode to a replacement character.
         while (end > index and end < value.len and value[end] & 0b1100_0000 == 0b1000_0000) end -= 1;
 
         if (index != 0) writer.writeAll(" ") catch return "";
@@ -156,9 +162,13 @@ fn write_word(word: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void
     const charset_end = std.mem.indexOfScalar(u8, rest, '?') orelse return;
     const charset = charset_of(rest[0..charset_end]);
     const encoding = rest[charset_end + 1];
+    // "=?charset?E?payload?=": the payload starts after that prefix and ends
+    // before the closing "?=".
     const payload_start = 2 + charset_end + 3;
     const body = word[payload_start .. word.len - 2];
 
+    // 512 bytes of decoded payload is far beyond any sane encoded word; longer
+    // ones are truncated rather than rejected.
     var raw: [512]u8 = undefined;
     const decoded = switch (encoding) {
         'B', 'b' => decode_base64(body, &raw),
@@ -228,6 +238,9 @@ fn text_after_split(root: Part, out: []u8, scratch: []u8) []const u8 {
             if (found.html) |part| return render_html_part(part, out, scratch);
             return "";
         },
+        // A message with only HTML is read the way a mail client reads it: the
+        // markup is laid out, not merely stripped. Stripping left the source's
+        // indentation and line breaks in place, which broke long links.
         .html => return render_html_part(root, out, scratch),
         .plain => {
             var writer = std.Io.Writer.fixed(out);
@@ -301,6 +314,7 @@ pub fn image_body(raw: []const u8, content_id: []const u8, out: []u8) ?[]const u
 
     for (parts[0..count]) |part| {
         const id = header(part.headers, "content-id") orelse continue;
+        // "Content-ID: <logo@x>" is written with angle brackets.
         const trimmed = std.mem.trim(u8, id, " \t<>>");
         if (!std.mem.eql(u8, trimmed, content_id)) continue;
 
@@ -386,7 +400,7 @@ fn content_type(value: ?[]const u8) Type {
     index = media_end;
 
     while (index < text.len) {
-        index += 1;
+        index += 1; // skip ';'
         skip_space(text, &index);
         const name_start = index;
         while (index < text.len and text[index] != '=' and text[index] != ';') index += 1;
@@ -456,6 +470,7 @@ fn split_part(region: []const u8) Part {
     if (std.mem.indexOf(u8, region, "\n\n")) |at| {
         return .{ .headers = region[0..at], .body = region[at + 2 ..] };
     }
+    // No body separator: headers only, or a body that starts immediately.
     if (std.mem.indexOfScalar(u8, region, ':') != null and
         std.mem.indexOfScalar(u8, region[0..@min(region.len, 64)], '\n') != null)
     {
@@ -466,6 +481,8 @@ fn split_part(region: []const u8) Part {
 
 fn scan_multipart(body: []const u8, boundary: []const u8, depth: u8, found: *Found) void {
     if (depth >= max_depth or boundary.len == 0) return;
+    // Keep going while either view still needs a part: the reader can ask for
+    // the HTML one after the plain one has been found.
     if (found.plain != null and found.html != null) return;
 
     var index: usize = 0;
@@ -539,6 +556,8 @@ fn write_text_part(part: Part, scratch: []u8, writer: *std.Io.Writer) void {
     const half = scratch.len / 2;
     const decoded = transfer_decode(part.body, encoding, scratch[0..half]);
     if (kind.flowed) {
+        // Flowed text has to be unfolded before it means anything: the line
+        // breaks inside it are the sender's, not the writer's.
         const converted = convert_charset(decoded, kind.charset, scratch[half..]);
         unflow(converted, writer);
     } else {
@@ -562,9 +581,11 @@ fn unflow(input: []const u8, writer: *std.Io.Writer) void {
 
         const line = if (raw.len > 0 and raw[0] == ' ') raw[1..] else raw;
         const signature = std.mem.eql(u8, line, "-- ");
+        // The delimiter always starts a line, whatever the line before said.
         if (!first and (!soft_before or signature)) writer.writeByte('\n') catch return;
         first = false;
 
+        // Nothing after the delimiter is flowed, so its lines keep their spaces.
         const soft = !signature and !at_signature and line.len > 0 and
             line[line.len - 1] == ' ' and rest.len > 0;
         writer.writeAll(if (soft) line[0 .. line.len - 1] else line) catch return;
@@ -742,6 +763,10 @@ fn indexOfIgnoreCase(haystack: []const u8, start: usize, needle: []const u8) ?us
     return null;
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "encoded words: Q and B, with the charset converted" {
@@ -752,7 +777,9 @@ test "encoded words: Q and B, with the charset converted" {
     );
     try testing.expectEqualStrings("café", decode_encoded_words("=?UTF-8?B?Y2Fmw6k=?=", &out));
     try testing.expectEqualStrings("plain subject", decode_encoded_words("plain subject", &out));
+    // Adjacent words lose the whitespace between them.
     try testing.expectEqualStrings("ab", decode_encoded_words("=?utf-8?Q?a?= =?utf-8?Q?b?=", &out));
+    // Invalid or unknown encodings are left alone.
     try testing.expectEqualStrings("=?utf-8?X?abc?=", decode_encoded_words("=?utf-8?X?abc?=", &out));
     try testing.expectEqualStrings("=?utf-8?Q?unterminated", decode_encoded_words("=?utf-8?Q?unterminated", &out));
 }
@@ -901,8 +928,10 @@ test "to_display: UTF-8 is kept, 8-bit headers are read as Windows-1252" {
     var out: [64]u8 = undefined;
     try testing.expectEqualStrings("café", to_display("café", &out));
 
+    // Raw 0xE9 is not valid UTF-8: it is "é" in Windows-1252.
     try testing.expectEqualStrings("café", to_display("caf\xe9", &out));
     try testing.expectEqualStrings("\u{201C}hi\u{201D}", to_display("\x93hi\x94", &out));
+    // Control bytes stay out of the list.
     try testing.expectEqualStrings("a b", to_display("a\x01b", &out));
 }
 
@@ -922,6 +951,8 @@ test "encode_header_value: non-ASCII becomes one encoded word that decodes back"
 }
 
 test "encode_header_value: a long value is split into words under 75 bytes" {
+    // 50 "é" is 100 bytes: three words, each a whole number of codepoints, so
+    // no word can end inside a sequence.
     const value: [100]u8 = comptime blk: {
         var bytes: [100]u8 = undefined;
         for (0..50) |index| {
@@ -961,7 +992,7 @@ test "encoded_bound is enough for a value at the subject limit" {
             bytes[index * 2 + 1] = 0xbc;
         }
         break :blk bytes;
-    };
+    }; // 80 "ü", 160 bytes: the largest subject the client keeps
     var buffer: [encoded_bound(value.len)]u8 = undefined;
     const encoded = encode_header_value(&value, &buffer);
     try testing.expect(encoded.len > value.len);
@@ -1163,6 +1194,7 @@ test "html_body keeps the HTML part instead of flattening it" {
 }
 
 test "an image inside the message is found by its Content-ID" {
+    // A one-pixel PNG, base64.
     const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     const raw = "Content-Type: multipart/related; boundary=\"b\"\r\n" ++
         "\r\n" ++
@@ -1183,11 +1215,13 @@ test "an image inside the message is found by its Content-ID" {
     try testing.expectEqualStrings("PNG", image[1..4]);
     try testing.expect(image.len > 50);
 
+    // Nothing by that name, and nothing that is not a PNG.
     try testing.expect(image_body(raw, "other@x", &out) == null);
     try testing.expect(image_body(raw, "", &out) == null);
 }
 
 test "a multipart that never closes still yields its image" {
+    // Cut off after the part: no `--b--`.
     const raw = "Content-Type: multipart/related; boundary=b\r\n\r\n" ++
         "--b\r\nContent-Type: image/png\r\nContent-ID: <logo@x>\r\n" ++
         "Content-Transfer-Encoding: base64\r\n\r\naGk=\r\n";
@@ -1204,6 +1238,7 @@ test "a message with only images has no words to show" {
 }
 
 test "a multipart that never sends its closing delimiter still has its text" {
+    // A cut-off message: the last part has no `--b--` after it.
     const raw = "Content-Type: multipart/mixed; boundary=b\r\n\r\n" ++
         "--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhi";
     var out: [32]u8 = undefined;
@@ -1212,7 +1247,7 @@ test "a multipart that never sends its closing delimiter still has its text" {
 }
 
 test "a part arrives as headers and content, and is read like a message" {
-    const body = "aGkgdGhlcmU=";
+    const body = "aGkgdGhlcmU="; // "hi there"
     var out: [64]u8 = undefined;
     var scratch: [512]u8 = undefined;
     const text = part_body(
@@ -1248,12 +1283,15 @@ pub fn html_with_images(raw: []const u8, html: []const u8, out: []u8, scratch: [
             writer.writeAll(rest) catch break;
             break;
         };
+        // Everything before `src=`, then the tag with an inline picture in it.
         writer.writeAll(rest[0..found.match_start]) catch break;
         const id_end = std.mem.indexOfAny(u8, rest[found.value_start..], "\"'") orelse {
             writer.writeAll(rest[found.match_start..]) catch break;
             break;
         };
         const id = rest[found.value_start..][0..id_end];
+        // A picture that cannot be inlined is left as the id it was, so the page
+        // still reads and only that image is missing.
         const encoded = encode_inline(raw, id, scratch) orelse {
             writer.writeAll(rest[found.match_start..][0 .. found.value_start - found.match_start + id_end]) catch break;
             index += found.value_start + id_end;
@@ -1316,13 +1354,18 @@ test "html_with_images puts the pictures the message carries inside the page" {
     var scratch: [4096]u8 = undefined;
     const inlined = html_with_images(raw, html, &out, &scratch);
     try testing.expect(std.mem.indexOf(u8, inlined, "src=\"data:image/png;base64,") != null);
+    // The rest of the tag, and the rest of the page, survive.
     try testing.expect(std.mem.indexOf(u8, inlined, " alt=\"Logo\">") != null);
 
+    // A picture the message does not carry is left as it was: half a page with a
+    // broken image beats a page that failed to be written.
     const missing = html_with_images(raw, "<img src=\"cid:nope\">", &out, &scratch);
     try testing.expectEqualStrings("<img src=\"cid:nope\">", missing);
 
+    // Nothing to inline: the page comes back as it went in.
     try testing.expectEqualStrings("<p>plain</p>", html_with_images(raw, "<p>plain</p>", &out, &scratch));
 
+    // An unterminated tag is not worth guessing at: the rest is copied as it is.
     try testing.expectEqualStrings(
         "<img src=\"cid:unterminated",
         html_with_images(raw, "<img src=\"cid:unterminated", &out, &scratch),

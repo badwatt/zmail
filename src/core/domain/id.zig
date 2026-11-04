@@ -50,6 +50,10 @@ pub const AccountId = enum(u8) {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "MessageId: round-trips through its integer representation" {

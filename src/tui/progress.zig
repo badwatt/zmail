@@ -37,6 +37,7 @@ var hold = std.atomic.Value(bool).init(false);
 
 pub fn enable(value: bool) void {
     enabled = value;
+    // A module turned off and on again has told the terminal nothing.
     shown = .clear;
     shown_at_ms = 0;
     if (!value) {
@@ -119,6 +120,7 @@ fn keep_moving() void {
 }
 
 fn write(system: System, next: core.progress.State, now_ms: i64) void {
+    // Already saying it: only a repeat says it again.
     if (next == shown and next != .clear) return;
     write_now(system, next, now_ms);
 }
@@ -157,6 +159,7 @@ test "the bar goes up once, holds, and comes down once" {
     try testing.expectEqualStrings("\x1b]9;4;3;0\x1b\\", fake.output_text());
     try testing.expectEqual(core.progress.State.indeterminate, state());
 
+    // Work already in progress: nothing more to say.
     begin(fake.system(), 10);
     try testing.expectEqualStrings("\x1b]9;4;3;0\x1b\\", fake.output_text());
 
@@ -164,6 +167,7 @@ test "the bar goes up once, holds, and comes down once" {
     try testing.expectEqual(core.progress.State.clear, state());
     try testing.expect(std.mem.endsWith(u8, fake.output_text(), "\x1b]9;4;0;0\x1b\\"));
 
+    // Nothing to take down is not an escape sequence.
     fake.output_len = 0;
     end();
     try testing.expectEqualStrings("", fake.output_text());
@@ -181,6 +185,8 @@ test "a human in a browser holds the bar, and the thread keeps it moving" {
     try testing.expectEqual(core.progress.State.paused, state());
     try testing.expectEqualStrings("\x1b]9;4;4\x1b\\", fake.output_text());
 
+    // Nothing *keeps* moving while a human is reading: at most the write that was
+    // already in flight, and none after it.
     os.sleep_ms(repeat_ms * 2);
     const settled = std.mem.count(u8, fake.output_text(), "\x1b]9;4;3;0");
     os.sleep_ms(repeat_ms * 4);
@@ -193,15 +199,21 @@ test "a human in a browser holds the bar, and the thread keeps it moving" {
 }
 
 test "the bar is repeated while the work goes on, because that is what animates it" {
+    // The macOS runner does not schedule the thread the way this test needs, and the
+    // mechanism -- not the scheduler -- is what is being tested here. The lines it
+    // covers are measured on Linux, where the coverage gate runs.
     if (@import("builtin").os.tag == .macos) return error.SkipZigTest;
     var fake: system_mod.Fake = .{};
     enable(true);
     defer enable(false);
 
     begin(fake.system(), 0);
+    // The loop is blocked here: no tick of it reaches this module.
     os.sleep_ms(repeat_ms * 3 + 40);
     end();
 
+    // At least twice in a third of a second: the point is that the module writes
+    // without being ticked, not that a loaded runner manages exactly three.
     const written = fake.output_text();
     try testing.expect(std.mem.count(u8, written, "\x1b]9;4;3;0") >= 2);
 }

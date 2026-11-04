@@ -64,11 +64,14 @@ pub const Pkce = struct {
 pub fn make_pkce(random: [32]u8) Pkce {
     var pkce = Pkce{};
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+    // 32 bytes → 43 characters, drawn uniformly from the unreserved set.
     var index: usize = 0;
     for (random) |byte| {
         pkce.verifier[index] = alphabet[byte % alphabet.len];
         index += 1;
     }
+    // A second pass for the remaining 11 characters, derived from the hash so
+    // the verifier stays unique per call.
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(random[0..], &digest, .{});
     for (digest[0..11]) |byte| {
@@ -108,6 +111,7 @@ pub fn auth_url(
     const challenge = challenge_for(verifier);
     var base_buffer: [256]u8 = undefined;
     const base = auth_base(provider, tenant, &base_buffer);
+    // Providers join scopes with a space; a URL cannot carry one.
     var scope_buffer: [256]u8 = undefined;
     const scope = percent_encode(e.scope, &scope_buffer);
     return std.fmt.bufPrint(buffer, "{s}?client_id={s}&response_type=code&redirect_uri={s}" ++
@@ -139,6 +143,7 @@ pub fn parse_provider_error(query: []const u8) ?[]const u8 {
         std.mem.indexOf(u8, query, "error=") orelse return null;
     const equals = std.mem.indexOfScalar(u8, query[at..], '=') orelse return null;
     const rest = query[at + equals + 1 ..];
+    // A value ends at the next parameter, or where the request line does.
     var end = rest.len;
     for (rest, 0..) |byte, index| {
         if (byte == '&' or byte == ' ' or byte == '\r' or byte == '\n') {
@@ -246,6 +251,7 @@ pub const Token = struct {
 
     pub fn is_fresh(self: *const Token, now_unix: i64) bool {
         if (self.access.is_empty()) return false;
+        // A minute of slack: a token that dies mid-request is useless.
         return self.expires_unix > now_unix + 60;
     }
 };
@@ -306,12 +312,17 @@ fn number(json: []const u8, name: []const u8) ?u64 {
 }
 
 pub fn parse_redirect(query: []const u8) ?[]const u8 {
+    // "code=...&state=..." (the raw request target or the query string).
     const at = std.mem.indexOf(u8, query, "code=") orelse return null;
     const rest = query[at + "code=".len ..];
     const end = std.mem.indexOfScalar(u8, rest, '&') orelse rest.len;
     if (end == 0) return null;
     return rest[0..end];
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -334,6 +345,7 @@ test "PKCE from random bytes is 43 characters and changes every time" {
     try testing.expectEqual(@as(u8, 43), a.verifier_len);
     try testing.expectEqual(@as(u8, 43), b.verifier_len);
     try testing.expect(!std.mem.eql(u8, a.verifier_slice(), b.verifier_slice()));
+    // The challenge is the SHA-256 of the verifier.
     const expected = challenge_for(a.verifier_slice());
     try testing.expectEqualSlices(u8, expected[0..], a.challenge[0..]);
 }
@@ -358,17 +370,22 @@ test "the Microsoft tenant comes from the config" {
 
 test "a percent sign that is not an escape stays a percent sign" {
     var buffer: [32]u8 = undefined;
+    // A truncated escape, and one that is not hex: neither is a byte to decode.
     try testing.expectEqualStrings("a%2 a%zz", url_decode("a%2+a%zz", &buffer));
+    // The buffer bounds the work, and nothing is written past it.
     var small: [3]u8 = undefined;
     try testing.expectEqualStrings("abc", url_decode("abcdef", &small));
 }
 
 test "a tenant too long for the buffer gets the endpoint that always fits" {
     var tiny: [8]u8 = undefined;
+    // The Microsoft URL is built per tenant; when it cannot be, the provider's
+    // own endpoint is still a valid answer.
     try testing.expectEqualStrings(
         "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
         auth_base(.microsoft, "consumers", &tiny),
     );
+    // Everyone else ignores the tenant entirely.
     try testing.expectEqualStrings(endpoints(.google).auth_url, auth_base(.google, "x", &tiny));
 }
 
@@ -387,6 +404,7 @@ test "the authorization URL carries PKCE, scope, and state" {
     try testing.expect(std.mem.indexOf(u8, url, "client_id=client-123") != null);
     try testing.expect(std.mem.indexOf(u8, url, "code_challenge_method=S256") != null);
     try testing.expect(std.mem.indexOf(u8, url, "state=state-9") != null);
+    // A space inside the scope would break the request: it must be escaped.
     try testing.expect(std.mem.indexOfScalar(u8, url, ' ') == null);
     try testing.expect(std.mem.indexOf(u8, url, "%20") != null);
     try testing.expect(std.mem.indexOf(u8, url, "IMAP.AccessAsUser.All") != null);
@@ -419,10 +437,12 @@ test "token JSON is read into the model, with expiry" {
     try testing.expect(token.is_fresh(1_000));
     try testing.expect(!token.is_fresh(4_600));
 
+    // No refresh token: the old one stays empty, and it still parses.
     var no_refresh: Token = .{};
     try parse_token("{\"access_token\":\"only\"}", 0, &no_refresh);
     try testing.expectEqualStrings("only", no_refresh.access.slice());
     try testing.expect(no_refresh.refresh.is_empty());
+    // expires_in absent: expired, so it refreshes.
     try testing.expect(!no_refresh.is_fresh(0));
 }
 

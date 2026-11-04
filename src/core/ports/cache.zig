@@ -79,6 +79,10 @@ pub const Memory = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "Memory cache: load reports the scripted count and records the call" {

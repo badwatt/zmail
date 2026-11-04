@@ -74,8 +74,13 @@ pub const Message = struct {
 };
 
 comptime {
+    // Flags must stay one byte: it is stored per message and copied by value.
     std.debug.assert(@sizeOf(Flags) == 1);
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 

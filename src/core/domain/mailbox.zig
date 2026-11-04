@@ -57,11 +57,16 @@ pub const Mailbox = enum(u8) {
 };
 
 comptime {
+    // `index()` is the enum tag, so `all` must be in tag order and complete.
     assert(Mailbox.all.len == @typeInfo(Mailbox).@"enum".field_names.len);
     for (Mailbox.all, 0..) |mailbox, position| {
         assert(@backingInt(mailbox) == position);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 

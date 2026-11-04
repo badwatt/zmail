@@ -59,6 +59,10 @@ pub const Effects = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "Effects: starts empty and grows in order" {

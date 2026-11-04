@@ -73,7 +73,7 @@ pub const Tokenizer = struct {
     }
 
     fn quoted(self: *Tokenizer) Error!Token {
-        self.index += 1;
+        self.index += 1; // Opening quote.
         const start = self.index;
         while (self.index < self.input.len) {
             switch (self.input[self.index]) {
@@ -143,6 +143,10 @@ pub fn unescape(source: []const u8, out: []u8) Error![]const u8 {
     }
     return out[0..write];
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 

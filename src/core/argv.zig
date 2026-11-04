@@ -43,6 +43,10 @@ pub fn split(value: []const u8, out: *Argv) Error!void {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "split: runs of spaces are one separator, and the ends are trimmed" {

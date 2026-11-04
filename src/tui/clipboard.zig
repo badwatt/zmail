@@ -39,6 +39,10 @@ pub fn copy(system: System, text: []const u8, encoded_out: []u8) usize {
     return kept;
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "copy sends the clipboard sequence for both selections" {
@@ -49,6 +53,7 @@ test "copy sends the clipboard sequence for both selections" {
     try testing.expectEqual(@as(usize, 5), copied);
 
     const written = fake.output_text();
+    // "hello" is "aGVsbG8=".
     try testing.expectEqualStrings(
         "\x1b]52;c;aGVsbG8=\x1b\\\x1b]52;p;aGVsbG8=\x1b\\",
         written,

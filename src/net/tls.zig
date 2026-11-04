@@ -40,6 +40,8 @@ pub const TlsTransport = struct {
     /// Initializes in place: the TLS client captures pointers to this struct's
     /// readers and buffers, so it must never be moved after `open`.
     pub fn open(self: *TlsTransport, gpa: std.mem.Allocator, io: std.Io, host: []const u8, port: u16) OpenError!void {
+        // The caller declares this in place and may not have run the field
+        // defaults, so establish them here before touching the bundle.
         self.* = .{ .gpa = gpa, .io = io };
         const host_name = std.Io.net.HostName.init(host) catch return error.InvalidHost;
         self.stream = host_name.connect(io, port, .{ .mode = .stream, .timeout = .none }) catch
@@ -63,6 +65,8 @@ pub const TlsTransport = struct {
             .entropy = &self.entropy,
             .realtime_now = std.Io.Timestamp.now(io, .real),
         }) catch return error.TlsFailed;
+        // The client Finished may still be sitting in the socket writer's
+        // buffer; without this flush the server never answers.
         self.stream_writer.interface.flush() catch return error.TlsFailed;
         self.opened = true;
     }
@@ -84,6 +88,11 @@ pub const TlsTransport = struct {
         const self: *TlsTransport = @ptrCast(@alignCast(context));
         var attempts: u32 = 0;
         while (attempts < 64) : (attempts += 1) {
+            // Decrypted bytes are ready: hand them over without touching the
+            // socket.
+            // Decrypted bytes are already in the TLS reader's buffer. Copy them
+            // directly: calling readVec here would try to fill the rest of the
+            // caller's buffer and block on the socket.
             const plaintext = self.tls.reader.buffered();
             if (plaintext.len > 0) {
                 const count = @min(plaintext.len, buffer.len);
@@ -92,6 +101,9 @@ pub const TlsTransport = struct {
                 return count;
             }
 
+            // Only call into TLS when a whole encrypted record is buffered.
+            // Otherwise TLS would block inside its own read, which we cannot
+            // time out.
             if (!has_complete_record(&self.stream_reader.interface)) {
                 var fds = [1]std.posix.pollfd{
                     .{ .fd = self.stream.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
@@ -100,6 +112,7 @@ pub const TlsTransport = struct {
                 if (ready == 0) return 0;
                 if ((fds[0].revents & std.posix.POLL.HUP) != 0) return error.Closed;
 
+                // Poll said there are bytes, so this read returns promptly.
                 self.stream_reader.interface.fillMore() catch |err| switch (err) {
                     error.EndOfStream => return error.Closed,
                     else => return error.Unavailable,

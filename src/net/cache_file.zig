@@ -74,6 +74,7 @@ pub const FileCache = struct {
         const count = file.readPositionalAll(self.io, &self.buffer, 0) catch
             return error.Unavailable;
 
+        // Envelopes are sealed too: senders and subjects are mail, not metadata.
         const key = self.keys.get() orelse return error.Unavailable;
         const text = sealed.open(key, self.buffer[0..count], &self.plain) catch return 0;
         return cache_mod.decode(text, out) catch 0;
@@ -98,6 +99,7 @@ pub const FileCache = struct {
         const label = self.label_for(account) orelse return;
         var dir_buffer: [512]u8 = undefined;
         const dir = std.fmt.bufPrint(&dir_buffer, "{s}/{s}", .{ self.base_dir, label }) catch return;
+        // createDirPath: the cache root may not exist yet (`~/.cache/zmail`).
         _ = std.Io.Dir.cwd().createDirPathStatus(self.io, dir, directory_mode) catch
             return error.Unavailable;
 

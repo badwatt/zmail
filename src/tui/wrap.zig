@@ -68,6 +68,7 @@ fn next_line_end(text: []const u8, start: u32, width: u32) u32 {
 
     while (index < text.len) {
         const byte = text[index];
+        // Both line endings end a line, so neither byte ends up in a range.
         if (byte == '\n' or byte == '\r') return index;
         if (byte == ' ') last_space = index;
 
@@ -92,6 +93,10 @@ pub fn line_count(text: []const u8, width: u16) u32 {
     wrap(text, width, &wrapped);
     return wrapped.len;
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 

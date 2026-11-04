@@ -187,11 +187,15 @@ pub const Parser = struct {
             self.state = .ss3;
             return;
         }
+        // APC: the graphics protocol's answers, and anything else a terminal
+        // says back. Swallowed, not typed: "\x1b_Gi=1;OK\x1b\\" reads as
+        // Escape, underscore, G, i, "=", 1, and a mailbox change.
         if (byte == '_') {
             self.state = .apc;
             return;
         }
 
+        // Alt+key: report Escape, then the key itself.
         self.state = .ground;
         keys.add(.escape);
         self.ground(byte, keys);
@@ -206,6 +210,7 @@ pub const Parser = struct {
         self.csi[self.csi_len] = byte;
         self.csi_len += 1;
 
+        // Parameter bytes are 0x30..0x3f; the final byte ends the sequence.
         if (byte < 0x40 or byte > 0x7e) return;
 
         const params = self.csi[0 .. self.csi_len - 1];
@@ -320,10 +325,15 @@ fn parse_mouse(params: []const u8, final: u8) ?Key {
             .button = button,
             .x = @intCast(x -| 1),
             .y = @intCast(y -| 1),
+            // SGR packs the modifiers into the button code: 4 shift, 8 alt, 16 ctrl.
             .ctrl = code & 16 != 0,
         },
     };
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -531,14 +541,17 @@ test "a long paste decodes into many keys" {
 }
 
 test "a graphics answer from the terminal is not a keypress" {
+    // What a terminal sends back: ESC _ G i=1;OK ESC \
     const keys = try decode("\x1b_Gi=1;OK\x1b\\");
     try testing.expectEqual(@as(u32, 0), keys.len);
 
+    // The sequence before and after it still type normally.
     const mixed = try decode("a\x1b_Gi=1;OK\x1b\\b");
     try testing.expectEqual(@as(u32, 2), mixed.len);
     try testing.expectEqual(@as(u21, 'a'), mixed.items[0].char);
     try testing.expectEqual(@as(u21, 'b'), mixed.items[1].char);
 
+    // An unterminated one does not eat the keys after it forever.
     const open = try decode("\x1b_Gi=1;");
     try testing.expectEqual(@as(u32, 0), open.len);
 }
@@ -547,10 +560,12 @@ test "ctrl is read from the mouse report" {
     const plain = try single("\x1b[<0;9;5M");
     try testing.expect(!plain.mouse.ctrl);
 
+    // 16 is the ctrl bit in an SGR report.
     const with_ctrl = try single("\x1b[<16;9;5M");
     try testing.expect(with_ctrl.mouse.ctrl);
     try testing.expectEqual(Mouse.Kind.press, with_ctrl.mouse.kind);
 
+    // 48 is ctrl plus the motion bit: moving with ctrl held.
     const hover = try single("\x1b[<48;9;5M");
     try testing.expect(hover.mouse.ctrl);
     try testing.expectEqual(Mouse.Kind.motion, hover.mouse.kind);

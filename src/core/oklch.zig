@@ -97,6 +97,7 @@ fn to_linear_rgb(colour: Oklch) [3]f32 {
 }
 
 fn in_gamut(rgb: [3]f32) bool {
+    // A hair of tolerance: rounding to 8 bits must not count as out of gamut.
     for (rgb) |channel| {
         if (channel < -0.0001 or channel > 1.0001) return false;
     }
@@ -165,6 +166,10 @@ pub fn contrast(a: Rgb, b: Rgb) f32 {
     return (lighter + 0.05) / (darker + 0.05);
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 fn expectNear(expected: f32, actual: f32, tolerance: f32) !void {
@@ -179,11 +184,13 @@ test "oklch: the corners of sRGB land where the space says they do" {
     const black = from_rgb(.{ .r = 0, .g = 0, .b = 0 });
     try expectNear(0.0, black.l, 0.01);
 
+    // Pure red: L 0.628, C 0.258, H 29.2 degrees (Ottosson's figures).
     const red = from_rgb(.{ .r = 255, .g = 0, .b = 0 });
     try expectNear(0.628, red.l, 0.01);
     try expectNear(0.258, red.c, 0.01);
     try expectNear(29.2, red.h, 1.0);
 
+    // A grey has no hue worth reading, but it must have no chroma either.
     const grey = from_rgb(.{ .r = 128, .g = 128, .b = 128 });
     try expectNear(0.0, grey.c, 0.005);
 }
@@ -206,6 +213,8 @@ test "oklch: a round trip through the space returns the same 8-bit colour" {
 }
 
 test "oklch: a colour outside the gamut comes back as the nearest one inside" {
+    // Chroma 0.4 at 300 degrees has no 8-bit form: the lightness must survive
+    // and the chroma must be the largest that fits.
     const impossible = Oklch{ .l = 0.7, .c = 0.4, .h = 300 };
     const rgb = to_rgb(impossible);
     try expectNear(0.7, from_rgb(rgb).l, 0.02);
@@ -225,6 +234,7 @@ test "oklch: lightness and chroma can be moved without touching the hue" {
     const quieter = with_chroma(base, 0.01);
     try expectNear(0.01, quieter.c, 0.001);
 
+    // Clamping, not wrapping: a lightness cannot leave 0..1.
     try expectNear(1.0, with_lightness(base, 4.0).l, 0.001);
     try expectNear(0.0, with_lightness(base, -4.0).l, 0.001);
 }
@@ -235,6 +245,8 @@ test "contrast: the WCAG ratios a generated theme must clear" {
     try expectNear(21.0, contrast(white, black), 0.1);
     try expectNear(1.0, contrast(white, white), 0.001);
 
+    // A muted periwinkle on a near-black ground: what a terminal wordmark
+    // wants, and comfortably readable.
     const periwinkle = Rgb{ .r = 156, .g = 162, .b = 200 };
     const ground = Rgb{ .r = 25, .g = 25, .b = 37 };
     try testing.expect(contrast(periwinkle, ground) > 4.5);

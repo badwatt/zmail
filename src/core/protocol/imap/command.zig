@@ -99,6 +99,7 @@ const Render = struct {
 /// AUTHENTICATE XOAUTH2 with the initial response, which is what Microsoft 365
 /// and Gmail accept now that password LOGIN is gone.
 pub fn authenticate_xoauth2(buffer: []u8, tag: []const u8, user: []const u8, token: []const u8, out: []u8) Error![]const u8 {
+    // SASL payload: "user=<user>\x01auth=Bearer <token>\x01\x01"
     var payload = std.Io.Writer.fixed(out);
     payload.print("user={s}\x01auth=Bearer {s}\x01\x01", .{ user, token }) catch
         return error.NoSpaceLeft;
@@ -292,6 +293,10 @@ pub fn logout(buffer: []u8, tag: []const u8) Error![]const u8 {
     return render.finish();
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 fn expect_command(expected: []const u8, actual: Error![]const u8) !void {
@@ -442,6 +447,8 @@ test "an astring with a control character is refused" {
 
 test "the first problem is the one reported" {
     var buffer: [4]u8 = undefined;
+    // Tag too long for the buffer, then the astring would also fail: the tag
+    // problem is reported because it happened first.
     try testing.expectError(error.NoSpaceLeft, select(&buffer, "averylongtag", "Inbox"));
 }
 

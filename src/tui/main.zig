@@ -13,6 +13,8 @@ const core = @import("core");
 pub const panic = std.debug.FullPanic(zmailPanic);
 
 fn zmailPanic(message: []const u8, first_trace_address: ?usize) noreturn {
+    // stderr becomes the log file, so the message *and* the trace land in it: the
+    // trace is what says which line, and it is the part a raw terminal eats.
     redirectStderrToLog();
     std.debug.defaultPanic(message, first_trace_address);
 }
@@ -25,6 +27,8 @@ fn redirectStderrToLog() void {
 }
 
 fn writePanicLog(message: []const u8, first_trace_address: ?usize) void {
+    // Nothing here may allocate, wait, or use the event loop: the process is already
+    // in a state it did not plan for. Three syscalls, and the file is the diagnosis.
     const fd = std.c.open(panic_log_path(), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c_uint, 0o600));
     if (fd < 0) return;
     defer _ = std.c.close(fd);

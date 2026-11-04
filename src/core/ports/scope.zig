@@ -55,6 +55,10 @@ pub const Memory = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "the scope remembers a label, and an empty one means all accounts" {

@@ -60,6 +60,10 @@ pub fn open(key: Key, sealed: []const u8, out: []u8) Error![]const u8 {
     return out[0..ciphertext.len];
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 fn test_key() Key {

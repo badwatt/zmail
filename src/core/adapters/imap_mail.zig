@@ -120,6 +120,7 @@ pub const ImapMail = struct {
             const entry = &self.entries[index];
             if (matchesAlias(mailbox, entry.name.slice())) return entry.name.slice();
         }
+        // Nothing listed yet: try our own title. After a LIST, absence is fact.
         if (self.listed) return null;
         return mailbox.title();
     }
@@ -163,9 +164,14 @@ pub const ImapMail = struct {
         out: []u8,
     ) port.Error![]const u8 {
         const self: *ImapMail = @ptrCast(@alignCast(context));
+        // UIDs are per mailbox, and after a cached start no mailbox may be
+        // selected yet: select before fetching, always.
         if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
         const uid = try uid_of(id);
 
+        // The words only. A message with a certificate as a PDF is a megabyte of
+        // base64, and none of it is text: the shape says which part to read, and
+        // asking for that part is one round trip for two sections.
         if (self.text_part(uid, out)) |text| return text else |_| {}
 
         const raw = self.client.fetch_body(uid, &self.raw) catch |err| return mapError(err);
@@ -192,6 +198,8 @@ pub const ImapMail = struct {
         const self: *ImapMail = @ptrCast(@alignCast(context));
         if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
         const raw = self.client.fetch_body(try uid_of(id), &self.raw) catch |err| return mapError(err);
+        // Truncate, never refuse: an attachment-heavy message is still a
+        // message, and the text of it is almost always in the part that fits.
         const length = @min(raw.len, out.len);
         @memcpy(out[0..length], raw[0..length]);
         return out[0..length];
@@ -238,6 +246,8 @@ fn matchesAlias(mailbox: Mailbox, name: []const u8) bool {
         .junk => &.{ "junk", "spam", "junk e-mail", "bulk mail" },
     };
 
+    // Compare the whole name and its last path component ("INBOX.Sent",
+    // "[Gmail]/Sent Mail").
     const tail = blk: {
         const slash = std.mem.lastIndexOfScalar(u8, name, '/');
         const dot = std.mem.lastIndexOfScalar(u8, name, '.');
@@ -259,6 +269,10 @@ fn mapError(err: client_mod.Error) port.Error {
         error.ProtocolError, error.Rejected, error.LoginFailed => error.Rejected,
     };
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const Scripted = transport_mod.Scripted;
@@ -284,10 +298,12 @@ test "open logs in and fetch selects the mailbox once" {
     try testing.expectEqualStrings("first", messages[0].subject.slice());
     try testing.expectEqualStrings("Alice", messages[0].from.label());
     try testing.expectEqual(MessageId.from_int(10), messages[0].id);
+    // Every envelope carries the account that fetched it.
     try testing.expectEqual(AccountId.from_int(1), messages[0].account);
     try testing.expectEqual(AccountId.from_int(1), messages[1].account);
     try testing.expectEqualStrings("second", messages[1].subject.slice());
 
+    // The first fetch selected exactly once.
     var select_count: u32 = 0;
     var start: usize = 0;
     while (std.mem.indexOfPos(u8, scripted.output_text(), start, "SELECT \"Inbox\"")) |position| {
@@ -346,6 +362,8 @@ test "switching mailbox selects again" {
 }
 
 test "body, flags, and move reach the right commands" {
+    // The body is read through the shape: which part holds the words, then that
+    // part's headers and content in one command.
     var scripted: Scripted = .{ .input = login_ok ++
         "* 1 EXISTS\r\na2 OK selected\r\n" ++
         "* 1 FETCH (UID 7 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 2 1 NIL NIL NIL NIL))\r\na3 OK\r\n" ++
@@ -359,6 +377,7 @@ test "body, flags, and move reach the right commands" {
     const mail = imap.mail();
 
     var body: [64]u8 = undefined;
+    // The part's own headers say it is base64, and the text comes out decoded.
     try testing.expectEqualStrings("hi there", try mail.fetch_body(.inbox, MessageId.from_int(7), &body));
     try mail.set_flags(MessageId.from_int(7), .{ .unread = false });
     try mail.move_message(MessageId.from_int(7), .trash);
@@ -375,6 +394,7 @@ test "a message whose shape is not understood is read whole, not refused" {
     var scripted: Scripted = .{
         .input = login_ok ++
             "* 1 EXISTS\r\na2 OK selected\r\n" ++
+            // A server that answers the shape with something unreadable.
             "a3 BAD no\r\n" ++
             "* 1 FETCH (BODY[]<0> {45}\r\n" ++ message ++ ")\r\na4 OK\r\n",
     };
@@ -485,6 +505,8 @@ test "login failure is reported as Rejected through the port, and open fails" {
 }
 
 test "a mailbox the server does not have is empty, not an error" {
+    // "Sent" is "Sent Items" on many servers. The first SELECT fails, LIST
+    // teaches us the real name, and the retry lands on the right mailbox.
     var scripted: Scripted = .{ .input = login_ok ++
         "a2 NO [NONEXISTENT] no such mailbox\r\n" ++
         "* LIST (\\Sent) \"/\" \"Sent Items\"\r\n" ++

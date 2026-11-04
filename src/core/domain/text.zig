@@ -34,6 +34,8 @@ pub fn Text(comptime capacity: u32) type {
         pub fn set(self: *Self, bytes: []const u8) void {
             assert(self.len <= capacity);
             self.len = copy_sanitized(&self.buffer, bytes);
+            // Zero the tail so a shorter value cannot leave the previous one
+            // readable past `len` (buffer bled).
             @memset(self.buffer[self.len..], 0);
             assert(self.len <= capacity);
         }
@@ -83,9 +85,12 @@ pub fn Text(comptime capacity: u32) type {
         /// Formats into the buffer. If the result does not fit it is truncated at
         /// a codepoint boundary, matching every other ingress path.
         pub fn set_fmt(self: *Self, comptime fmt: []const u8, args: anytype) void {
+            // One spare byte so a result that exactly fills `capacity` is not
+            // mistaken for an overflow, and the writer reports the valid prefix
+            // instead of leaving uninitialized bytes in the buffer.
             var scratch: [capacity + 1]u8 = undefined;
             var writer = std.Io.Writer.fixed(&scratch);
-            writer.print(fmt, args) catch {};
+            writer.print(fmt, args) catch {}; // Truncation is acceptable here.
             self.set(writer.buffered());
         }
 
@@ -154,6 +159,8 @@ fn copy(dest: []u8, source: []const u8, keep_newlines: bool) u32 {
             continue;
         }
         if (codepoint == '\n' and keep_newlines) {
+            // Not through writeByte: that one asserts on controls, and a body
+            // line break is a control byte by the letter of the rule.
             if (out < dest.len) {
                 dest[out] = '\n';
                 out += 1;
@@ -211,6 +218,10 @@ fn startsWithIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "Text: init copies, slice round-trips, capacity is exact" {
@@ -236,6 +247,7 @@ test "Text: truncates at the capacity" {
 
 test "Text: truncation never splits a UTF-8 codepoint" {
     const Tiny = Text(4);
+    // "é" is two bytes, so a 4-byte budget fits exactly two of them.
     const text = Tiny.init("ééé");
     try testing.expectEqualStrings("éé", text.slice());
     try testing.expect(std.unicode.utf8ValidateSlice(text.slice()));
@@ -349,6 +361,8 @@ test "Text: set_fmt output that exactly fills capacity is kept whole" {
     try testing.expectEqualStrings("abcd", text.slice());
 }
 
+// A fixed writer that cannot hold the value must report the error, not a
+// partially initialized buffer (buffer bled).
 test "Text: format propagates a full writer" {
     const Tiny = Text(8);
     const text = Tiny.init("hi");

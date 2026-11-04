@@ -127,6 +127,7 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
         if (key.len == 0 or value.len == 0) return error.InvalidValue;
 
         if (current == null) {
+            // Legacy flat file: create the single implicit account.
             if (saw_section) return error.MissingKey;
             if (file.len == max_accounts) return error.TooManyAccounts;
             file.entries[0] = .{};
@@ -179,6 +180,7 @@ pub fn parse(text: []const u8) (Error || account.RuleError || Address.ParseError
         } else if (std.mem.eql(u8, key, "allow_plaintext")) {
             entry.policy.allow_plaintext = parse_bool(value) orelse return error.InvalidValue;
         } else if (std.mem.eql(u8, key, "password")) {
+            // Refused by name so the error is actionable.
             return error.PasswordInConfig;
         } else {
             return error.UnknownKey;
@@ -217,6 +219,8 @@ pub fn unique_label(text: []const u8, wanted: []const u8, buffer: []u8) []const 
     @memcpy(buffer[0..wanted.len], wanted);
     var candidate = buffer[0..wanted.len];
     var attempt: u8 = 2;
+    // A config holds at most `max_accounts` labels, so one of these is free: the
+    // assert is the negative space, not a guess.
     while (has_label(text, candidate)) : (attempt += 1) {
         assert(attempt < max_accounts + 2);
         candidate = std.fmt.bufPrint(buffer, "{s}{d}", .{ wanted, attempt }) catch return "";
@@ -269,6 +273,7 @@ pub fn without(text: []const u8, label: []const u8, buffer: []u8) []const u8 {
     if (!saw_section) return "";
     const trimmed = std.mem.trim(u8, writer.buffered(), "\r\n");
     if (trimmed.len == 0) return "";
+    // Keep a trailing newline so the file stays well-formed.
     writer.writeByte('\n') catch return "";
     return writer.buffered();
 }
@@ -307,6 +312,10 @@ fn parse_bool(value: []const u8) ?bool {
     if (std.mem.eql(u8, value, "false") or std.mem.eql(u8, value, "0")) return false;
     return null;
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -352,15 +361,19 @@ test "without removes exactly one section and keeps the rest" {
     try testing.expect(std.mem.indexOf(u8, kept, "[account home]") != null);
     try testing.expect(std.mem.indexOf(u8, kept, "home.example") != null);
 
+    // Removing the last one leaves only the comment header: no accounts.
     var second: [1024]u8 = undefined;
     const last = without(kept, "home", &second);
     try testing.expect(std.mem.indexOf(u8, last, "[account") == null);
     try testing.expect(std.mem.indexOf(u8, last, "home.example") == null);
 
+    // The kept text is a slice of the buffer it was written to: copying it into
+    // a different buffer keeps both valid.
     var third: [1024]u8 = undefined;
     @memcpy(third[0..kept.len], kept);
     try testing.expect(std.mem.indexOf(u8, third[0..kept.len], "home.example") != null);
 
+    // A flat file has no sections to remove.
     try testing.expectEqualStrings("", without("address = a@b.c\n", "account", &buffer));
 }
 
@@ -550,9 +563,12 @@ test "a label already in the file gets a number, and a free one is kept" {
     try testing.expectEqualStrings("home", unique_label(file, "home", &buffer));
     try testing.expectEqualStrings("work2", unique_label(file, "work", &buffer));
 
+    // Already numbered: try the next number, not the same one again.
     const numbered = "[account work2]\n" ++ complete_entry ++ "[account work]\n" ++ complete_entry;
     try testing.expectEqualStrings("work3", unique_label(numbered, "work", &buffer));
 
+    // A label too long for the caller's buffer is refused, not truncated into
+    // one that might collide.
     var small: [3]u8 = undefined;
     try testing.expectEqualStrings("", unique_label(file, "work", &small));
 }

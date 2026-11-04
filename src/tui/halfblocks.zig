@@ -53,6 +53,9 @@ pub fn draw(
         while (column < columns) : (column += 1) {
             const top = sample(image, column, row * 2, columns, rows, ground);
             const bottom = sample(image, column, row * 2 + 1, columns, rows, ground);
+            // The glyph follows the two halves: nothing, one of them, or a solid cell
+            // when they are the same colour. A cell that is one colour drawn as a half
+            // block is a picture with a texture it does not have.
             const solid = top == bottom and top != transparent;
             const glyph: []const u8 = if (top == transparent and bottom == transparent)
                 " "
@@ -63,7 +66,15 @@ pub fn draw(
             else
                 half_block;
 
+            // Two colours per cell: the terminal is told only when they change,
+            // which is what keeps a picture from being thousands of escapes. A half
+            // with nothing in it says "default", which is the terminal's own colour
+            // -- that is what makes a logo with a transparent background sit on the
+            // reader instead of on a white card.
             if (top != last_top or bottom != last_bottom or solid != last_solid) {
+                // A half with nothing in it says "default", which is the terminal's
+                // own colour. Writing the sentinel's bits instead is how a transparent
+                // background became a white card: 0xFFFFFFFE is nearly white.
                 var escape: [64]u8 = undefined;
                 var writer = std.Io.Writer.fixed(&escape);
                 if (top == transparent) {
@@ -92,6 +103,8 @@ pub fn draw(
 /// over white. Averaging is what keeps a picture from turning into a staircase
 /// when it is far bigger than the cells it has to fit in.
 fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16, ground: u32) u32 {
+    // Wide arithmetic: a cell count times a pixel count is bigger than a u32 once either
+    // side is large, and the picture is untrusted bytes either way.
     const target_rows: u64 = @max(1, @as(u64, rows) * 2);
     const from_x = (@as(u64, column) * image.width) / @max(1, columns);
     const to_x = @max(from_x + 1, ((@as(u64, column) + 1) * image.width) / @max(1, columns));
@@ -109,6 +122,8 @@ fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16
         var x = @min(from_x, image.width - 1);
         while (x < @min(to_x, image.width)) : (x += 1) {
             const index = (@as(usize, y) * image.width + x) * 4;
+            // Composited over the reader's own ground, which is the colour the
+            // terminal will paint behind whatever is left out.
             const alpha: u32 = image.rgba[index + 3];
             const over_red: u32 = (@as(u32, image.rgba[index]) * alpha + red(ground) * (255 - alpha)) / 255;
             const over_green: u32 = (@as(u32, image.rgba[index + 1]) * alpha + green(ground) * (255 - alpha)) / 255;
@@ -137,14 +152,18 @@ fn blue(colour: u32) u32 {
     return colour & 0xff;
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 fn two_by_two() png.Image {
     const rgba = [_]u8{
-        255, 0,   0,   255,
-        0,   255, 0,   255,
-        0,   0,   255, 255,
-        255, 255, 255, 255,
+        255, 0, 0, 255, // red
+        0, 255, 0, 255, // green
+        0, 0, 255, 255, // blue
+        255, 255, 255, 255, // white
     };
     return .{ .width = 2, .height = 2, .rgba = &rgba };
 }
@@ -154,6 +173,7 @@ test "a picture is drawn with two pixels per cell" {
     const drawn = draw(fake.system(), two_by_two(), 0, 0, 2, 1, 0x101018);
     const written = fake.output_text();
     try testing.expect(drawn);
+    // The four pixels become two cells on one row, with their colours.
     try testing.expect(std.mem.indexOf(u8, written, "\x1b[1;1H") != null);
     try testing.expect(std.mem.indexOf(u8, written, "\x1b[38;2;255;0;0m\x1b[48;2;0;0;255m") != null);
     try testing.expect(std.mem.indexOf(u8, written, "\x1b[38;2;0;255;0m\x1b[48;2;255;255;255m") != null);
@@ -169,10 +189,12 @@ test "the same colour twice is not sent twice" {
     const drawn = draw(fake.system(), image, 0, 0, 2, 1, 0x101018);
     const written = fake.output_text();
     try testing.expect(drawn);
+    // One colour pair for the whole row.
     try testing.expect(std.mem.count(u8, written, "\x1b[38;2;") == 1);
 }
 
 test "a picture with nothing in its background shows the reader through it" {
+    // Left column: fully transparent. Right column: opaque red.
     const rgba = [_]u8{
         0, 0, 0, 0, 255, 0, 0, 255,
         0, 0, 0, 0, 255, 0, 0, 255,
@@ -182,8 +204,11 @@ test "a picture with nothing in its background shows the reader through it" {
     var fake: system_mod.Fake = .{};
     try testing.expect(draw(fake.system(), image, 0, 0, 2, 1, 0x101018));
     const written = fake.output_text();
+    // The first cell is a space with the terminal's own colours, not a white one:
+    // the transparent sentinel is nearly white, and writing its bits made a card.
     try testing.expect(std.mem.indexOf(u8, written, " ") != null);
     try testing.expect(std.mem.startsWith(u8, written, "\x1b[1;1H\x1b[39m\x1b[49m "));
+    // The second is the picture, and nothing was blended towards white.
     try testing.expect(std.mem.indexOf(u8, written, "38;2;255;0;0") != null);
     try testing.expect(std.mem.indexOf(u8, written, "38;2;255;255;255") == null);
 }
@@ -207,6 +232,8 @@ test "nothing to draw is not drawn" {
 }
 
 test "a cell that is one colour is drawn as one block" {
+    // Two rows of the same pixel: the terminal does not need a half block with two
+    // colours to draw a solid square.
     const rgba = [_]u8{
         9, 9, 9, 255, 9, 9, 9, 255,
         9, 9, 9, 255, 9, 9, 9, 255,
@@ -221,6 +248,7 @@ test "a cell that is one colour is drawn as one block" {
 }
 
 test "a half transparent picture is composited over the reader, not over a card" {
+    // A pixel at half alpha over a dark ground is a dark pixel, not a bright one.
     const rgba = [_]u8{
         255, 255, 255, 128,
         255, 255, 255, 128,
@@ -230,8 +258,10 @@ test "a half transparent picture is composited over the reader, not over a card"
     var fake: system_mod.Fake = .{};
     try testing.expect(draw(fake.system(), image, 0, 0, 1, 1, 0x000000));
     const written = fake.output_text();
+    // White at half alpha over black: 255 * 128 / 255, in every channel.
     try testing.expect(std.mem.indexOf(u8, written, "38;2;128;128;128") != null);
 
+    // The same picture over a white ground is white: the ground is what is behind it.
     var other: system_mod.Fake = .{};
     try testing.expect(draw(other.system(), image, 0, 0, 1, 1, 0xFFFFFF));
     try testing.expect(std.mem.indexOf(u8, other.output_text(), "38;2;255;255;255") != null);

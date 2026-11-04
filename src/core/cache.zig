@@ -97,6 +97,10 @@ fn number(fields: *std.mem.SplitIterator(u8, .scalar), comptime T: type) Error!T
     return std.fmt.parseInt(T, text, 10) catch return error.Malformed;
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 fn sample(id: u64, account: u8, mailbox: Mailbox, timestamp_unix: i64) Message {

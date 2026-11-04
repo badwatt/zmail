@@ -123,6 +123,10 @@ pub const Painter = struct {
         const level = if (self.reduced_motion) 1.0 else splash.breath_level_at(elapsed);
         if (level < splash.hidden_level) return;
 
+        // The line first, then the mark: the line sets and resets colours of its own,
+        // and the mark's colour has to be the last thing said before its glyphs --
+        // otherwise the wordmark is written in the terminal's default and the breath
+        // is a shape that never changes.
         self.paint_text(self.line[0..self.line_len], self.line_row, self.line_left, 160);
         self.paint_text(self.right[0..self.right_len], self.right_row, self.right_left, 32);
 
@@ -131,8 +135,11 @@ pub const Painter = struct {
         write_sgr(&writer, self.theme, level) catch return;
         self.system.write(writer.buffered()) catch return;
 
+        // Simple and idempotent: every row, its address, its glyphs.
         var row: u16 = 0;
         while (row < placement.height) : (row += 1) {
+            // The widest row the mark can be: thirty-five cells of drawing at the
+            // largest scale, every cell three bytes of block character.
             var row_text: [mark_row_bytes]u8 = undefined;
             var length: usize = 0;
             var column: u16 = 0;
@@ -187,6 +194,7 @@ pub const Painter = struct {
             self.system.write(encoded[0..length]) catch return;
             cells += screen.cell_width(codepoint);
         }
+        // Back to plain for the next frame's cursor moves.
         self.system.write("\x1b[0m") catch return;
     }
 };
@@ -224,14 +232,19 @@ test "the painter draws the mark where the splash put it, and stops" {
     var fake: system_mod.Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
     var painter = Painter{};
 
+    // The frame is drawn here rather than waited for: a test that sleeps is a test
+    // that measures the machine, and this one measures the drawing.
     painter.set_up(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
     painter.paint();
     painter.finish();
 
     const written = fake.output_text();
+    // A cursor move to the mark's first row, and the mark's own glyphs.
     try testing.expect(std.mem.indexOf(u8, written, "\x1b[") != null);
     try testing.expect(std.mem.indexOf(u8, written, "█") != null);
     try testing.expect(std.mem.indexOf(u8, written, ";38;") != null);
+    // The words under the mark are carried too: they move with it. Their runs are
+    // separated by colour changes, so the text is found with the escapes stripped.
     var words: [4096]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, plain(written, &words), "connecting to home") != null);
     try testing.expect(painter.thread == null);
@@ -257,6 +270,7 @@ test "the colour of one frame: truecolor, a palette index, or nothing at all" {
     try write_sgr(&writer, theme_mod.Theme.dark(), 1.0);
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), ";38;5;") != null);
 
+    // Monochrome: no colour at all, and the weight carries the change.
     writer = std.Io.Writer.fixed(&buffer);
     try write_sgr(&writer, theme_mod.Theme.mono(), 1.0);
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;") == null);
@@ -283,6 +297,8 @@ test "the screen's encoder writes each kind of colour" {
 }
 
 test "the mark at its largest scale still fits a row" {
+    // This is the crash that brought the four-times size in: a row of the mark is
+    // three bytes a cell, and the buffer was sized for the two-times one.
     var fake: system_mod.Fake = .{ .size_value = .{ .columns = 170, .rows = 45 } };
     var painter = Painter{};
     painter.set_up(fake.system(), .{ .columns = 170, .rows = 45 }, theme_mod.Theme.from_background(.{ .r = 20, .g = 20, .b = 24 }), false, 0, "home");
@@ -294,6 +310,9 @@ test "the mark at its largest scale still fits a row" {
 }
 
 test "the thread paints on its own, and stops when asked" {
+    // The other tests draw by hand so they measure the drawing, not the machine.
+    // This one is the opposite: the thread is the point, so it waits for it -- and
+    // waits no longer than it has to.
     var fake: system_mod.Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
     var painter = Painter{};
     painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
@@ -305,12 +324,16 @@ test "the thread paints on its own, and stops when asked" {
 
     painter.finish();
     try testing.expect(painter.thread == null);
+    // And it is quiet afterwards: the frame it drew is the last byte written.
     const after = fake.output_len;
     os.sleep_ms(150);
     try testing.expectEqual(after, fake.output_len);
 }
 
 test "a frame says the same thing twice, so a second one cannot pile up" {
+    // The painter draws over its own last frame ninety times a second. Anything it
+    // reads back from its own output -- the sentence, the layout -- would grow a word
+    // per frame, and the first screen would fill with a staircase of near-copies.
     var fake: system_mod.Fake = .{ .size_value = .{ .columns = 200, .rows = 28 } };
     var painter = Painter{};
     painter.set_up(fake.system(), .{ .columns = 200, .rows = 28 }, theme_mod.Theme.dark(), false, 0, "azama, gmail");
@@ -323,11 +346,16 @@ test "a frame says the same thing twice, so a second one cannot pile up" {
     painter.paint();
     try testing.expectEqual(first, fake.output_len);
     try testing.expectEqualStrings(first_text, fake.output_text());
+    // And the sentence is the sentence: one prefix, not two.
     var words: [4096]u8 = undefined;
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, plain(fake.output_text(), &words), "connecting to "));
 }
 
 test "one painter, one thread: the layout does not start anything" {
+    // `set_up` remembers where to draw; `start` is the only thing that spawns. When the
+    // tail of `start` was left in `set_up`, every splash had two painters -- the second
+    // never joined -- and both wrote the mark at their own layout, on top of the loop's
+    // frame.
     var fake: system_mod.Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
     var painter = Painter{};
     painter.set_up(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
@@ -335,6 +363,7 @@ test "one painter, one thread: the layout does not start anything" {
     try testing.expectEqual(@as(u16, 10), painter.placement.height);
 
     painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
+    // The second start finds the first thread and leaves it alone.
     painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
     try testing.expect(painter.thread != null);
     painter.finish();

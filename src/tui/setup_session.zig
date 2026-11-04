@@ -41,6 +41,7 @@ pub fn run(system: system_mod.System, theme: theme_mod.Theme, config_path: []con
     var parser: input.Parser = .{};
     var screen = screen_mod.Screen.init(80, 24);
 
+    // Bytes the caller had buffered when it opened the assistant.
     if (seed.len > 0) {
         var keys: input.Keys = .{};
         parser.decode(seed, &keys);
@@ -60,6 +61,7 @@ pub fn run(system: system_mod.System, theme: theme_mod.Theme, config_path: []con
         const count = system.read(&read_buffer, system_mod.read_timeout_ms) catch
             return error.Terminal;
         if (count == 0) {
+            // A lone Esc is ambiguous until the read times out.
             if (parser.flush()) |key| handle_key(&setup, key);
         } else {
             var index: usize = 0;
@@ -104,6 +106,8 @@ fn handle_key(setup: *core.setup.Setup, key: input.Key) void {
 }
 
 pub fn render(setup: *const core.setup.Setup, theme: theme_mod.Theme, config_path: []const u8, out: *screen_mod.Screen) void {
+    // Each step draws on a blank canvas: a stale cell from the previous step is
+    // how a form ends up with two carets and text where it does not belong.
     out.clear();
     var title_buffer: [64]u8 = undefined;
     const title = std.fmt.bufPrint(&title_buffer, "{s} setup", .{core.meta.name}) catch core.meta.name;
@@ -230,6 +234,10 @@ fn put_right(out: *screen_mod.Screen, x_right: u16, y: u16, text: []const u8, st
     _ = out.put_text(x_right - width, y, text, width, style);
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 const Fake = system_mod.Fake;
 
@@ -257,12 +265,15 @@ test "a complete wizard saves the config and the password" {
 
 test "a seed supplies the keystrokes the caller already read" {
     var fake: Fake = .{};
+    // The address arrives as the seed; quitting right after proves it was
+    // applied, and that the seed cannot be lost by the caller.
     fake.push_input("\x03");
     try testing.expectEqual(
         Outcome.cancelled,
         try run_with(&fake, "/tmp/zmail/config", "alice@example.com"),
     );
 
+    // A seed can also carry the quit itself.
     var quit: Fake = .{};
     try testing.expectEqual(
         Outcome.cancelled,
@@ -285,6 +296,8 @@ test "ctrl+q cancels at any step" {
 test "an invalid address keeps the step and shows the problem" {
     var fake: Fake = .{};
     fake.push_input("nope\r");
+    // No further input: the loop would block; the rendered frame is checked
+    // through a direct render instead.
     var setup = core.setup.Setup.init();
     defer setup.deinit();
     setup.address.set("nope");
@@ -300,6 +313,7 @@ test "an invalid address keeps the step and shows the problem" {
 test "the password is masked and never printed" {
     var fake: Fake = .{};
     fake.push_input("alice@example.com\r\r\r\r\r" ++ "secret\r");
+    // Cancel from the review screen; every frame so far was rendered.
     fake.push_input("\x03");
     const outcome = try run_with(&fake, "/tmp/c", "");
     try testing.expectEqual(Outcome.cancelled, outcome);
@@ -363,6 +377,7 @@ test "every step renders its own value and the password is masked" {
 
 test "backspace, clear, and a resize are handled by the loop" {
     var fake: Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
+    // Type, go to the next step, delete, clear, then cancel.
     fake.push_input("alice@example.com\r" ++ "\x7f\x15" ++ "\x03");
     try testing.expectEqual(Outcome.cancelled, try run_with(&fake, "/tmp/c", ""));
     try testing.expect(fake.output_len > 0);

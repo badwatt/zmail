@@ -40,6 +40,8 @@ pub fn decode(png: []const u8, work: []u8, out: []u8) Error!Image {
     var compressed: usize = 0;
     var palette: [768]u8 = undefined;
     var palette_len: usize = 0;
+    // Alpha per palette entry, and the colour that means "nothing" in an RGB picture.
+    // Without this a logo with a transparent background is a logo on a rectangle.
     var alpha: [256]u8 = @splat(255);
     var key: ?[3]u8 = null;
 
@@ -50,7 +52,7 @@ pub fn decode(png: []const u8, work: []u8, out: []u8) Error!Image {
         const body_start = index + 8;
         if (body_start + length > png.len) return error.Corrupt;
         const body = png[body_start..][0..length];
-        index = body_start + length + 4;
+        index = body_start + length + 4; // + CRC
 
         if (std.mem.eql(u8, kind, "IHDR")) {
             header = try parseHeader(body);
@@ -60,6 +62,7 @@ pub fn decode(png: []const u8, work: []u8, out: []u8) Error!Image {
                 const count = @min(body.len, alpha.len);
                 @memcpy(alpha[0..count], body[0..count]);
             } else if (body.len == 6) {
+                // Three 16-bit values; an eight-bit picture uses the low byte of each.
                 key = .{ body[1], body[3], body[5] };
             }
         } else if (std.mem.eql(u8, kind, "PLTE")) {
@@ -88,6 +91,7 @@ pub fn decode(png: []const u8, work: []u8, out: []u8) Error!Image {
     const raw_size = @as(usize, head.height) * (stride + 1);
     if (work.len < compressed + raw_size) return error.NoRoom;
 
+    // Inflate the IDAT stream right after the compressed bytes.
     const raw_start = alignedStart(work.ptr, compressed);
     if (raw_start + raw_size > work.len) return error.NoRoom;
     const raw = work[raw_start..][0..raw_size];
@@ -120,6 +124,7 @@ fn parseHeader(body: []const u8) Error!Header {
     if (width == 0 or height == 0) return error.Corrupt;
     if (width * height > max_pixels) return error.TooBig;
 
+    // 8 bits per channel, no interlacing: what mail images use.
     if (body[8] != 8 or body[10] != 0 or body[11] != 0 or body[12] != 0) return error.Unsupported;
     const color: Color = switch (body[9]) {
         2 => .rgb,
@@ -168,10 +173,16 @@ fn unfilter(
                 4 => paeth(left, up, up_left),
                 else => return error.Corrupt,
             };
+            // The bytes are written back in place: each value depends on the
+            // ones already reconstructed on this line. `previous` is read, never
+            // written, until the row is done -- overwriting it here would make
+            // every filtered row predict from its own left neighbour.
             line[x] +%= add;
         }
 
         writeLine(head, line, palette, alpha, key, out, y);
+        // The in-place filtering above already left the reconstructed bytes in
+        // `line`; copy them into `previous` for the next row.
         @memcpy(previous[0..stride], line);
     }
 }
@@ -203,6 +214,7 @@ fn writeLine(
                 out[target] = line[x * 3];
                 out[target + 1] = line[x * 3 + 1];
                 out[target + 2] = line[x * 3 + 2];
+                // A colour that means "transparent" is how older pictures spell alpha.
                 const clear = if (key) |value|
                     value[0] == line[x * 3] and value[1] == line[x * 3 + 1] and value[2] == line[x * 3 + 2]
                 else
@@ -216,6 +228,8 @@ fn writeLine(
                 out[target + 3] = line[x * 4 + 3];
             },
             .palette => {
+                // usize, not the byte's own width: an index of 200 times three is 600,
+                // and that is a number a u8 cannot hold. The bytes are mail.
                 const entry: usize = @as(usize, line[x]) * 3;
                 if (entry + 3 > palette.len) {
                     out[target] = 0;
@@ -232,6 +246,10 @@ fn writeLine(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "a tiny RGBA PNG decodes to its pixels" {
@@ -242,6 +260,7 @@ test "a tiny RGBA PNG decodes to its pixels" {
     const image = try decode(png, &work, &out);
     try testing.expectEqual(@as(u32, 2), image.width);
     try testing.expectEqual(@as(u32, 2), image.height);
+    // Red, green, blue, white.
     try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, image.rgba[0..4]);
     try testing.expectEqualSlices(u8, &.{ 0, 255, 0, 255 }, image.rgba[4..8]);
     try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, image.rgba[8..12]);
@@ -263,9 +282,12 @@ test "something that is not a PNG is refused" {
 }
 
 test "paeth picks the neighbour the predictor points at" {
+    // p is the predictor; the closest of a, b or c wins.
     try testing.expectEqual(@as(u8, 10), paeth(10, 20, 30));
     try testing.expectEqual(@as(u8, 10), paeth(20, 10, 30));
     try testing.expectEqual(@as(u8, 30), paeth(30, 20, 10));
+    // Down-left is the closest here, which is the case that only happens when
+    // the predictor sits between b and c.
     try testing.expectEqual(@as(u8, 15), paeth(10, 20, 15));
 }
 
@@ -298,6 +320,7 @@ test "a palette longer than the decoder keeps is cut, not trusted" {
     var out: [64]u8 = undefined;
     const image = try decode(@embedFile("testdata/long_plte.png"), &work, &out);
     try testing.expectEqual(@as(u32, 1), image.width);
+    // The entries past the bound were dropped, so this one is black.
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, image.rgba[0..4]);
 }
 
@@ -307,6 +330,7 @@ test "average and paeth filters are undone, and an invented one is refused" {
     const image = try decode(@embedFile("testdata/filters.png"), &work, &out);
     try testing.expectEqualSlices(u8, &.{ 10, 20, 30, 255 }, image.rgba[0..4]);
     try testing.expectEqualSlices(u8, &.{ 40, 50, 60, 255 }, image.rgba[4..8]);
+    // The second row was filtered against the first.
     try testing.expectEqualSlices(u8, &.{ 70, 80, 90, 255 }, image.rgba[8..12]);
     try testing.expectEqualSlices(u8, &.{ 100, 110, 120, 255 }, image.rgba[12..16]);
 
@@ -314,11 +338,14 @@ test "average and paeth filters are undone, and an invented one is refused" {
 }
 
 test "a palette index past the table is black, not an overflow" {
+    // Index 200 times three is 600: a u8 holds neither. This panicked on a real mail,
+    // because a palette index is a byte somebody else chose.
     const file = @embedFile("testdata/palette_high_index.png");
     var work: [4096]u8 = undefined;
     var out: [64]u8 = undefined;
     const image = try decode(file, &work, &out);
     try testing.expectEqual(@as(u32, 2), image.width);
+    // Out of range: black. In range: the palette's second entry, white.
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, image.rgba[0..4]);
     try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, image.rgba[4..8]);
 }
@@ -328,6 +355,7 @@ test "a palette entry that says transparent is transparent" {
     var work: [4096]u8 = undefined;
     var out: [64]u8 = undefined;
     const image = try decode(file, &work, &out);
+    // First pixel: red, and nothing of it. Second: blue, opaque.
     try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0 }, image.rgba[0..4]);
     try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, image.rgba[4..8]);
 }
@@ -337,6 +365,7 @@ test "a colour that means nothing is transparent in an rgb picture" {
     var work: [4096]u8 = undefined;
     var out: [64]u8 = undefined;
     const image = try decode(file, &work, &out);
+    // The key colour (1,2,3) is the transparent one; the other pixel is itself.
     try testing.expectEqual(@as(u8, 0), image.rgba[3]);
     try testing.expectEqual(@as(u8, 255), image.rgba[7]);
 }

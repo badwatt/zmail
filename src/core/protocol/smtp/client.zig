@@ -49,6 +49,7 @@ pub const Client = struct {
         const reply = try self.read_reply();
         switch (reply.code) {
             235, 503 => return,
+            // 503 "already authenticated" is handled above.
             else => return classify(reply.code),
         }
     }
@@ -194,6 +195,10 @@ fn classify(code: u16) Error {
     if (code >= 500) return error.Rejected;
     return error.ProtocolError;
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const Scripted = transport_mod.Scripted;

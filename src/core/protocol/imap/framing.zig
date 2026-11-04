@@ -77,6 +77,7 @@ pub const Framer = struct {
             const payload_start = line_end + 2;
             if (literal_size > self.pending_len - payload_start) return null;
 
+            // The response continues after the literal; look for its CRLF.
             search_start = payload_start + literal_size;
         }
     }
@@ -103,6 +104,10 @@ fn indexOfCrlf(buffer: []const u8, start: u32) ?u32 {
     }
     return null;
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 

@@ -49,6 +49,10 @@ pub const SmtpOutbox = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 const Scripted = transport_mod.Scripted;
 

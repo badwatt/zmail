@@ -33,6 +33,7 @@ test "the manifest's minimum Zig version is valid, and this build meets it" {
     const builtin = @import("builtin");
     const required = try std.SemanticVersion.parse(minimum_zig_version);
     try testing.expect(minimum_zig_version.len > 0);
+    // The same rule build.zig enforces before compiling anything.
     try testing.expect(builtin.zig_version.order(required) != .lt);
 }
 

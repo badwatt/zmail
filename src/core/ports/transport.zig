@@ -99,6 +99,10 @@ pub const Scripted = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "Scripted: reads its script in order, then times out" {

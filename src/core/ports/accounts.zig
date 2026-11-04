@@ -173,6 +173,10 @@ pub const Memory = struct {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 const testing = std.testing;
 
 test "Memory accounts: remove and save record what they were asked" {

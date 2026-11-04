@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // `-Dtest-bin=true` installs test binaries, useful to debug coverage.
     const install_test_bins = b.option(bool, "test-bin", "Install test binaries for coverage analysis") orelse false;
 
     const core = coreModule(b, target, optimize);
@@ -229,10 +230,10 @@ fn addCoverage(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         \\fi
         \\exec "$REPORT_BIN" coverage
     );
-    kcov.addArg(b.fmt("{s}-coverage", .{app_name}));
-    kcov.addArtifactArg2(core_tests, .{});
-    kcov.addArtifactArg2(tui_tests, .{});
-    kcov.addArtifactArg2(report, .{});
+    kcov.addArg(b.fmt("{s}-coverage", .{app_name})); // $0
+    kcov.addArtifactArg2(core_tests, .{}); // $1
+    kcov.addArtifactArg2(tui_tests, .{}); // $2
+    kcov.addArtifactArg2(report, .{}); // $3
     b.step("coverage", "Run tests under kcov, fail below 100% line coverage").dependOn(&kcov.step);
 }
 

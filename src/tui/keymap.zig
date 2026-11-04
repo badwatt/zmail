@@ -50,6 +50,8 @@ fn compose_key(key: Key) ?Command {
 fn help_key(key: Key) ?Command {
     return switch (key) {
         .ctrl => |letter| if (letter == 'c') .quit else .toggle_help,
+        // Scrolling is the only thing besides filtering that does not close the
+        // card: everything else means "I have seen enough".
         .char => |codepoint| switch (codepoint) {
             '/' => .begin_help_search,
             'j' => .{ .help_scroll = 1 },
@@ -109,6 +111,7 @@ fn char_command(codepoint: u21, view: View) ?Command {
         'g' => .{ .move = .top },
         'G' => .{ .move = .bottom },
         'l', 'o' => .open_selected,
+        // `q` goes back, never out: only Ctrl+C ends the program.
         'q' => if (view == .list) null else .dismiss,
         'c' => .compose_new,
         'r' => .compose_reply,
@@ -185,6 +188,10 @@ fn search_key(key: Key) ?Command {
         else => null,
     };
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -302,6 +309,7 @@ test "accounts view: movement, select, remove, add, close" {
     for (cases) |case| {
         try testing.expectEqual(case.expected, translate(case.key, context).?);
     }
+    // Ctrl+Q is not a way out anywhere, not even here.
     try testing.expect(translate(.{ .ctrl = 'q' }, context) == null);
     try testing.expect(translate(.{ .char = 'z' }, context) == null);
     try testing.expect(translate(.{ .ctrl = 'd' }, context) == null);

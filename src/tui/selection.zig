@@ -76,6 +76,9 @@ pub fn extract(selection: Selection, wrapped: *const wrap.Wrapped, body: []const
         if (to > from) writer.writeAll(body[line.start + from .. line.start + to]) catch break;
 
         if (line_index == last_line) break;
+        // A soft wrap continues the same sentence: no newline belongs there.
+        // The wrapper drops the space it broke at, so the test is whether the
+        // gap between the two lines holds a newline, not whether they touch.
         const next = wrapped.lines[line_index + 1];
         const gap = if (next.start > line.end) body[line.end..next.start] else body[0..0];
         const soft = std.mem.indexOfScalar(u8, gap, '\n') == null;
@@ -83,6 +86,10 @@ pub fn extract(selection: Selection, wrapped: *const wrap.Wrapped, body: []const
     }
     return writer.buffered();
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -109,6 +116,8 @@ test "a drag upwards copies in reading order, like one downwards" {
         .anchor = .{ .line = 2, .column = 2 },
         .cursor = .{ .line = 0, .column = 1 },
     };
+    // The selection runs from column 1 of the first line to column 2 of the
+    // last, whichever way the drag went.
     try testing.expectEqualStrings("ne\ntwo\nthr", extract(upwards, &wrapped, body, &out));
 
     const downwards = Selection{
@@ -125,12 +134,15 @@ test "a wrapped line joins without a newline, a paragraph keeps one" {
     try testing.expect(wrapped.len >= 3);
 
     var out: [64]u8 = undefined;
+    // From the first line into its continuation: no newline is inserted, the
+    // sentence reads as one.
     const within = Selection{ .anchor = .{ .line = 0, .column = 0 }, .cursor = .{ .line = 1, .column = 3 } };
     const text = extract(within, &wrapped, body, &out);
     try testing.expect(std.mem.indexOfScalar(u8, text, '\n') == null);
     try testing.expect(std.mem.startsWith(u8, text, "aaaa bbbb"));
     try testing.expect(std.mem.endsWith(u8, text, "cccc"));
 
+    // A real paragraph break does keep its newline.
     const across = Selection{ .anchor = .{ .line = 0, .column = 0 }, .cursor = .{ .line = 2, .column = 3 } };
     try testing.expect(std.mem.indexOfScalar(u8, extract(across, &wrapped, body, &out), '\n') != null);
 }
@@ -141,6 +153,8 @@ test "a drag to the left on one line still reads left to right" {
     wrap.wrap(body, 40, &wrapped);
 
     var out: [16]u8 = undefined;
+    // The anchor is at the end and the cursor at the start: the selection is
+    // the same run of text either way.
     const backwards = Selection{
         .anchor = .{ .line = 0, .column = 8 },
         .cursor = .{ .line = 0, .column = 4 },
