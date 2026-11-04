@@ -1224,6 +1224,11 @@ pub const Session = struct {
                 // stays free -- Esc works while the bytes are in the air.
                 .fetch_body => |args| {
                     self.begin_body(args.account, args.mailbox, args.id);
+                    // The screen changes now, before the cache is read and before a
+                    // socket is touched: a big message takes long enough to read and
+                    // parse that the old page would still be up, and the reader must
+                    // never show one message under another's subject.
+                    self.show_body_loading();
                     self.request_body(args.account, args.mailbox, args.id);
                 },
                 // Everything else needs the one connection a refresh may be using.
@@ -1338,6 +1343,15 @@ pub const Session = struct {
         self.wrapped = .{};
     }
 
+    /// The reader is on screen with its placeholder, the footer turns and the
+    /// terminal's bar goes up. Painted here, before the work.
+    fn show_body_loading(self: *Session) void {
+        self.state.loading = true;
+        self.body_loading_until_ms = os.monotonic_ms() + @as(i64, @intCast(self.deps.loading_ms));
+        self.sync_progress();
+        self.render();
+    }
+
     /// Asks for a body: the cache answers now, the network answers on a later tick.
     fn request_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
         if (self.deps.bodies) |bodies| {
@@ -1353,11 +1367,6 @@ pub const Session = struct {
         };
         self.body_request = .{ .account = account, .mailbox = mailbox, .id = id, .mail = mail };
         self.body_wanted = id;
-        // The footer turns and the terminal's own bar runs: the wait is real, and it is
-        // the only thing on screen that says so until the bytes land.
-        self.state.loading = true;
-        self.body_loading_until_ms = os.monotonic_ms() + @as(i64, @intCast(self.deps.loading_ms));
-        self.sync_progress();
         self.repaint();
     }
 
@@ -3052,6 +3061,32 @@ test "a failed move becomes an alert" {
     try testing.expectEqualStrings("Could not move the message", rig.session.state.status.slice());
 }
 
+test "a cached body still shows the frame before it reads the disk" {
+    // The cache is a file: reading and parsing a big message takes long enough that
+    // the old page would still be up if the work came first. The loading frame is
+    // painted before the probe, so the reader changes screen on the keypress.
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var bodies: core.bodies_port.Memory = .{};
+    try bodies.cache().save(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "cached prose");
+    bodies.saves = 0;
+    rig.session.deps.bodies = bodies.cache();
+    rig.fake_system.output_len = 0;
+
+    rig.fake_system.push_input("\r");
+    _ = rig.session.step();
+
+    // The bytes went out with the placeholder in them, before the body was there.
+    const output = rig.fake_system.output_text();
+    try testing.expect(std.mem.indexOf(u8, output, "Loading...") != null);
+    // And the body arrived in the same tick, from the cache.
+    try testing.expectEqualStrings("cached prose", rig.session.body[0..rig.session.body_len]);
+    try testing.expectEqual(@as(u32, 0), bodies.saves);
+}
+
 test "a cached body opens without touching the network" {
     var rig: Rig = .{};
     try rig.start();
@@ -4067,11 +4102,22 @@ test "opening another message blanks the page instead of keeping the last one" {
     try testing.expectEqual(@as(u32, 0), rig.session.shown_len);
     try testing.expect(!rig.session.body_loaded);
 
-    // What the screen would say now: the placeholder, not the last message.
-    rig.fake_system.output_len = 0;
-    rig.session.render();
-    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Loading...") != null);
-    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "the first message") == null);
+    // What the screen says now: the placeholder, not the last message. The frame was
+    // written before the cache was read, which is why it is already there.
+    var frame: [8192]u8 = undefined;
+    var written: usize = 0;
+    var row: u16 = 0;
+    while (row < rig.session.screen.rows and written < frame.len) : (row += 1) {
+        var row_buffer: [512]u8 = undefined;
+        const text = rig.session.screen.row_text(row, &row_buffer);
+        @memcpy(frame[written..][0..text.len], text);
+        written += text.len;
+        frame[written] = '\n';
+        written += 1;
+    }
+    const painted = frame[0..written];
+    try testing.expect(std.mem.indexOf(u8, painted, "Loading...") != null);
+    try testing.expect(std.mem.indexOf(u8, painted, "the first message") == null);
 
     // And when it lands, it is the second message that is on screen.
     rig.session.settle_refresh_for_test();
