@@ -159,6 +159,11 @@ pub const Deps = struct {
 /// How many images one frame will paint: past a handful the mail is a gallery,
 /// not a message.
 const max_images_drawn: u8 = 8;
+
+/// How many pictures are kept decoded for one message. More than a frame can show:
+/// a newsletter's icons are below the fold, and scrolling back to one must not fetch
+/// it again.
+const image_slots_max: u8 = core.html.max_remote_images;
 const cell_width: u32 = media.cell_width;
 const cell_height: u32 = media.cell_height;
 /// An image taller than this is scaled down: a reader scrolls, it does not zoom.
@@ -234,7 +239,7 @@ pub const Session = struct {
     /// turns it into a place on screen.
     image_buffer: [core.limits.body_max]u8 = undefined,
     /// Every picture of this message, decoded or downloaded once.
-    image_slots: [max_images_drawn]ImageSlot = @splat(.{}),
+    image_slots: [image_slots_max]ImageSlot = @splat(.{}),
     /// The link under a ctrl-hovered pointer, if any.
     hovered: ?core.links.Link = null,
     /// Its address, shown in a popup while ctrl is held over it.
@@ -968,6 +973,11 @@ pub const Session = struct {
         // Kept even when it failed: a picture that did not come is not asked for
         // again on the next frame, and the next, and the next.
         self.image_slot_count += 1;
+        if (slot.len > 0 and media.png_size(slot.bytes[0..slot.len]) == null) {
+            // Downloaded, and unusable: a terminal paints PNG, and a site that served
+            // a WebP or an SVG is not something to keep quiet about.
+            self.state.set_status("That picture is not a PNG; o opens the mail", .{});
+        }
         self.repaint();
     }
 
@@ -5360,6 +5370,38 @@ test "pictures are off until asked for, and then they arrive off the loop" {
     try testing.expect(!rig.session.show_images);
     try testing.expectEqualStrings("Pictures hidden", rig.session.state.status.slice());
     try testing.expect(rig.session.image_png("r0") == null);
+}
+
+test "a picture that is not a PNG is downloaded once and named as such" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // A GIF: the terminal cannot paint it, and the reader says so instead of showing
+    // a marker that never becomes anything.
+    const gif = [_]u8{ 'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0, 0, 0 };
+    var sink: RemoteFetch = .{ .png = &gif };
+    rig.session.deps.fetch_image = RemoteFetch.fetch;
+    rig.session.deps.fetch_image_context = &sink;
+    rig.session.deps.draw_image = ImageSink.draw;
+
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/x.gif\"></p>");
+
+    rig.fake_system.push_input("i");
+    _ = rig.session.step();
+    // Wait for the picture to be dealt with, not for the status: turning them on is
+    // itself a status line.
+    var guard: u32 = 0;
+    while (rig.session.image_slot_count == 0 and guard < 300) : (guard += 1) {
+        _ = rig.session.step();
+        os.sleep_ms(1);
+    }
+    try testing.expectEqual(@as(u8, 1), sink.fetches);
+    try testing.expectEqualStrings("That picture is not a PNG; o opens the mail", rig.session.state.status.slice());
 }
 
 const RemoteFetch = struct {

@@ -403,7 +403,10 @@ fn entity(text: []const u8, index: usize) ?Decoded {
 /// `[IMG:cid]` for an image that came inside the message, `[IMG:url]` for one
 /// fetched from the network. The reader paints the first kind in the terminal
 /// and prints what it knows about the second.
-pub const max_remote_images = 8;
+/// How many pictures with an address the reader keeps track of. A newsletter has
+/// more than a handful: the footer of one is a row of social icons, and past the cap
+/// they stop being markers and become the words "image: Brave Reddit".
+pub const max_remote_images = 16;
 
 /// The addresses of the images the message does not carry, in the order they
 /// appear. Their markers in the text are `[IMG:r0]`, `[IMG:r1]`, … so the URL
@@ -650,9 +653,9 @@ pub fn mark_images(html: []const u8, out: []u8) []const u8 {
             remote += 1;
             if (alt.len > 0) writer.print(" {s}", .{alt}) catch {};
         } else if (alt.len > 0) {
-            writer.print("[imagen: {s}]", .{alt}) catch {};
+            writer.print("[image: {s}]", .{alt}) catch {};
         } else {
-            writer.writeAll("[imagen]") catch {};
+            writer.writeAll("[image]") catch {};
         }
     }
     // Whatever follows the last tag is text too.
@@ -846,14 +849,14 @@ test "an unterminated tag is dropped, not printed" {
 }
 
 test "more images than the reader can name are still mentioned" {
-    var out: [512]u8 = undefined;
-    var html_buffer: [512]u8 = undefined;
+    var out: [2048]u8 = undefined;
+    var html_buffer: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&html_buffer);
     for (0..max_remote_images + 1) |index| {
         try writer.print("<img src=\"https://x/{d}.png\" alt=\"pic{d}\">", .{ index, index });
     }
     const marked = mark_images(writer.buffered(), &out);
-    try testing.expect(std.mem.indexOf(u8, marked, "[imagen: pic8]") != null);
+    try testing.expect(std.mem.indexOf(u8, marked, "[image: pic16]") != null);
 }
 
 test "an attribute that runs to the end of the tag is still an attribute" {
