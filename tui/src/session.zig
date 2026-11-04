@@ -1998,7 +1998,7 @@ const FakeMail = struct {
     fn mail(self: *FakeMail) core.mail_port.Mail {
         return .{ .context = self, .vtable = &.{
             .fetch = fetchThunk,
-            .fetch_body = fetchBodyThunk,
+            .fetch_body = fetchRawThunk,
             .fetch_raw = fetchRawThunk,
             .set_flags = setFlagsThunk,
             .move_message = moveThunk,
@@ -2012,17 +2012,6 @@ const FakeMail = struct {
         self.fetch_calls += 1;
         if (self.fail_fetch) return error.Unavailable;
         return self.inner.mail().fetch(mailbox, out);
-    }
-
-    fn fetchBodyThunk(
-        context: *anyopaque,
-        mailbox: Mailbox,
-        id: MessageId,
-        out: []u8,
-    ) core.mail_port.Error![]const u8 {
-        const self: *FakeMail = @ptrCast(@alignCast(context));
-        if (self.fail_body) return error.Rejected;
-        return self.inner.mail().fetch_body(mailbox, id, out);
     }
 
     fn fetchRawThunk(
@@ -4759,4 +4748,269 @@ test "a text body with HTML spacing entities is readable" {
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\r\n\r\n&emsp;&#8203;Hola&nbsp;mundo");
     // "&emsp;" is a space, "&#8203;" is nothing, "&nbsp;" is a space.
     try testing.expectEqualStrings(" Hola mundo", rig.session.reader_text());
+}
+
+test "signing in from the account list: no config, then the flow fails" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // A client id, or the session refuses before trying.
+    rig.session.state.accounts.items[0].oauth_client.set("abc-123");
+    const account = core.id.AccountId.from_int(1);
+
+    // Without a config file there is nothing to sign into, and the form is not
+    // the only way to find that out.
+    rig.session.deps.accounts_file = null;
+    rig.session.run_effects_for_test(&.{.{ .oauth_account = .{ .account = account } }});
+    try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
+
+    // The flow fails: the terminal comes back, the account is still saved, and
+    // the reason is on screen.
+    var port: core.accounts_port.Memory = .{ .fail = true, .oauth_problem = "the browser was closed" };
+    rig.session.deps.accounts_file = port.accounts();
+    rig.session.run_effects_for_test(&.{.{ .oauth_account = .{ .account = account } }});
+    try testing.expectEqual(account, port.oauth);
+    // `label_for` finds nothing here, so the account is named by the id.
+    try testing.expectEqualStrings("account saved; the browser was closed", rig.session.state.status.slice());
+    try testing.expect(rig.session.state.status_alert);
+
+    // A flow that fails without a word still says the sign-in failed, and that
+    // "o" retries it.
+    port.oauth_problem = "";
+    rig.session.run_effects_for_test(&.{.{ .oauth_account = .{ .account = account } }});
+    try testing.expectEqualStrings("account saved; sign-in failed. Press o to retry", rig.session.state.status.slice());
+}
+
+const OpenSink = struct {
+    calls: u8 = 0,
+    html_len: usize = 0,
+    link_len: usize = 0,
+
+    fn open(context: *anyopaque, html: []const u8, link: []const u8) void {
+        const self: *OpenSink = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.html_len = html.len;
+        self.link_len = link.len;
+    }
+};
+
+test "opening the message elsewhere needs a body, a way, and something to open" {
+    const html = "Content-Type: text/html\n\n<p>hello <a href=\"https://x.example\">there</a></p>";
+    const plain = "Content-Type: text/plain\n\nread https://x.example/there for more";
+
+    var rig: Rig = .{};
+    defer rig.deinit();
+    var sink: OpenSink = .{};
+    try rig.start();
+    rig.session.deps.open_external = OpenSink.open;
+    rig.session.deps.open_external_context = &sink;
+
+    // Nothing fetched yet: there is nothing to open.
+    try testing.expect(!rig.session.open_external_message());
+    try testing.expectEqual(@as(u8, 0), sink.calls);
+
+    // A body, but no program to hand it to.
+    rig.session.body_loaded = true;
+    const hander = rig.session.deps.open_external;
+    rig.session.deps.open_external = null;
+    try testing.expect(rig.session.open_external_message());
+    try testing.expectEqualStrings("No way to open it from here", rig.session.state.status.slice());
+    rig.session.deps.open_external = hander;
+
+    // An HTML part goes to the browser as itself, not as our text rendering.
+    try rig.open_reader(html);
+    try testing.expect(rig.session.open_external_message());
+    try testing.expectEqual(@as(u8, 1), sink.calls);
+    try testing.expect(sink.html_len > 0);
+    try testing.expectEqualStrings("Opened in the browser", rig.session.state.status.slice());
+
+    // Otherwise the first link is the thing worth opening.
+    sink.calls = 0;
+    try rig.open_reader(plain);
+    try testing.expect(rig.session.text_link_count > 0);
+    try testing.expect(rig.session.open_external_message());
+    try testing.expectEqual(@as(u8, 1), sink.calls);
+    try testing.expectEqual(@as(usize, 0), sink.html_len);
+    try testing.expect(sink.link_len > 0);
+    try testing.expectEqualStrings("Opened the first link", rig.session.state.status.slice());
+}
+
+test "opening elsewhere says so when the message has neither HTML nor a link" {
+    var rig: Rig = .{};
+    defer rig.deinit();
+    var sink: OpenSink = .{};
+    try rig.start();
+    rig.session.deps.open_external = OpenSink.open;
+    rig.session.deps.open_external_context = &sink;
+
+    try rig.open_reader("Content-Type: text/plain\n\nnothing to click here");
+    try testing.expect(rig.session.open_external_message());
+    try testing.expectEqual(@as(u8, 0), sink.calls);
+    try testing.expectEqualStrings("This message has nothing to open", rig.session.state.status.slice());
+}
+
+test "a saved account that cannot be opened says so, and keeps the form" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // The port writes the config and then cannot open the connection.
+    var port: core.accounts_port.Memory = .{ .fail = true, .save_problem = "the key file is not readable" };
+    rig.session.deps.accounts_file = port.accounts();
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+
+    const form = &rig.session.settings.?;
+    form.setup.address.set("new@example.com");
+    form.setup.imap_host.set("imap.example.com");
+    form.setup.imap_port.set("993");
+    form.setup.username.set("new");
+    form.setup.password.append_codepoint('s');
+    rig.session.save_settings(form);
+
+    // The reason the port gave is the one on the card: "fix the reason above"
+    // with nothing above was a dead end.
+    try testing.expectEqualStrings("the key file is not readable", form.setup.problem.slice());
+    try testing.expect(rig.session.settings != null);
+}
+
+test "an account signed in with OAuth opens its form already on that path" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var port: core.accounts_port.Memory = .{};
+    rig.session.deps.accounts_file = port.accounts();
+    rig.session.state.accounts.items[0].oauth_client.set("client-123");
+
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = core.id.AccountId.from_int(1) } }});
+
+    const form = &rig.session.settings.?;
+    try testing.expect(form.setup.oauth);
+    try testing.expectEqualStrings("client-123", form.setup.oauth_client_id.slice());
+}
+
+test "the scope remembers a label no account has any more, as all accounts" {
+    var rig: Rig = .{};
+    var scope: core.scope_port.Memory = .{};
+    // A label from a config that has changed since: the account is gone.
+    try scope.scope().save("gone");
+
+    var sources = [_]MailSource{undefined};
+    try rig.seed();
+    sources[0] = .{
+        .id = core.id.AccountId.from_int(1),
+        .label = "work",
+        .from = core.address.Address.init("me@work.example") catch .{},
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .loading_ms = 0,
+        .scope = scope.scope(),
+    });
+    defer rig.session.deinit();
+
+    // Every account, and the stale label forgotten.
+    try testing.expect(rig.session.state.account_filter == null);
+    try testing.expectEqual(@as(u32, 2), scope.save_calls);
+    try testing.expect(scope.remembered.is_empty());
+}
+
+test "the form's rare rows are typed into, toggled, cleared, and saved from" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var port: core.accounts_port.Memory = .{};
+    rig.session.deps.accounts_file = port.accounts();
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const form = &rig.session.settings.?;
+    form.setup.address.set("me@example.com");
+    form.setup.imap_host.set("imap.example.com");
+    form.setup.imap_port.set("993");
+    form.setup.username.set("me");
+
+    // Space opens the advanced rows; the client id is below them.
+    form.field = .advanced;
+    rig.send(" ");
+    try testing.expect(form.setup.show_advanced);
+
+    form.field = .client_id;
+    rig.send("a");
+    rig.send("b");
+    try testing.expectEqualStrings("ab", form.setup.oauth_client_id.slice());
+
+    // Backspace takes the last one back, and Ctrl+U clears the row.
+    rig.send("\x7f");
+    try testing.expectEqualStrings("a", form.setup.oauth_client_id.slice());
+    rig.send("\x15");
+    try testing.expect(form.setup.oauth_client_id.is_empty());
+
+    // Enter on the client id saves, which is what the row is for.
+    for ("client-1") |byte| rig.send(&.{byte});
+    rig.send("\r");
+    try testing.expectEqual(@as(u32, 1), port.saved);
+
+    // Space on the sign-in row switches to OAuth, and Enter switches back.
+    rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
+    const again = &rig.session.settings.?;
+    again.field = .sign_in;
+    rig.send(" ");
+    try testing.expect(again.setup.oauth);
+    rig.send("\r");
+    try testing.expect(!again.setup.oauth);
+}
+
+test "a click on text that is not a link opens nothing" {
+    var rig: Rig = .{};
+    defer rig.deinit();
+    var sink: LinkSink = .{};
+    try rig.start_with_links(&sink);
+
+    // Words, no address in them.
+    try rig.open_reader("Content-Type: text/plain\n\njust words here");
+
+    var out: [core.limits.url_max]u8 = undefined;
+    try testing.expect(rig.session.target_at(2, &out) == null);
+
+    // And the same for the HTML view, where the anchors live.
+    try rig.open_reader("Content-Type: text/html\n\n<p>just words here</p>");
+    try testing.expect(rig.session.target_at(2, &out) == null);
+}
+
+fn neverConnected(_: *anyopaque) bool {
+    return false;
+}
+
+test "a refresh that would have to open the connection does it here, not in a worker" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    // Whatever boot started.
+    rig.session.settle_refresh_for_test();
+
+    // The port says the connection was never opened. A worker that opened it
+    // would build the TLS stream on a thread that does not own the transport, and
+    // the process dies there.
+    var vtable = rig.fake_mail.mail().vtable.*;
+    vtable.connected = neverConnected;
+    rig.session.sources[0].mail = .{ .context = &rig.fake_mail, .vtable = &vtable };
+
+    const before = rig.fake_mail.fetch_calls;
+    rig.session.start_refresh();
+
+    // The fetch happened on this thread: nothing is running, and the messages are
+    // here.
+    try testing.expect(!rig.session.refreshing);
+    try testing.expectEqual(before + 1, rig.fake_mail.fetch_calls);
+    try testing.expect(rig.session.state.row_count() > 0);
 }

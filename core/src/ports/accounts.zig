@@ -100,6 +100,10 @@ pub const Memory = struct {
     connect_mail: ?@import("../ports/mail.zig").Mail = null,
     disconnected: AccountId = .unknown,
     oauth: AccountId = .unknown,
+    /// What the provider said, when the flow fails: empty means it said nothing.
+    oauth_problem: []const u8 = "",
+    /// Why a save was refused, in words for the user: empty means no reason.
+    save_problem: []const u8 = "",
 
     pub fn accounts(self: *Memory) Accounts {
         return .{ .context = self, .vtable = &.{
@@ -137,7 +141,7 @@ pub const Memory = struct {
     fn oauthThunk(context: *anyopaque, account: AccountId, problem: *Text(256)) Error!void {
         const self: *Memory = @ptrCast(@alignCast(context));
         self.oauth = account;
-        _ = problem;
+        problem.set(self.oauth_problem);
         if (self.fail) return error.Unavailable;
     }
 
@@ -163,6 +167,7 @@ pub const Memory = struct {
         const length = @min(draft.label.len, self.last_label.len);
         @memcpy(self.last_label[0..length], draft.label[0..length]);
         self.last_label_len = @intCast(length);
+        if (draft.problem) |problem| problem.set(self.save_problem);
         if (self.fail) return error.Unavailable;
         return AccountId.from_int(1);
     }
