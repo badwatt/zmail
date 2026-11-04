@@ -5351,6 +5351,41 @@ test "a terminal that cannot paint says so instead of doing nothing" {
     );
 }
 
+test "a big html mail with many links and pictures renders without arithmetic surprises" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.show_images = true;
+    rig.session.deps.draw_image = ImageSink.draw;
+
+    var raw_buffer: [400 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&raw_buffer);
+    try writer.writeAll("Content-Type: text/html\n\n<html><body>");
+    var index: u32 = 0;
+    while (index < 400) : (index += 1) {
+        try writer.print("<p>Row {d} with <a href=\"https://example.com/x/{d}?a=b\">a link {d}</a> and a long run of words that wraps at some point because it is prose.</p>", .{ index, index, index });
+        if (index % 25 == 0) {
+            try writer.print("<p><img src=\"https://example.com/img/{d}.png\" alt=\"pic {d}\"></p>", .{ index, index });
+        }
+    }
+    try writer.writeAll("</html>");
+
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), writer.buffered());
+
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+    var scroll: u32 = 0;
+    while (scroll < 2000) : (scroll += 37) {
+        rig.session.state.reader_scroll = scroll;
+        rig.session.needs_render = true;
+        _ = rig.session.step();
+    }
+}
+
 test "pictures are off until asked for, and then they arrive off the loop" {
     // A 90x36 PNG, one pixel per byte of IHDR plus a body.
     // IHDR enough for the reader to place it: 90x36.

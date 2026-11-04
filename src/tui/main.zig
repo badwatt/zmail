@@ -12,8 +12,17 @@ const tui = @import("lib.zig");
 pub const panic = std.debug.FullPanic(zmailPanic);
 
 fn zmailPanic(message: []const u8, first_trace_address: ?usize) noreturn {
-    writePanicLog(message, first_trace_address);
+    // stderr becomes the log file, so the message *and* the trace land in it: the
+    // trace is what says which line, and it is the part a raw terminal eats.
+    redirectStderrToLog();
     std.debug.defaultPanic(message, first_trace_address);
+}
+
+fn redirectStderrToLog() void {
+    const fd = std.c.open(panic_log_path(), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c_uint, 0o600));
+    if (fd < 0) return;
+    _ = std.c.dup2(fd, std.c.STDERR_FILENO);
+    _ = std.c.close(fd);
 }
 
 fn writePanicLog(message: []const u8, first_trace_address: ?usize) void {
