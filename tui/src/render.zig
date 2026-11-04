@@ -275,7 +275,7 @@ fn doubled(
 
 /// One breath, in ticks. The splash repaints every 55ms and the loop's spinner
 /// advances by two per frame, so a full cycle is about 1.8 seconds: in, out, in.
-pub const breath_ticks: u16 = 32;
+pub const breath_ticks: u16 = 16;
 
 /// Below this a letter is not drawn at all. The fade is a mix towards the ground,
 /// which is invisible on the ground itself -- but only when the ground is known; a
@@ -1927,7 +1927,9 @@ test "the light moves across the wordmark while its shape stays put" {
     f.state.spinner = 0;
     frame(f.inputs(80, 24), &before);
     var after = Screen.init(80, 24);
-    f.state.spinner = 8;
+    // Three ticks in: past the peak, still on screen -- the far side of the breath
+    // (the trough) is a different test, and there the glyphs are gone on purpose.
+    f.state.spinner = 3;
     frame(f.inputs(80, 24), &after);
 
     var moved = false;
