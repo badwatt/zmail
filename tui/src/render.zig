@@ -434,20 +434,15 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
         }
     }
 
-    // Anchored to the two corners of the last row: a footer, not a caption
-    // floating in the middle of the page.
-    _ = out.put_text(1, footer_row, "cached mail opens instantly", out.columns -| 2, theme.border);
+    // The two corners of the last row: what is happening on the left, the way out on
+    // the right, and the middle kept clear so the row reads as a footer and not as a
+    // sentence with something appended to it.
     put_right(out, out.columns -| 2, footer_row, "Ctrl+C quits", theme.border);
 
-    // The line sits between the two corner texts, drawn last so it wins the row, and
-    // dropped when the row is too narrow to hold all three: three things crammed into
-    // one line say nothing.
     const line_width = screen.text_columns(status.text);
     const right_width = screen.text_columns("Ctrl+C quits");
-    const left_text = "cached mail opens instantly";
-    const after_left: u16 = @as(u16, 2) + left_text.len;
     const before_right: u16 = out.columns -| 2 -| right_width;
-    if (status.left >= after_left and status.left +| line_width <= before_right) {
+    if (status.left +| line_width <= before_right) {
         // One frame of the splash is 55ms, and `tick` moves two per frame.
         _ = draw_shimmer(out, status.left, status.row, status.text, @divTrunc(@as(i64, tick) * 55, 2), theme);
     }
@@ -532,17 +527,15 @@ pub const SplashLine = struct {
 pub fn splash_line(columns: u16, rows: u16, labels: []const u8, buffer: []u8) SplashLine {
     var line: [160]u8 = undefined;
     const full = std.fmt.bufPrint(&line, "connecting to {s}", .{labels}) catch labels;
-    const width = screen.text_columns(full);
+    _ = columns;
     const length = @min(full.len, buffer.len);
     @memcpy(buffer[0..length], full[0..length]);
     return .{
         // The last row: the sentence sits between "cached mail opens instantly" and
         // "Ctrl+C quits", in the middle, which is where the eye already goes.
         .row = rows -| 1,
-        // Rounded up, so an odd gap leaves the space on the left where the corner
-        // text ends rather than on the right where nothing is: one space of air
-        // between the sentence and the words it sits between.
-        .left = (columns -| width +| 1) / 2,
+        // One column in from the edge, like every other row of this app.
+        .left = 1,
         .text = buffer[0..length],
     };
 }
@@ -1991,8 +1984,11 @@ test "the boot splash is a wordmark, the account, and a footer" {
     try row_contains(&out, 17, "alice@example.com");
     var footer_buffer: [512]u8 = undefined;
     const footer = std.mem.trim(u8, out.row_text(23, &footer_buffer), " ");
-    try testing.expect(startsWith(footer, "cached mail opens instantly"));
+    // The footer is the sentence on the left and the way out on the right, with the
+    // middle kept clear.
+    try testing.expect(startsWith(footer, "connecting to work"));
     try testing.expect(std.mem.endsWith(u8, footer, "Ctrl+C quits"));
+    try testing.expect(std.mem.indexOf(u8, footer, "cached mail") == null);
 
     // The list is not drawn behind it.
     var row_buffer: [512]u8 = undefined;
@@ -2059,8 +2055,8 @@ test "a cramped splash drops the address before it reaches the footer" {
     var footer_buffer: [512]u8 = undefined;
     const footer = out.row_text(9, &footer_buffer);
     try testing.expect(std.mem.indexOf(u8, footer, "Ctrl+C quits") != null);
-    // No room for three things on one forty-column row: the line is the one that goes.
-    try testing.expect(std.mem.indexOf(u8, footer, "connecting to") == null);
+    // Two things fit on a forty-column row, and these are the two.
+    try testing.expect(startsWith(std.mem.trim(u8, footer, " "), "connecting to work"));
     try testing.expect(std.mem.indexOf(u8, footer, "alice@example.com") == null);
 }
 
