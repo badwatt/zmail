@@ -1264,3 +1264,110 @@ test "a part with no content type is plain text, not nothing" {
     var scratch: [512]u8 = undefined;
     try testing.expectEqualStrings("hi", part_body("", "hi", &out, &scratch));
 }
+
+/// The HTML part with the pictures it refers to by `cid:` written into it as `data:`
+/// URIs.
+///
+/// A browser opening a file on disk cannot resolve a content id -- that identifier
+/// only exists inside the message -- so a mail whose images came with it shows none
+/// of them. Inlining is what makes the file one file, pictures included.
+///
+/// Anything that cannot be inlined (a picture that is not a PNG, a buffer that is
+/// full) is left as it was: half a page with a broken image beats nothing at all.
+pub fn html_with_images(raw: []const u8, html: []const u8, out: []u8, scratch: []u8) []const u8 {
+    var writer = std.Io.Writer.fixed(out);
+    var index: usize = 0;
+    while (index < html.len) {
+        const rest = html[index..];
+        const found = find_content_id(rest) orelse {
+            writer.writeAll(rest) catch break;
+            break;
+        };
+        // Everything before `src=`, then the tag with an inline picture in it.
+        writer.writeAll(rest[0..found.match_start]) catch break;
+        const id_end = std.mem.indexOfAny(u8, rest[found.value_start..], "\"'") orelse {
+            writer.writeAll(rest[found.match_start..]) catch break;
+            break;
+        };
+        const id = rest[found.value_start..][0..id_end];
+        // A picture that cannot be inlined is left as the id it was, so the page
+        // still reads and only that image is missing.
+        const encoded = encode_inline(raw, id, scratch) orelse {
+            writer.writeAll(rest[found.match_start..][0 .. found.value_start - found.match_start + id_end]) catch break;
+            index += found.value_start + id_end;
+            continue;
+        };
+        writer.print("src={c}data:image/png;base64,{s}", .{ found.quote, encoded }) catch break;
+        index += found.value_start + id_end;
+    }
+    return writer.buffered();
+}
+
+const ContentId = struct {
+    /// Where `src=` starts: everything before it is copied as it is.
+    match_start: usize,
+    /// Where the id itself starts: past the quote and `cid:`.
+    value_start: usize,
+    /// The quote the tag used, kept so the tag still closes.
+    quote: u8,
+};
+
+fn find_content_id(html: []const u8) ?ContentId {
+    var index: usize = 0;
+    while (index + 9 <= html.len) : (index += 1) {
+        const window = html[index..][0..9];
+        if (std.mem.eql(u8, window, "src='cid:")) {
+            return .{ .match_start = index, .value_start = index + 9, .quote = '\'' };
+        }
+        if (std.mem.eql(u8, window, "src=\"cid:")) {
+            return .{ .match_start = index, .value_start = index + 9, .quote = '"' };
+        }
+    }
+    return null;
+}
+
+/// One picture as base64, in the room past the decoded bytes it came from.
+fn encode_inline(raw: []const u8, id: []const u8, scratch: []u8) ?[]const u8 {
+    const png = image_body(raw, id, scratch) orelse return null;
+    const room = scratch.len - png.len;
+    if (room == 0) return null;
+    return std.base64.standard.Encoder.encode(scratch[png.len..], png);
+}
+
+test "html_with_images puts the pictures the message carries inside the page" {
+    const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const raw = "Content-Type: multipart/related; boundary=\"b\"\n" ++
+        "\n" ++
+        "--b\n" ++
+        "Content-Type: text/html\n" ++
+        "\n" ++
+        "<p>x</p>\n" ++
+        "--b\n" ++
+        "Content-Type: image/png\n" ++
+        "Content-Transfer-Encoding: base64\n" ++
+        "Content-ID: <logo@x>\n" ++
+        "\n" ++ png_base64 ++ "\n" ++
+        "--b--\n";
+    const html = "<p><img src=\"cid:logo@x\" alt=\"Logo\"></p>";
+
+    var out: [4096]u8 = undefined;
+    var scratch: [4096]u8 = undefined;
+    const inlined = html_with_images(raw, html, &out, &scratch);
+    try testing.expect(std.mem.indexOf(u8, inlined, "src=\"data:image/png;base64,") != null);
+    // The rest of the tag, and the rest of the page, survive.
+    try testing.expect(std.mem.indexOf(u8, inlined, " alt=\"Logo\">") != null);
+
+    // A picture the message does not carry is left as it was: half a page with a
+    // broken image beats a page that failed to be written.
+    const missing = html_with_images(raw, "<img src=\"cid:nope\">", &out, &scratch);
+    try testing.expectEqualStrings("<img src=\"cid:nope\">", missing);
+
+    // Nothing to inline: the page comes back as it went in.
+    try testing.expectEqualStrings("<p>plain</p>", html_with_images(raw, "<p>plain</p>", &out, &scratch));
+
+    // An unterminated tag is not worth guessing at: the rest is copied as it is.
+    try testing.expectEqualStrings(
+        "<img src=\"cid:unterminated",
+        html_with_images(raw, "<img src=\"cid:unterminated", &out, &scratch),
+    );
+}

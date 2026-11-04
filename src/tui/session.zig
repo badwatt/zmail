@@ -211,6 +211,8 @@ pub const Session = struct {
     raw_len: u32 = 0,
     /// The HTML part, and the reading view made from it.
     html_part: [core.limits.body_max]u8 = undefined,
+    /// The page handed to the browser, with its pictures inlined.
+    external_html: [core.limits.body_max]u8 = undefined,
     /// The HTML with the entities a text browser cannot print taken out.
     html_cleaned: [core.limits.body_max]u8 = undefined,
     html_cleaned_len: u32 = 0,
@@ -844,9 +846,16 @@ pub const Session = struct {
         // they read the mail would be a lie.
         progress_mod.pause();
         if (self.html_part_len > 0) {
-            // The part itself: a browser that is handed our text rendering sees
-            // one collapsed paragraph with no styling at all.
-            open(self.deps.open_external_context, self.html_part[0..self.html_part_len], "");
+            // The part itself, with the pictures it came with written into it: a
+            // browser opening a file cannot resolve `cid:` -- that id only exists
+            // inside the message -- so without this the page opens with holes in it.
+            const page = core.mime.html_with_images(
+                self.raw[0..self.raw_len],
+                self.html_part[0..self.html_part_len],
+                &self.external_html,
+                &self.scratch_bytes,
+            );
+            open(self.deps.open_external_context, page, "");
             self.state.set_status("Opened in the browser", .{});
         } else if (self.text_link_count > 0) {
             var url_buffer: [core.limits.url_max]u8 = undefined;
@@ -5149,14 +5158,54 @@ const OpenSink = struct {
     calls: u8 = 0,
     html_len: usize = 0,
     link_len: usize = 0,
+    /// The page exactly as it was handed over, so a test can look inside it.
+    html: [4096]u8 = undefined,
+    stored: usize = 0,
 
     fn open(context: *anyopaque, html: []const u8, link: []const u8) void {
         const self: *OpenSink = @ptrCast(@alignCast(context));
         self.calls += 1;
         self.html_len = html.len;
         self.link_len = link.len;
+        self.stored = @min(html.len, self.html.len);
+        @memcpy(self.html[0..self.stored], html[0..self.stored]);
     }
 };
+
+test "the page sent to the browser carries the pictures the message came with" {
+    const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const raw = "Content-Type: multipart/related; boundary=\"b\"\n" ++
+        "\n" ++
+        "--b\n" ++
+        "Content-Type: text/html\n" ++
+        "\n" ++
+        "<p>Antes</p><img src=\"cid:logo@x\" alt=\"Logo\">\n" ++
+        "--b\n" ++
+        "Content-Type: image/png\n" ++
+        "Content-Transfer-Encoding: base64\n" ++
+        "Content-ID: <logo@x>\n" ++
+        "\n" ++ png_base64 ++ "\n" ++
+        "--b--\n";
+
+    var rig: Rig = .{};
+    defer rig.deinit();
+    var sink: OpenSink = .{};
+    try rig.start();
+    rig.session.deps.open_external = OpenSink.open;
+    rig.session.deps.open_external_context = &sink;
+
+    rig.session.state.view = .reader;
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
+
+    try testing.expect(rig.session.open_external_message());
+    try testing.expectEqual(@as(u8, 1), sink.calls);
+    // A file on disk cannot resolve a content id; the picture travels inside the page.
+    const page = sink.html[0..sink.stored];
+    try testing.expect(std.mem.indexOf(u8, page, "src=\"data:image/png;base64,") != null);
+    try testing.expect(std.mem.indexOf(u8, page, "cid:logo@x") == null);
+}
 
 test "opening the message elsewhere needs a body, a way, and something to open" {
     const html = "Content-Type: text/html\n\n<p>hello <a href=\"https://x.example\">there</a></p>";
