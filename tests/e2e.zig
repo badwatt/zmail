@@ -91,7 +91,10 @@ const pty = struct {
 /// Allocates a pseudo-terminal pair: the master is ours, the slave is the
 /// child's terminal.
 fn open_pty() !struct { master: c_int, slave: c_int } {
-    const master = pty.posix_openpt(0o2 | 0o400);
+    // O_RDWR | O_NOCTTY | O_NONBLOCK: the master is read after the child is
+    // gone, and with the slave still open in this process there is no end of
+    // file to wait for -- a blocking read there waits forever.
+    const master = pty.posix_openpt(0o2 | 0o400 | 0o4000);
     if (master < 0) return error.SkipZigTest;
     if (pty.grantpt(master) != 0) return error.SkipZigTest;
     if (pty.unlockpt(master) != 0) return error.SkipZigTest;
@@ -108,14 +111,16 @@ fn open_pty() !struct { master: c_int, slave: c_int } {
 /// failure that took the longest to see. The watchdog turns that into a real
 /// answer in seconds, and the signal is loud enough to carry a message.
 const Watchdog = struct {
-    pid: std.posix.pid_t,
+    pid: std.posix.pid_t = 0,
     done: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
 
-    fn arm(pid: std.posix.pid_t) Watchdog {
-        var watchdog = Watchdog{ .pid = pid };
-        watchdog.thread = std.Thread.spawn(.{}, Watchdog.run, .{&watchdog}) catch null;
-        return watchdog;
+    /// The caller owns the struct: the thread is handed a pointer to it, and a
+    /// copy returned from here would leave that pointer dangling -- with a pid
+    /// read from freed stack behind it, which is a way to kill a stranger.
+    fn arm(self: *Watchdog, pid: std.posix.pid_t) void {
+        self.pid = pid;
+        self.thread = std.Thread.spawn(.{}, Watchdog.run, .{self}) catch null;
     }
 
     fn run(self: *Watchdog) void {
@@ -138,7 +143,8 @@ const Watchdog = struct {
 };
 
 fn wait_bounded(io: std.Io, child: *std.process.Child, shown: []const u8) !std.process.Child.Term {
-    var watchdog = Watchdog.arm(child.id orelse return error.TestUnexpectedResult);
+    var watchdog = Watchdog{};
+    watchdog.arm(child.id orelse return error.TestUnexpectedResult);
     defer watchdog.disarm();
     const term = try child.wait(io);
     // What the session was showing when it should have been leaving: a failure

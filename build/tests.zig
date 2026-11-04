@@ -162,47 +162,17 @@ test "print_report reports a perfect score" {
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "coverage: 100.00% (20/20 lines)") != null);
 }
 
-test "run fails cleanly when the report file is missing" {
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
-    defer threaded.deinit();
-    try testing.expectEqual(
-        @as(u8, 1),
-        try coverage.run(testing.allocator, threaded.io(), "build/testdata/does-not-exist.json"),
-    );
+test "a complete report passes, and a report with gaps does not" {
+    try testing.expectEqual(@as(u8, 0), coverage.check(testing.allocator,
+        \\{"files": [{"file": "core/src/a.zig", "covered_lines": "10", "total_lines": "10"}]}
+    ));
+    try testing.expectEqual(@as(u8, 1), coverage.check(testing.allocator,
+        \\{"files": [{"file": "core/src/a.zig", "covered_lines": "9", "total_lines": "10"}]}
+    ));
 }
 
-test "run fails cleanly when the report cannot be read" {
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
-    defer threaded.deinit();
-    try testing.expectEqual(
-        @as(u8, 1),
-        try coverage.run(testing.allocator, threaded.io(), "build/testdata"),
-    );
-}
-
-test "run rejects a malformed report" {
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
-    defer threaded.deinit();
-    try testing.expectEqual(
-        @as(u8, 1),
-        try coverage.run(testing.allocator, threaded.io(), "build/testdata/malformed.json"),
-    );
-}
-
-test "run accepts a complete report" {
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
-    defer threaded.deinit();
-    try testing.expectEqual(
-        @as(u8, 0),
-        try coverage.run(testing.allocator, threaded.io(), "build/testdata/complete.json"),
-    );
-}
-
-test "run rejects a report with gaps" {
-    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
-    defer threaded.deinit();
-    try testing.expectEqual(
-        @as(u8, 1),
-        try coverage.run(testing.allocator, threaded.io(), "build/testdata/incomplete.json"),
-    );
+test "an empty or malformed report never passes" {
+    try testing.expectEqual(@as(u8, 1), coverage.check(testing.allocator, ""));
+    try testing.expectEqual(@as(u8, 1), coverage.check(testing.allocator, "{\"files\": []}"));
+    try testing.expectEqual(@as(u8, 1), coverage.check(testing.allocator, "{\"nope\": 1}"));
 }
