@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const os = @import("os.zig");
 const render = @import("render.zig");
 const screen = @import("screen.zig");
 const system_mod = @import("system.zig");
@@ -39,7 +40,9 @@ pub const Painter = struct {
     right_len: usize = 0,
     theme: theme_mod.Theme = theme_mod.Theme.dark(),
     reduced_motion: bool = false,
-    tick: u16 = 0,
+    /// When the first screen went up. The painter and the loop both measure from
+    /// here, so the mark is at the same point of the breath whoever is drawing it.
+    started_ms: i64 = 0,
 
     /// Starts painting the mark where it already is. Nothing happens when the splash
     /// is not on screen.
@@ -49,7 +52,7 @@ pub const Painter = struct {
         size: system_mod.Size,
         theme: theme_mod.Theme,
         reduced_motion: bool,
-        from_tick: u16,
+        started_ms: i64,
         labels: []const u8,
     ) void {
         if (self.thread != null) return;
@@ -67,7 +70,7 @@ pub const Painter = struct {
         self.right_len = corner.text.len;
         self.theme = theme;
         self.reduced_motion = reduced_motion;
-        self.tick = from_tick;
+        self.started_ms = started_ms;
         self.stop.store(false, .release);
         self.thread = std.Thread.spawn(.{}, Painter.run, .{self}) catch null;
     }
@@ -101,8 +104,8 @@ pub const Painter = struct {
         const placement = self.placement;
         if (placement.height == 0 or placement.width == 0) return;
 
-        const level = if (self.reduced_motion) 1.0 else render.breath_level(self.tick);
-        self.tick +%= 1;
+        const elapsed = os.monotonic_ms() - self.started_ms;
+        const level = if (self.reduced_motion) 1.0 else render.breath_level_at(elapsed);
         if (level < render.hidden_level) return;
 
         // The line first, then the mark: the line sets and resets colours of its own,
@@ -156,8 +159,7 @@ pub const Painter = struct {
 
         // One SGR per stretch of the same level, so a twenty-cell word is a handful
         // of writes rather than forty.
-        var elapsed: i64 = @intCast(self.tick);
-        elapsed *= frame_ms;
+        const elapsed = os.monotonic_ms() - self.started_ms;
         var current: ?u8 = null;
         var cells: u16 = 0;
         var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
@@ -191,8 +193,7 @@ pub const Painter = struct {
         }) catch return;
         self.system.write(at) catch return;
 
-        var elapsed: i64 = @intCast(self.tick);
-        elapsed *= frame_ms;
+        const elapsed = os.monotonic_ms() - self.started_ms;
         var current: ?u8 = null;
         var cells: u16 = 0;
         var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };

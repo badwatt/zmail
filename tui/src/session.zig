@@ -228,6 +228,8 @@ pub const Session = struct {
     /// When the bar went up, and what it is showing: the minimum-visible window is
     /// measured from the first.
     progress_since_ms: i64 = 0,
+    /// When the first screen went up: the splash's one clock.
+    splash_started_ms: i64 = 0,
     /// The first connection, one account per tick so the splash keeps breathing.
     /// `boot_cursor` is how far it got; `booting_now` says it is still going.
     splash_painter: splash_painter_mod.Painter = .{},
@@ -527,6 +529,7 @@ pub const Session = struct {
         if (!self.deps.splash) return;
         self.state.booting = true;
         self.booting_now = true;
+        self.splash_started_ms = os.monotonic_ms();
         self.boot_ticks = 0;
         self.boot_cursor = 0;
         self.sync_progress();
@@ -1871,7 +1874,7 @@ pub const Session = struct {
                 self.size,
                 self.deps.theme,
                 self.deps.reduced_motion,
-                @intCast(self.state.spinner),
+                self.splash_started_ms,
                 render_mod.account_labels(&self.state, &labels),
             );
         }
@@ -1960,6 +1963,7 @@ pub const Session = struct {
             .cover = self.cover_rows[0..self.cover_len],
             .selection = self.selection,
             .reduced_motion = self.deps.reduced_motion,
+            .elapsed_ms = os.monotonic_ms() - self.splash_started_ms,
             .now_unix = self.now_unix,
             .columns = self.size.columns,
             .rows = self.size.rows,

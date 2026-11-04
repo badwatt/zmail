@@ -47,6 +47,10 @@ pub const Inputs = struct {
     cover: []const u8 = &.{},
     /// Set when the user asked for no motion: the splash draws its still frame.
     reduced_motion: bool = false,
+    /// Milliseconds since the first screen went up. The splash's only clock: the loop
+    /// and the painter thread both read it, so the mark cannot jump when one hands
+    /// over to the other.
+    elapsed_ms: i64 = 0,
     now_unix: i64 = 0,
     columns: u16 = 80,
     rows: u16 = 24,
@@ -293,16 +297,25 @@ pub const hidden_level: f32 = 0.02;
 /// How solid the wordmark is at `tick`: one at the peak, zero at the trough. The
 /// whole word breathes together, which is what makes it read as one thing drawing
 /// breath rather than as letters flickering on their own.
-pub fn breath_level(tick: u16) f32 {
+/// How long one breath takes, in milliseconds.
+pub const breath_ms: i64 = @as(i64, breath_ticks) * 90;
+
+/// The breath at a moment in the first screen's life, from zero upwards.
+///
+/// It takes milliseconds, not a frame count: two things paint this mark -- the loop
+/// and the thread that keeps it moving while the connection blocks -- and a frame
+/// counter each of them incremented was two clocks, which showed up as the mark
+/// jumping a quarter of a breath whenever one handed over to the other.
+pub fn breath_level_at(elapsed_ms: i64) f32 {
     // Full on the first frame, then a long, slow breath.
     //
     // A plain triangle this long would move by under two per cent a frame, which is
     // the "it looks frozen" problem again. The travel is eased instead: steep at the
     // ends of the breath and slow through the middle, so the first step after the
     // first frame is already visible and the whole cycle still takes five seconds.
-    const half: u16 = breath_ticks / 2;
-    const phase = tick % breath_ticks;
-    const travelled = if (phase <= half) phase else breath_ticks - phase;
+    const half = breath_ms / 2;
+    const phase = @mod(elapsed_ms, breath_ms);
+    const travelled = if (phase <= half) phase else breath_ms - phase;
     const fraction = @as(f32, @floatFromInt(travelled)) / @as(f32, half);
     return 1.0 - std.math.pow(f32, fraction, breath_ease);
 }
@@ -348,24 +361,24 @@ pub fn breath_style(theme: *const Theme, level: f32) Style {
     }
 }
 
-fn draw_wordmark(out: *Screen, top: u16, tick: u16, theme: *const Theme) void {
+fn draw_wordmark(out: *Screen, top: u16, elapsed_ms: i64, theme: *const Theme) void {
     // The big one where there is room for it: an 80-column terminal gets the
     // masthead at twice the size, a narrow one keeps the small mark rather than
     // a cropped one.
     if (out.columns >= wordmark.large[0].len + 6 and out.rows >= 18) {
-        return draw_grid(out, &wordmark.large, top, tick, theme);
+        return draw_grid(out, &wordmark.large, top, elapsed_ms, theme);
     }
-    draw_grid(out, &wordmark.small, top, tick, theme);
+    draw_grid(out, &wordmark.small, top, elapsed_ms, theme);
 }
 
-fn draw_grid(out: *Screen, grid: anytype, top: u16, tick: u16, theme: *const Theme) void {
+fn draw_grid(out: *Screen, grid: anytype, top: u16, elapsed_ms: i64, theme: *const Theme) void {
     const width: u16 = @intCast(grid[0].len);
     const left = (out.columns -| width) / 2;
 
     for (grid, 0..) |line, index| {
         const row = top +| @as(u16, @intCast(index));
         if (row >= out.rows) return;
-        const level = breath_level(tick);
+        const level = breath_level_at(elapsed_ms);
         if (level < hidden_level) continue;
         for (line, 0..) |cell, column| {
             if (cell == ' ') continue;
@@ -411,14 +424,14 @@ pub fn mark_cell(large: bool, row: u16, column: u16) u21 {
 fn render_splash(inputs: Inputs, out: *Screen) void {
     out.clear();
     const theme = inputs.theme;
-    const tick: u16 = if (inputs.reduced_motion) 0 else @intCast(inputs.state.spinner);
+    const elapsed: i64 = if (inputs.reduced_motion) 0 else inputs.elapsed_ms;
 
     // The mark and the two lines under it are one block: place the block on the
     // middle of the screen, not the mark alone, or the big size drags it up.
     const placement = splash_mark(out.columns, out.rows);
     const mark_rows = placement.height;
     const mark_top = placement.top;
-    draw_wordmark(out, mark_top, tick, theme);
+    draw_wordmark(out, mark_top, elapsed, theme);
 
     // The version, quiet, right under the mark: the one thing a first screen can
     // honestly say about itself, and it comes from the manifest -- the release is
@@ -459,14 +472,14 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     // sentence with something appended to it.
     var right_buffer: [32]u8 = undefined;
     const corner = splash_right(out.columns, out.rows, &right_buffer);
-    _ = draw_shimmer(out, corner.left, corner.row, corner.text, @divTrunc(@as(i64, tick) * 55, 2), theme);
+    _ = draw_shimmer(out, corner.left, corner.row, corner.text, elapsed, theme);
 
     const line_width = screen.text_columns(status.text);
     const right_width = screen.text_columns("Ctrl+C quits");
     const before_right: u16 = out.columns -| 2 -| right_width;
     if (status.left +| line_width <= before_right) {
         // One frame of the splash is 55ms, and `tick` moves two per frame.
-        _ = draw_shimmer(out, status.left, status.row, status.text, @divTrunc(@as(i64, tick) * 55, 2), theme);
+        _ = draw_shimmer(out, status.left, status.row, status.text, elapsed, theme);
     }
 }
 
@@ -1545,13 +1558,17 @@ const Fixture = struct {
     body_len: u32 = 0,
     wrapped: wrap.Wrapped = .{},
     wrapped_ready: bool = false,
+    /// Milliseconds since the splash went up, for the tests that watch it breathe.
+    elapsed_ms: i64 = 0,
 
     fn deinit(self: *Fixture) void {
         self.store.deinit(testing.allocator);
     }
 
     fn inputs(self: *Fixture, columns: u16, rows: u16) Inputs {
+        _ = &self.elapsed_ms;
         return .{
+            .elapsed_ms = self.elapsed_ms,
             .state = &self.state,
             .store = &self.store,
             .theme = &self.theme,
@@ -2044,12 +2061,12 @@ test "the light moves across the wordmark while its shape stays put" {
     f.state.booting = true;
 
     var before = Screen.init(80, 24);
-    f.state.spinner = 0;
+    f.elapsed_ms = 0;
     frame(f.inputs(80, 24), &before);
     var after = Screen.init(80, 24);
     // Three ticks in: past the peak, still on screen -- the far side of the breath
     // (the trough) is a different test, and there the glyphs are gone on purpose.
-    f.state.spinner = 3;
+    f.elapsed_ms = 540;
     frame(f.inputs(80, 24), &after);
 
     var moved = false;
@@ -2161,9 +2178,11 @@ test "the splash breathes without color when color is off" {
         }
     }
 
-    // And the wave is still there: weight carries it when hue cannot.
+    // And the breath is still there: weight carries it when hue cannot.
     var other = Screen.init(80, 24);
-    f.state.spinner = 0;
+    // Far enough into the breath for the two-step monochrome ramp to change: bold at
+    // the top, dim once it is past half.
+    f.elapsed_ms = 1_600;
     frame(f.inputs(80, 24), &other);
     var moved = false;
     for (5..15) |y| {
@@ -2733,9 +2752,9 @@ test "a shimmer with nothing to shine on draws nothing" {
 test "the wordmark breathes: it goes away and comes back" {
     var lowest: f32 = 1;
     var highest: f32 = 0;
-    var tick: u16 = 0;
-    while (tick < breath_ticks) : (tick += 1) {
-        const level = breath_level(tick);
+    var moment: i64 = 0;
+    while (moment < breath_ms) : (moment += 90) {
+        const level = breath_level_at(moment);
         lowest = @min(lowest, level);
         highest = @max(highest, level);
     }
@@ -2750,12 +2769,12 @@ test "at the trough the mark is gone, and at the peak it is whole" {
     f.state.booting = true;
 
     var shown = Screen.init(80, 24);
-    f.state.spinner = 0;
+    f.elapsed_ms = 0;
     frame(f.inputs(80, 24), &shown);
 
     var hidden = Screen.init(80, 24);
     // Half a breath in -- the trough of the cosine: nothing is painted at all.
-    f.state.spinner = breath_ticks / 2;
+    f.elapsed_ms = breath_ms / 2;
     frame(f.inputs(80, 24), &hidden);
 
     var drawn_shown = false;
@@ -2804,7 +2823,7 @@ test "without a derivation the breath is carried by weight and the palette's ste
     var highest: u8 = 0;
     var tick: u16 = 0;
     while (tick < breath_ticks * 2) : (tick += 1) {
-        const index = breath_style(&dark, breath_level(tick)).fg.ansi256;
+        const index = breath_style(&dark, breath_level_at(tick * 90)).fg.ansi256;
         lowest = @min(lowest, index);
         highest = @max(highest, index);
     }
@@ -2814,16 +2833,16 @@ test "without a derivation the breath is carried by weight and the palette's ste
 test "the breath moves from the first tick, at a speed the eye can see" {
     // A cosine would spend its first quarter within two per cent of the peak: a mark
     // that looks frozen. The level has to be a visible step away by the second tick.
-    const first = breath_level(0);
-    const second = breath_level(1);
+    const first = breath_level_at(0);
+    const second = breath_level_at(90);
     try testing.expectEqual(@as(f32, 1.0), first);
     try testing.expect(first - second > 0.05);
     // And the way back is the same movement in reverse: empty at the trough, and up
     // again four ticks later.
-    try testing.expectEqual(@as(f32, 0.0), breath_level(breath_ticks / 2));
+    try testing.expectEqual(@as(f32, 0.0), breath_level_at(breath_ms / 2));
     // And it climbs again on the way back, without a plateau at the bottom.
-    try testing.expect(breath_level(breath_ticks / 2 + 6) > breath_level(breath_ticks / 2 + 2));
-    try testing.expect(breath_level(breath_ticks / 2 + 6) > 0.1);
+    try testing.expect(breath_level_at(breath_ms / 2 + 540) > breath_level_at(breath_ms / 2 + 180));
+    try testing.expect(breath_level_at(breath_ms / 2 + 540) > 0.1);
 }
 
 test "both sizes of the mark answer their own cells" {
