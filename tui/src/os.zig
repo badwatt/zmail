@@ -162,7 +162,13 @@ pub fn env(name: [:0]const u8) ?[]const u8 {
 /// `CLOCK_MONOTONIC` is 1 on Linux; 0 means "unknown".
 pub fn monotonic_ms() i64 {
     var ts: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
-    if (clock_gettime(1, &ts) != 0) return 0;
+    // CLOCK_MONOTONIC is 1 on Linux and 6 on macOS. A hardcoded 1 returns 0 there,
+    // which is a spinner that never moves and a bar that never advances.
+    const monotonic: c_int = switch (builtin.os.tag) {
+        .macos, .ios, .tvos, .watchos, .visionos => 6,
+        else => 1,
+    };
+    if (clock_gettime(monotonic, &ts) != 0) return 0;
     return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
 }
 
@@ -303,7 +309,9 @@ const Pty = struct {
 
     fn resize(self: Pty, columns: u16, rows: u16) void {
         var window: Winsize = .{ .row = rows, .col = columns, .xpixel = 0, .ypixel = 0 };
-        assert(ioctl(self.slave, TIOCSWINSZ, &window) == 0);
+        // On the master: Linux accepts either end, macOS propagates the size from
+        // the side the terminal is attached to.
+        assert(ioctl(self.master, TIOCSWINSZ, &window) == 0);
     }
 
     fn writeMaster(self: Pty, bytes: []const u8) void {

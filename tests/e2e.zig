@@ -142,7 +142,52 @@ const Watchdog = struct {
     }
 };
 
-fn wait_bounded(io: std.Io, child: *std.process.Child, shown: []const u8) !std.process.Child.Term {
+/// Reads the pseudo-terminal until told to stop.
+///
+/// A pty holds one buffer: if nobody drains it, the child blocks inside a write --
+/// including inside the handler that is trying to give the terminal back -- and
+/// never reaches its exit. A real terminal always drains, so the test does too.
+const Drainer = struct {
+    master: std.posix.fd_t,
+    running: *std.atomic.Value(bool),
+    /// What was read, so the test can still look at it afterwards.
+    sink: []u8,
+    filled: *usize,
+
+    fn run(self: Drainer) void {
+        var buffer: [4096]u8 = undefined;
+        while (self.running.load(.acquire)) {
+            const count = std.posix.read(self.master, &buffer) catch 0;
+            if (count > 0 and self.filled.* < self.sink.len) {
+                const room = self.sink.len - self.filled.*;
+                const take = @min(room, count);
+                @memcpy(self.sink[self.filled.*..][0..take], buffer[0..take]);
+                self.filled.* += take;
+            }
+            sleep_ms(10);
+        }
+    }
+};
+
+fn wait_bounded(
+    io: std.Io,
+    child: *std.process.Child,
+    master: std.posix.fd_t,
+    sink: []u8,
+    filled: *usize,
+) !std.process.Child.Term {
+    var running = std.atomic.Value(bool).init(true);
+    const drainer = std.Thread.spawn(.{}, Drainer.run, .{Drainer{
+        .master = master,
+        .running = &running,
+        .sink = sink,
+        .filled = filled,
+    }}) catch null;
+    defer {
+        running.store(false, .release);
+        if (drainer) |thread| thread.join();
+    }
+
     var watchdog = Watchdog{};
     watchdog.arm(child.id orelse return error.TestUnexpectedResult);
     defer watchdog.disarm();
@@ -153,7 +198,7 @@ fn wait_bounded(io: std.Io, child: *std.process.Child, shown: []const u8) !std.p
         .exited => |code| if (code == 130) return term,
         else => {},
     }
-    std.debug.print("child ended {any}, screen was:\n{s}\n", .{ term, shown });
+    std.debug.print("child ended {any}, screen was:\n{s}\n{s}\n", .{ term, sink[0..filled.*], "" });
     return term;
 }
 
@@ -201,10 +246,17 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
     // Ctrl+C is a signal, not a key: it reaches the process even while a socket
     // is being read, restores the terminal, and leaves with 130.
     try std.posix.kill(child.id.?, std.posix.SIG.INT);
+    var drain_buffer: [64 * 1024]u8 = undefined;
+    var drained: usize = 0;
     try testing.expectEqual(
         std.process.Child.Term{ .exited = 130 },
-        try wait_bounded(io, &child, frame[0..total]),
+        try wait_bounded(io, &child, terminal.master, &drain_buffer, &drained),
     );
+    // The rest of the session, as the terminal saw it.
+    var row_buffer: []const u8 = drain_buffer[0..drained];
+    try testing.expect(std.mem.indexOf(u8, row_buffer, "\x1b[?1049l") != null or
+        std.mem.indexOf(u8, frame[0..total], "\x1b[?1049l") != null);
+    _ = &row_buffer;
 }
 
 test "a live session with a dead server still quits cleanly" {
@@ -264,19 +316,14 @@ test "a live session with a dead server still quits cleanly" {
 
     // A dead server is reported, and Ctrl+C still gets out of it.
     try std.posix.kill(child.id.?, std.posix.SIG.INT);
+    var drain_buffer: [64 * 1024]u8 = undefined;
+    var drained: usize = 0;
     try testing.expectEqual(
         std.process.Child.Term{ .exited = 130 },
-        try wait_bounded(io, &child, frame[0..total]),
+        try wait_bounded(io, &child, terminal.master, &drain_buffer, &drained),
     );
 
-    var rest: [4096]u8 = undefined;
-    var seen: usize = 0;
-    while (seen < rest.len) {
-        const count = std.posix.read(terminal.master, rest[seen..]) catch 0;
-        if (count == 0) break;
-        seen += count;
-    }
-    const all = std.mem.concat(testing.allocator, u8, &.{ frame[0..total], rest[0..seen] }) catch return;
+    const all = std.mem.concat(testing.allocator, u8, &.{ frame[0..total], drain_buffer[0..drained] }) catch return;
     defer testing.allocator.free(all);
     try testing.expect(std.mem.indexOf(u8, all, "\x1b[?1049l") != null);
 }
