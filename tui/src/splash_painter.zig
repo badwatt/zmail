@@ -95,15 +95,18 @@ pub const Painter = struct {
         self.tick +%= 1;
         if (level < render.hidden_level) return;
 
-        // The colour first, then the rows: the style stays set across the moves, so
-        // one sequence per frame is enough.
+        // The line first, then the mark: the line sets and resets colours of its own,
+        // and the mark's colour has to be the last thing said before its glyphs --
+        // otherwise the wordmark is written in the terminal's default and the breath
+        // is a shape that never changes.
+        self.paint_line();
+
         var sequence: [64]u8 = undefined;
         var writer = std.Io.Writer.fixed(&sequence);
         write_sgr(&writer, self.theme, level) catch return;
         self.system.write(writer.buffered()) catch return;
 
         // Simple and idempotent: every row, its address, its glyphs.
-        self.paint_line();
         var row: u16 = 0;
         while (row < placement.height) : (row += 1) {
             var row_text: [128]u8 = undefined;
