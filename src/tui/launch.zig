@@ -268,6 +268,15 @@ fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 
 }
 
 /// One image of the message, painted where the layout left its marker.
+///
+/// Two ways to draw it, and the plain one goes first. Half blocks are text: every
+/// terminal shows them, and they are what remains on screen if the terminal accepts
+/// the graphics sequences and then paints nothing -- which is a thing terminals do,
+/// silently, because the protocol lets a program ask for no answers.
+///
+/// The picture is then offered to the terminal's own protocol, which draws over the
+/// blocks at full resolution where it works. Best case the blocks are hidden; worst
+/// case they are the picture.
 fn drawImageThunk(
     context: *anyopaque,
     png_bytes: []const u8,
@@ -279,22 +288,25 @@ fn drawImageThunk(
 ) bool {
     const self = browser_of(context);
 
-    // Full resolution when the terminal speaks the protocol: it scales the
-    // picture itself with a real resampler, which is why it does not look
-    // blocky. Half blocks are what every other terminal gets.
-    if (graphics.supported()) {
-        if (graphics.transmit(self.system, png_bytes, id)) {
-            if (graphics.place(self.system, id, x, y, columns, rows)) return true;
+    var drawn = false;
+    const work = self.gpa.alloc(u8, png_bytes.len + core.limits.body_max * 2) catch null;
+    if (work) |block_work| {
+        defer self.gpa.free(block_work);
+        const rgba = self.gpa.alloc(u8, core.limits.body_max) catch null;
+        if (rgba) |pixels| {
+            defer self.gpa.free(pixels);
+            if (core.png.decode(png_bytes, block_work, pixels)) |image| {
+                drawn = halfblocks.draw(self.system, image, x, y, columns, rows);
+            } else |_| {}
         }
     }
 
-    const work = self.gpa.alloc(u8, png_bytes.len + core.limits.body_max * 2) catch return false;
-    defer self.gpa.free(work);
-    const rgba = self.gpa.alloc(u8, core.limits.body_max) catch return false;
-    defer self.gpa.free(rgba);
-
-    const image = core.png.decode(png_bytes, work, rgba) catch return false;
-    return halfblocks.draw(self.system, image, x, y, columns, rows);
+    if (graphics.supported()) {
+        if (graphics.transmit(self.system, png_bytes, id)) {
+            if (graphics.place(self.system, id, x, y, columns, rows)) drawn = true;
+        }
+    }
+    return drawn;
 }
 
 fn clearImagesThunk(context: *anyopaque) void {
