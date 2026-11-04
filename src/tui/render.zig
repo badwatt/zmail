@@ -624,43 +624,18 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
         const start = @max(link.start, line_start);
         const end = @min(link.end, line_end);
         if (start > cursor) {
-            draw_segment_kind(inputs, out, line, cursor - line_start, start - line_start, y, width, .text, false);
+            draw_segment_kind(inputs, out, line, cursor - line_start, start - line_start, y, width, .text);
             cursor = start;
         }
         if (end > cursor) {
-            // One mark per link, on the line the link starts: a link that wraps must not
-            // sprout an arrow on every line it crosses.
-            const starts_here = link.start >= line_start;
-            if (starts_here) {
-                const at = screen.text_columns(line[0 .. start - line_start]) + mark_shift(inputs, line_start, line_end, start);
-                _ = out.put_text(1 + at, y, link_mark, width -| at, inputs.theme.accent.with_bold());
-            }
-            draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, .link, starts_here);
+            draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, .link);
             cursor = end;
         }
     }
     if (cursor < line_end) {
-        draw_segment_kind(inputs, out, line, cursor - line_start, line.len, y, width, .text, false);
+        draw_segment_kind(inputs, out, line, cursor - line_start, line.len, y, width, .text);
     }
     draw_hover(inputs, out, line, y, width);
-}
-
-/// What marks a link: a chain, the one glyph everyone reads as "this goes somewhere".
-/// It is two cells wide, which the frame and the pointer both have to know.
-pub const link_mark = "\u{1F517}";
-
-/// How many columns the link marks before `before` take on this line. The frame draws
-/// by adding it, and the pointer reads back by subtracting it.
-pub fn mark_shift(inputs: Inputs, line_start: usize, line_end: usize, before: usize) u16 {
-    var shift: u16 = 0;
-    const width: u16 = @intCast(screen.text_columns(link_mark));
-    for (inputs.links) |link| {
-        if (link.end <= line_start or link.start >= line_end) continue;
-        // Only the line a link starts on carries its mark.
-        if (link.start < line_start) continue;
-        if (link.start < before) shift += width;
-    }
-    return shift;
 }
 
 /// How a line of the HTML rendering is drawn. A terminal has no fonts, so the
@@ -708,8 +683,7 @@ fn draw_hover(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16
     const start = @max(hovered.start, line_start) - line_start;
     const end = @min(hovered.end, line_end) - line_start;
     if (end <= start) return;
-    const marked = hovered.start >= line_start;
-    draw_segment_kind(inputs, out, line, start, end, y, width, .hovered, marked);
+    draw_segment_kind(inputs, out, line, start, end, y, width, .hovered);
 }
 
 fn draw_segment_kind(
@@ -721,17 +695,10 @@ fn draw_segment_kind(
     y: u16,
     width: u16,
     kind: Segment,
-    /// Whether this segment's own mark is in front of it.
-    marked: bool,
 ) void {
     if (end <= start) return;
-    // Columns are counted from the line, which starts after the gutter, plus the marks
-    // drawn before this segment on the same line.
-    const line_start = @intFromPtr(line.ptr) - @intFromPtr(inputs.body.ptr);
-    const line_end = line_start + line.len;
-    var offset = screen.text_columns(line[0..start]);
-    offset += mark_shift(inputs, line_start, line_end, line_start + start);
-    if (marked) offset += screen.text_columns(link_mark);
+    // Columns are counted from the line, which starts after the gutter.
+    const offset = screen.text_columns(line[0..start]);
     const segment = line[@min(start, line.len)..@min(end, line.len)];
     _ = out.put_text(1 + offset, y, segment, width -| offset, segment_style(inputs, kind));
 }
@@ -1917,8 +1884,7 @@ test "size_text covers bytes, kibibytes, and mebibytes" {
 test "a link that wraps is drawn without gaps or doubled spaces" {
     const body = "https://unsubscribe.example.com/?token=abcdefghijklmnopqrstuvwxyz0123456789";
     var wrapped: wrap.Wrapped = .{};
-    // Eighteen wide, drawn in twenty: the link's mark takes the other two.
-    wrap.wrap(body, 18, &wrapped);
+    wrap.wrap(body, 20, &wrapped);
     try testing.expect(wrapped.len > 2);
 
     var buffer: [core.links.max_links]core.links.Link = undefined;
@@ -1946,9 +1912,8 @@ test "a link that wraps is drawn without gaps or doubled spaces" {
     // wrapped line: no gaps, no doubled spaces. The link's mark sits before it, once.
     var text_buffer: [64]u8 = undefined;
     const first = std.mem.trimEnd(u8, canvas.row_text(0, &text_buffer), " ");
-    // The row starts with the gutter, the mark, and then the line itself.
-    try testing.expect(std.mem.indexOf(u8, first, link_mark) != null);
-    try testing.expect(std.mem.endsWith(u8, std.mem.trimStart(u8, first, " "), wrapped.at(0, body)));
+    // The row starts with the gutter and then the line itself, byte for byte.
+    try testing.expectEqualStrings(wrapped.at(0, body), std.mem.trimStart(u8, first, " "));
     var second: [64]u8 = undefined;
     const next = std.mem.trimEnd(u8, canvas.row_text(1, &second), " ");
     try testing.expectEqualStrings(wrapped.at(1, body), std.mem.trimStart(u8, next, " "));

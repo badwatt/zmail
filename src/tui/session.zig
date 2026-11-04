@@ -1075,19 +1075,8 @@ pub const Session = struct {
         // Each link starts with a mark of its own, and the frame moved everything after
         // it one column right. Walk back the same way, and a click on the mark itself
         // is a click on the link.
-        const mark: u32 = screen_mod.text_columns(render_mod.link_mark);
-        var shift: u32 = 0;
-        for (self.reader_links()) |link| {
-            if (link.end <= line_start or link.start >= line_start + line.len) continue;
-            if (link.start < line_start) continue;
-            const starts_at = (link.start - line_start) + shift;
-            // Either cell of the mark is the link.
-            if (column >= starts_at and column < starts_at + mark) return link.start;
-            if (column < starts_at) break;
-            shift += mark;
-        }
-        if (column < shift or column - shift >= line.len) return null;
-        return line_start + (column - shift);
+        if (column >= line.len) return null;
+        return line_start + column;
     }
 
     /// Ctrl held and the pointer over a link: it lights up, so the click is not
@@ -1114,6 +1103,9 @@ pub const Session = struct {
         if (found == null and self.hovered == null) return false;
         if (found != null and self.hovered != null and found.?.start == self.hovered.?.start) return false;
         self.hovered = found;
+        // A pointer over a link, the way every other program says "this goes somewhere".
+        // The terminal is told, and the ones that do not know the sequence say nothing.
+        self.deps.system.write(core.osc.Pointer.sequence(if (found != null) .pointer else .default)) catch {};
         if (target == null) self.hover_url.clear();
         self.repaint();
         return true;
@@ -1632,6 +1624,9 @@ pub const Session = struct {
         // is another picture, and keeping the slot hands back the previous bytes.
         self.image_slot_count = 0;
         self.image_painted = 0;
+        if (self.hovered != null) {
+            self.deps.system.write(core.osc.Pointer.default.sequence()) catch {};
+        }
         self.hovered = null;
         self.hover_url.clear();
 
@@ -5502,6 +5497,28 @@ test "the ground a picture is drawn over is the terminal's own background" {
     try testing.expectEqual(@as(u32, 0x000000), Session.ground_colour(&theme));
 }
 
+test "the pointer becomes a chain over a link and an arrow when it leaves" {
+    var rig: Rig = .{};
+    defer rig.deinit();
+    var sink: LinkSink = .{};
+    try rig.start_with_links(&sink);
+    try rig.open_reader("go to https://example.com/a now");
+    rig.session.render();
+    rig.fake_system.output_len = 0;
+
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    const row = lay.reader_body_y;
+    // Ctrl over the address: the terminal is told to show the chain. No button held:
+    // a motion with the left button down is a selection, not a hover.
+    _ = rig.session.handle_mouse(.{ .x = 1 + 6, .y = row, .kind = .motion, .button = .none, .ctrl = true });
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "]22;pointer") != null);
+
+    // Away from it: back to the arrow.
+    rig.fake_system.output_len = 0;
+    _ = rig.session.handle_mouse(.{ .x = 1, .y = row, .kind = .motion, .button = .none, .ctrl = true });
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "]22;default") != null);
+}
+
 test "pictures are off until asked for, and then they arrive off the loop" {
     // A 90x36 PNG, one pixel per byte of IHDR plus a body.
     // IHDR enough for the reader to place it: 90x36.
@@ -6125,29 +6142,4 @@ test "the picture worker and the body worker never run at once" {
     try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
     rig.session.poll_images();
     try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
-}
-
-test "clicking a link works with the mark in front of it" {
-    var rig: Rig = .{};
-    defer rig.deinit();
-    var sink: LinkSink = .{};
-    try rig.start_with_links(&sink);
-    try rig.open_reader("go to https://example.com/a now");
-
-    const lay = layout_mod.Layout.compute(100, 24, 0);
-    const row = lay.reader_body_y;
-    const line = rig.session.wrapped.at(rig.session.state.reader_scroll, rig.session.gapped_text());
-    const start: u16 = @intCast(std.mem.indexOf(u8, line, "https://").?);
-
-    // Column of the link's first letter on screen: one gutter cell, the text before
-    // it, and the mark (two cells, it is an emoji).
-    const mark: u16 = @intCast(screen_mod.text_columns(render_mod.link_mark));
-    const x = 1 + start + mark;
-    const offset = rig.session.cell_offset(lay, .{ .x = x, .y = row, .kind = .press, .button = .left }) orelse
-        unreachable;
-    try testing.expect(offset == @as(u32, @intCast(std.mem.indexOf(u8, rig.session.gapped_text(), "https://").?)));
-
-    // And the mark itself opens the link too.
-    const on_mark = rig.session.cell_offset(lay, .{ .x = 1 + start, .y = row, .kind = .press, .button = .left }).?;
-    try testing.expectEqual(offset, on_mark);
 }

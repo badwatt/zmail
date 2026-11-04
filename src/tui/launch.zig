@@ -217,6 +217,9 @@ fn run_session(
     defer session.deinit();
 
     session.loop();
+    // The terminal belongs to the shell again: the pointer shape and the bar are ours to
+    // put back, and a chain left behind is a chain in every later command.
+    system.write(core.osc.Pointer.default.sequence()) catch {};
     return null;
 }
 

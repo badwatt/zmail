@@ -100,3 +100,24 @@ test "osc: anything that is not a whole reply is refused" {
 test "osc: the query is the standard one" {
     try testing.expectEqualStrings("\x1b]11;?\x1b\\", background_query());
 }
+
+/// The mouse pointer's shape, `OSC 22`. Not every terminal knows it and the ones that do
+/// not say nothing, so this is a hint and never a promise: a chain under the pointer is
+/// what a pointer over a link does everywhere else.
+pub const Pointer = enum {
+    default,
+    /// Over something that goes somewhere.
+    pointer,
+
+    pub fn sequence(self: Pointer) []const u8 {
+        return switch (self) {
+            .default => "\x1b]22;default\x1b\\",
+            .pointer => "\x1b]22;pointer\x1b\\",
+        };
+    }
+};
+
+test "the pointer has two shapes, and each is one escape" {
+    try testing.expectEqualStrings("\x1b]22;pointer\x1b\\", Pointer.pointer.sequence());
+    try testing.expectEqualStrings("\x1b]22;default\x1b\\", Pointer.default.sequence());
+}

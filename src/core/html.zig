@@ -315,8 +315,16 @@ const State = struct {
         self.anchor = null;
         if (target.len == 0) return;
 
-        const text_start = self.anchor_text_start;
-        if (self.written() <= text_start) return;
+        // The words are the link, and a space between them and the sentence before is not:
+        // the writer emits a pending space when the next word starts, so the anchor's
+        // span begins with a cell of gap that would be underlined as if it were a letter.
+        const text = self.writer.buffered();
+        var start = self.anchor_text_start;
+        var end = text.len;
+        while (start < end and (text[start] == ' ' or text[start] == '\t' or text[start] == '\n')) start += 1;
+        while (end > start and (text[end - 1] == ' ' or text[end - 1] == '\t' or text[end - 1] == '\n')) end -= 1;
+        const text_start = start;
+        if (end <= start) return;
 
         // The words are the link. The address is not written into the text: it
         // would sit after every "read more", and the reader shows it on demand
@@ -324,13 +332,13 @@ const State = struct {
         if (self.link_count < self.link_buffer.len) {
             self.link_buffer[self.link_count] = .{
                 .start = @intCast(text_start),
-                .end = @intCast(self.written()),
+                .end = @intCast(end),
             };
             self.link_count += 1;
         }
         if (self.anchor_count < self.anchor_buffer.len) {
             self.anchor_buffer[self.anchor_count] = .{
-                .span = .{ .start = @intCast(text_start), .end = @intCast(self.written()) },
+                .span = .{ .start = @intCast(text_start), .end = @intCast(end) },
                 .target = target,
             };
             self.anchor_count += 1;
@@ -991,4 +999,28 @@ test "a text part made from HTML loses its spacing entities" {
     // Only spacing and invisible marks go: the words stay exactly as written.
     try testing.expectEqualStrings("a & b", clean_spacing("a & b", &out));
     try testing.expectEqualStrings("AT&T", clean_spacing("AT&T", &out));
+}
+
+test "an anchor's span does not include the space before it" {
+    var out: [256]u8 = undefined;
+    var link_buffer: [4]links.Link = undefined;
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    // The pending space between the sentence and the anchor is emitted when the anchor's
+    // first word starts, so it lands inside the span: underlined as if it were a letter.
+    const rendered = render(
+        "<p>Need help! <a href=\"https://example.com/support\">Contact our team</a></p>",
+        &out,
+        &link_buffer,
+        &.{},
+        &anchor_buffer,
+    );
+    const anchor = rendered.anchors[0];
+    try testing.expectEqualStrings(
+        "Contact our team",
+        rendered.text[anchor.span.start..anchor.span.end],
+    );
+    try testing.expectEqualStrings(
+        "Contact our team",
+        rendered.text[rendered.links[0].start..rendered.links[0].end],
+    );
 }
