@@ -165,6 +165,56 @@ pub fn fetch_body(buffer: []u8, tag: []const u8, uid: u32, limit: u32) Error![]c
     return render.finish();
 }
 
+/// The shape of the message: which parts exist, of what type, and which of them
+/// are attachments.
+pub fn fetch_structure(buffer: []u8, tag: []const u8, uid: u32) Error![]const u8 {
+    if (uid == 0) return error.InvalidNumber;
+
+    var render = Render.begin(buffer, tag, "UID FETCH ");
+    render.number(uid);
+    render.text(" (BODYSTRUCTURE)");
+    return render.finish();
+}
+
+/// Two sections in one round trip: the part's own MIME headers, and the part's
+/// content up to `limit`. The headers say how the content is encoded and which
+/// charset it is in, which is exactly what is needed to read it -- fetching the
+/// whole message to get them is what put a PDF in the buffer in the first place.
+pub fn fetch_part(buffer: []u8, tag: []const u8, uid: u32, section: []const u8, limit: u32) Error![]const u8 {
+    if (uid == 0) return error.InvalidNumber;
+    if (limit == 0) return error.InvalidNumber;
+    if (!is_section(section)) return error.InvalidNumber;
+
+    var render = Render.begin(buffer, tag, "UID FETCH ");
+    render.number(uid);
+    render.text(" (BODY.PEEK[");
+    render.text(section);
+    render.text(".MIME] BODY.PEEK[");
+    render.text(section);
+    render.text("]<0.");
+    render.number(limit);
+    render.text(">)");
+    return render.finish();
+}
+
+/// A section is digits and dots: `1`, `2.1`. Anything else would be a way to
+/// close the bracket and write the rest of the command.
+fn is_section(section: []const u8) bool {
+    if (section.len == 0 or section.len > 12) return false;
+    if (section[0] == '.' or section[section.len - 1] == '.') return false;
+    var last_was_dot = false;
+    for (section) |byte| {
+        if (byte == '.') {
+            if (last_was_dot) return false;
+            last_was_dot = true;
+            continue;
+        }
+        if (byte < '0' or byte > '9') return false;
+        last_was_dot = false;
+    }
+    return true;
+}
+
 /// Replaces the server's flag set with ours, so local and remote agree.
 pub fn store_flags(buffer: []u8, tag: []const u8, uid: u32, flags: Flags) Error![]const u8 {
     if (uid == 0) return error.InvalidNumber;
@@ -283,6 +333,28 @@ test "fetch_envelopes rejects impossible ranges" {
 test "fetch_body uses UID and peeks so it does not mark the message read" {
     var buffer: [128]u8 = undefined;
     try expect_command("a4 UID FETCH 42 (BODY.PEEK[]<0.4096>)\r\n", fetch_body(&buffer, "a4", 42, 4096));
+}
+
+test "the structure fetch asks for the shape, nothing else" {
+    var buffer: [128]u8 = undefined;
+    try expect_command("a5 UID FETCH 9 (BODYSTRUCTURE)\r\n", fetch_structure(&buffer, "a5", 9));
+    try testing.expectError(error.InvalidNumber, fetch_structure(&buffer, "a5", 0));
+}
+
+test "the part fetch asks for the headers and the content in one command" {
+    var buffer: [256]u8 = undefined;
+    try expect_command(
+        "a6 UID FETCH 9 (BODY.PEEK[1.2.MIME] BODY.PEEK[1.2]<0.65536>)\r\n",
+        fetch_part(&buffer, "a6", 9, "1.2", 65536),
+    );
+}
+
+test "a section that is not digits and dots is refused" {
+    var buffer: [256]u8 = undefined;
+    for ([_][]const u8{ "", ".", "1.", ".1", "1..2", "1]NIL", "1 2", "1\r\n", "1.2.3.4.5.6.7" }) |section| {
+        try testing.expectError(error.InvalidNumber, fetch_part(&buffer, "a6", 9, section, 4096));
+    }
+    try testing.expectError(error.InvalidNumber, fetch_part(&buffer, "a6", 9, "1", 0));
 }
 
 test "fetch_body rejects uid zero" {

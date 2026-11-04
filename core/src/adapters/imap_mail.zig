@@ -15,6 +15,7 @@ const port = @import("../ports/mail.zig");
 const response_mod = @import("../protocol/imap/response.zig");
 const Text = @import("../domain/text.zig").Text;
 const mime = @import("../mime.zig");
+const bodystructure = @import("../protocol/imap/bodystructure.zig");
 const limits = @import("../limits.zig");
 
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
@@ -157,8 +158,26 @@ pub const ImapMail = struct {
         // UIDs are per mailbox, and after a cached start no mailbox may be
         // selected yet: select before fetching, always.
         if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
-        const raw = self.client.fetch_body(try uid_of(id), &self.raw) catch |err| return mapError(err);
+        const uid = try uid_of(id);
+
+        // The words only. A message with a certificate as a PDF is a megabyte of
+        // base64, and none of it is text: the shape says which part to read, and
+        // asking for that part is one round trip for two sections.
+        if (self.text_part(uid, out)) |text| return text else |_| {}
+
+        const raw = self.client.fetch_body(uid, &self.raw) catch |err| return mapError(err);
         return mime.text_body(raw, out, &self.scratch);
+    }
+
+    /// The part of the message that holds the words, or an error when the shape
+    /// is not understood: the caller then reads the whole message instead, which
+    /// is what every server understands.
+    fn text_part(self: *ImapMail, uid: u32, out: []u8) ![]const u8 {
+        var structure = bodystructure.Structure{};
+        try self.client.fetch_structure(uid, &structure);
+        const section = structure.reading_part() orelse return error.NoTextPart;
+        const part = try self.client.fetch_part(uid, section, &self.raw);
+        return mime.part_body(part.mime, part.body, out, &self.scratch);
     }
 
     fn fetchRawThunk(
@@ -326,12 +345,14 @@ test "switching mailbox selects again" {
 }
 
 test "body, flags, and move reach the right commands" {
-    const message = "Content-Type: text/plain; charset=utf-8\r\n\r\nhi";
+    // The body is read through the shape: which part holds the words, then that
+    // part's headers and content in one command.
     var scripted: Scripted = .{ .input = login_ok ++
         "* 1 EXISTS\r\na2 OK selected\r\n" ++
-        "* 1 FETCH (BODY[] {45}\r\n" ++ message ++ ")\r\na3 OK\r\n" ++
-        "a4 OK\r\n" ++
-        "a5 OK\r\n" };
+        "* 1 FETCH (UID 7 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 2 1 NIL NIL NIL NIL))\r\na3 OK\r\n" ++
+        "* 1 FETCH (BODY[1.MIME] \"Content-Type: text/plain; charset=utf-8\" BODY[1] {2}\r\nhi)\r\na4 OK\r\n" ++
+        "a5 OK\r\n" ++
+        "a6 OK\r\n" };
     var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
     const mail = imap.mail();
@@ -342,9 +363,28 @@ test "body, flags, and move reach the right commands" {
     try mail.move_message(MessageId.from_int(7), .trash);
 
     const output = scripted.output_text();
-    try testing.expect(std.mem.indexOf(u8, output, "UID FETCH 7") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "UID FETCH 7 (BODYSTRUCTURE)") != null);
+    try testing.expect(std.mem.indexOf(u8, output, "BODY.PEEK[1.MIME] BODY.PEEK[1]<0.") != null);
     try testing.expect(std.mem.indexOf(u8, output, "UID STORE 7 FLAGS.SILENT (\\Seen)") != null);
     try testing.expect(std.mem.indexOf(u8, output, "UID MOVE 7 \"Trash\"") != null);
+}
+
+test "a message whose shape is not understood is read whole, not refused" {
+    const message = "Content-Type: text/plain; charset=utf-8\r\n\r\nhi";
+    var scripted: Scripted = .{
+        .input = login_ok ++
+            "* 1 EXISTS\r\na2 OK selected\r\n" ++
+            // A server that answers the shape with something unreadable.
+            "a3 BAD no\r\n" ++
+            "* 1 FETCH (BODY[]<0> {45}\r\n" ++ message ++ ")\r\na4 OK\r\n",
+    };
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var body: [64]u8 = undefined;
+    try testing.expectEqualStrings("hi", try imap.mail().fetch_body(.inbox, MessageId.from_int(7), &body));
+    const output = scripted.output_text();
+    try testing.expect(std.mem.indexOf(u8, output, "BODY.PEEK[]<0.") != null);
 }
 
 test "delete flags the message and expunges it, falling back without UIDPLUS" {

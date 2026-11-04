@@ -297,6 +297,20 @@ test "a body that claims a thousand parts is refused, not followed" {
     try testing.expectError(error.TooManyParts, parse_test(text.written(), &buffer));
 }
 
+test "a multipart with more than nine children numbers them in two digits" {
+    var text: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer text.deinit();
+    try text.writer.writeAll("(");
+    for (0..11) |_| try text.writer.writeAll("(\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 1 1 NIL NIL NIL NIL)");
+    try text.writer.writeAll(" \"MIXED\" NIL NIL NIL)");
+
+    var buffer: [1024]u8 = undefined;
+    const structure = try parse_test(text.written(), &buffer);
+    try testing.expectEqual(@as(u8, 11), structure.count);
+    try testing.expectEqualStrings("1", structure.reading_part().?);
+    try testing.expectEqualStrings("11", structure.parts[10].section());
+}
+
 test "a nested message with no text at all falls back to the whole message" {
     var buffer: [1024]u8 = undefined;
     const structure = try parse_test(

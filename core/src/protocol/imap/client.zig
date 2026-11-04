@@ -12,6 +12,7 @@ const assert = std.debug.assert;
 
 const framing = @import("framing.zig");
 const command = @import("command.zig");
+const bodystructure = @import("bodystructure.zig");
 const response = @import("response.zig");
 const transport_mod = @import("../../ports/transport.zig");
 
@@ -218,6 +219,70 @@ pub const Client = struct {
         }
         if (!saw_body) return error.NotFound;
         return out[0..copied];
+    }
+
+    /// The shape of the message. The parser is handed the bytes the server sent,
+    /// unread, because the shape is a parse of its own.
+    pub fn fetch_structure(self: *Client, uid: u32, out: *bodystructure.Structure) Error!void {
+        var tag_buffer: [16]u8 = undefined;
+        const tag = self.beginCommand(&tag_buffer);
+        const bytes = command.fetch_structure(self.command_slice(), tag, uid) catch
+            return error.ProtocolError;
+        try self.send(bytes);
+
+        var found = false;
+        while (true) {
+            const maybe = try self.pump(tag);
+            const untagged = maybe orelse break;
+            switch (untagged) {
+                .fetch => |fetch| {
+                    const structure = fetch.structure orelse continue;
+                    bodystructure.parse(structure, out) catch return error.ProtocolError;
+                    found = true;
+                },
+                else => {},
+            }
+        }
+        if (!found) return error.NotFound;
+    }
+
+    pub const Part = struct {
+        /// The part's MIME headers, borrowed from the response buffer: valid
+        /// until the next command.
+        mime: []const u8,
+        /// The part's content, copied into the caller's buffer.
+        body: []const u8,
+    };
+
+    /// One part of the message, headers and content, in one round trip. The
+    /// content is copied out of the response before the framer moves on.
+    pub fn fetch_part(self: *Client, uid: u32, section: []const u8, out: []u8) Error!Part {
+        var tag_buffer: [16]u8 = undefined;
+        const tag = self.beginCommand(&tag_buffer);
+        const limit = std.math.cast(u32, out.len) orelse std.math.maxInt(u32);
+        const bytes = command.fetch_part(self.command_slice(), tag, uid, section, limit) catch
+            return error.ProtocolError;
+        try self.send(bytes);
+
+        var part = Part{ .mime = "", .body = "" };
+        var saw_body = false;
+        while (true) {
+            const maybe = try self.pump(tag);
+            const untagged = maybe orelse break;
+            switch (untagged) {
+                .fetch => |fetch| {
+                    if (fetch.mime) |headers| part.mime = headers;
+                    const body = fetch.body orelse continue;
+                    const length = @min(out.len, body.len);
+                    @memcpy(out[0..length], body[0..length]);
+                    part.body = out[0..length];
+                    saw_body = true;
+                },
+                else => {},
+            }
+        }
+        if (!saw_body) return error.NotFound;
+        return part;
     }
 
     pub fn set_flags(self: *Client, uid: u32, flags: Flags) Error!void {

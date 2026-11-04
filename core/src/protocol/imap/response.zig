@@ -42,6 +42,10 @@ pub const Fetch = struct {
     envelope: ?Envelope = null,
     /// Payload of a `BODY[...]` attribute, borrowed from the response buffer.
     body: ?[]const u8 = null,
+    /// `BODY[<section>.MIME]`: a part's own headers, fetched on their own.
+    mime: ?[]const u8 = null,
+    /// `BODYSTRUCTURE`: the shape of the message, still as wire bytes.
+    structure: ?[]const u8 = null,
 };
 
 /// One `LIST` result: the mailbox name plus, when the server supports
@@ -217,6 +221,10 @@ fn parseFetch(sequence: u32, text: []const u8, scratch: []u8) Error!Fetch {
                     result.flags = try parseFlags(&tokens);
                 } else if (std.ascii.eqlIgnoreCase(key, "ENVELOPE")) {
                     result.envelope = try parseEnvelope(&tokens, scratch, &string_len);
+                } else if (std.ascii.eqlIgnoreCase(key, "BODYSTRUCTURE")) {
+                    result.structure = try captureGroup(&tokens);
+                } else if (endsWithIgnoreCase(key, ".MIME")) {
+                    result.mime = try parseBodyValue(&tokens);
                 } else if (startsWithIgnoreCase(key, "BODY")) {
                     result.body = try parseBodyValue(&tokens);
                 } else {
@@ -227,6 +235,16 @@ fn parseFetch(sequence: u32, text: []const u8, scratch: []u8) Error!Fetch {
         }
     }
     return result;
+}
+
+/// Keeps a whole list as it arrived: `BODYSTRUCTURE` is a parse of its own, so
+/// the response layer hands it over unread.
+fn captureGroup(tokens: *tokenizer.Tokenizer) Error![]const u8 {
+    const start = tokens.index;
+    const token = try next(tokens);
+    if (token != .open_paren) return error.Malformed;
+    try skipGroup(tokens, 1);
+    return tokens.input[start..tokens.index];
 }
 
 fn next(tokens: *tokenizer.Tokenizer) Error!tokenizer.Token {
@@ -271,6 +289,11 @@ fn parseFlags(tokens: *tokenizer.Tokenizer) Error!Flags {
             else => return error.Malformed,
         }
     }
+}
+
+fn endsWithIgnoreCase(text: []const u8, suffix: []const u8) bool {
+    if (text.len < suffix.len) return false;
+    return std.ascii.eqlIgnoreCase(text[text.len - suffix.len ..], suffix);
 }
 
 fn startsWithIgnoreCase(text: []const u8, prefix: []const u8) bool {

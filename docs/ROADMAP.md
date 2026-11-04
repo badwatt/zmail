@@ -101,9 +101,13 @@ The port exists; this milestone fills it in.
 - **Lazy connections (done).** The launcher builds accounts without touching
   the network; ports open on first use, so a warm cache starts in milliseconds
   with no socket, and a cold start shows a splash while it connects.
-- **Big messages (next).** A response is bounded at 128 KiB, so a message with
-  a large attachment is truncated or refused. Streaming a literal straight into
-  the body buffer would remove the bound without an allocation.
+- **Big messages (done).** The reader asks `BODYSTRUCTURE` which part holds the
+  words, then fetches only that part -- its MIME headers and its content in one
+  round trip. A certificate as a PDF is no longer downloaded to be thrown away,
+  and a message whose shape is not understood falls back to a preface fetch
+  (`BODY.PEEK[]<0.N>`) rather than failing to open. `core/src/protocol/imap/`
+  `bodystructure.zig` is the parser: bounded depth and part count, no recursion,
+  because the message is written by whoever sent it.
 - **Writing that survives contact with a real mailbox (done).** A reply from the
   reader quotes the original below the draft, attribution line and `> ` prefixes
   included; a non-ASCII subject and display name leave as RFC 2047 encoded words

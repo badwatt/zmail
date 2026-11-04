@@ -210,9 +210,20 @@ pub fn header(block: []const u8, name: []const u8) ?[]const u8 {
 
 /// Extracts the displayable text of a full message (headers and body).
 pub fn text_body(raw: []const u8, out: []u8, scratch: []u8) []const u8 {
+    return text_after_split(split_part(raw), out, scratch);
+}
+
+/// The words of a part fetched on its own: its MIME headers and its content come
+/// back as two pieces of one response, which is a message already split at the
+/// blank line. The headers are what say how the content is encoded and in which
+/// charset, so they are not optional.
+pub fn part_body(mime_headers: []const u8, body: []const u8, out: []u8, scratch: []u8) []const u8 {
+    return text_after_split(.{ .headers = mime_headers, .body = body }, out, scratch);
+}
+
+fn text_after_split(root: Part, out: []u8, scratch: []u8) []const u8 {
     if (out.len == 0 or scratch.len < 2) return "";
 
-    const root = split_part(raw);
     const root_type = content_type(header(root.headers, "content-type"));
 
     switch (root_type.media) {
@@ -1207,4 +1218,23 @@ test "an image inside the message is found by its Content-ID" {
     // Nothing by that name, and nothing that is not a PNG.
     try testing.expect(image_body(raw, "other@x", &out) == null);
     try testing.expect(image_body(raw, "", &out) == null);
+}
+
+test "a part arrives as headers and content, and is read like a message" {
+    const body = "aGkgdGhlcmU="; // "hi there"
+    var out: [64]u8 = undefined;
+    var scratch: [512]u8 = undefined;
+    const text = part_body(
+        "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64",
+        body,
+        &out,
+        &scratch,
+    );
+    try testing.expectEqualStrings("hi there", text);
+}
+
+test "a part with no content type is plain text, not nothing" {
+    var out: [64]u8 = undefined;
+    var scratch: [512]u8 = undefined;
+    try testing.expectEqualStrings("hi", part_body("", "hi", &out, &scratch));
 }
