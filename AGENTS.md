@@ -52,6 +52,31 @@
 - 100-column lines, 4-space indent, `zig fmt`.
 - Sanitization happens on ingress (`core/src/domain/text.zig`), not on render.
 
+## Commits
+
+**Conventional Commits**, always: `<type>(<scope>)?: <subject>`.
+
+```text
+feat(reader): open a message that has a PDF attached
+fix(imap): read a part's headers from BODY[1.MIME]
+docs: say which files the coverage gate skips
+ci: run the suite with two cores, as the runner does
+```
+
+- Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `style`, `ci`,
+  `chore`, `build`, `revert`. A breaking change is `!` after the type.
+- `<scope>` is the area, not the file: `reader`, `imap`, `compose`, `theme`,
+  `splash`, `session`, `config`, `coverage`, `release`.
+- Subject in the imperative, lower case, no full stop: it completes
+  "if applied, this commit will …".
+- The body is where the *why* goes, and it is welcome to be long: the changelog
+  shows subjects, the history keeps the argument.
+- The last line may name a closed issue: `Closes #12`.
+
+The release notes are grouped by these prefixes (`scripts/changelog.sh`), so a
+subject without one is a change nobody reading the release will see in the right
+place.
+
 ## Releasing
 
 - `build.zig.zon` is the release: `.version` is the tag, `.name` is the binary and
