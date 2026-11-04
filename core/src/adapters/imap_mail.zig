@@ -350,7 +350,7 @@ test "body, flags, and move reach the right commands" {
     var scripted: Scripted = .{ .input = login_ok ++
         "* 1 EXISTS\r\na2 OK selected\r\n" ++
         "* 1 FETCH (UID 7 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL \"7BIT\" 2 1 NIL NIL NIL NIL))\r\na3 OK\r\n" ++
-        "* 1 FETCH (BODY[1.MIME] \"Content-Type: text/plain; charset=utf-8\" BODY[1] {2}\r\nhi)\r\na4 OK\r\n" ++
+        "* 1 FETCH (BODY[1.MIME] {74}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64 BODY[1] {12}\r\naGkgdGhlcmU=)\r\na4 OK\r\n" ++
         "a5 OK\r\n" ++
         "a6 OK\r\n" };
     var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
@@ -358,7 +358,8 @@ test "body, flags, and move reach the right commands" {
     const mail = imap.mail();
 
     var body: [64]u8 = undefined;
-    try testing.expectEqualStrings("hi", try mail.fetch_body(.inbox, MessageId.from_int(7), &body));
+    // The part's own headers say it is base64, and the text comes out decoded.
+    try testing.expectEqualStrings("hi there", try mail.fetch_body(.inbox, MessageId.from_int(7), &body));
     try mail.set_flags(MessageId.from_int(7), .{ .unread = false });
     try mail.move_message(MessageId.from_int(7), .trash);
 

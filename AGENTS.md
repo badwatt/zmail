@@ -6,9 +6,10 @@
 - **Commit freely**: commit anytime without asking.
 - **Push requires approval**: never push. always ask first.
 - **Coverage**: 100% line coverage via kcov, no exceptions inside the gate.
-  The gate covers `core/src` and `tui/src`, except two files named for a stated
-  reason: `tui/src/launch.zig` and `tui/src/main.zig` (process boundary, run by
-  the end-to-end pty test). `net/src` is outside the include pattern: it needs a
+  The gate covers `core/src` and `tui/src`, except three files named for a stated
+  reason: `tui/src/launch.zig`, `tui/src/main.zig`, and `tui/src/refresh.zig` --
+  the process boundary, run by the end-to-end pty test in another process, which
+  kcov cannot instrument. `net/src` is outside the include pattern: it needs a
   real TLS peer, and is verified with an opt-in live run. See
   `docs/ARCHITECTURE.md`.
 

@@ -37,11 +37,9 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
-    # The gate asks for 100% of core/src and tui/src. It is reported, not
-    # enforced, while the kcov line attribution of the newer modules (html,
-    # links, png, halfblocks) is being brought back to 100%. Flip this to
-    # false once `zig build coverage` is green.
-    continue-on-error: true
+    # The gate asks for 100% of core/src and tui/src, and it gets it: the three
+    # files outside it are the process boundary, run by the end-to-end pty test.
+    continue-on-error: false
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2

@@ -223,7 +223,7 @@ fn parseFetch(sequence: u32, text: []const u8, scratch: []u8) Error!Fetch {
                     result.envelope = try parseEnvelope(&tokens, scratch, &string_len);
                 } else if (std.ascii.eqlIgnoreCase(key, "BODYSTRUCTURE")) {
                     result.structure = try captureGroup(&tokens);
-                } else if (endsWithIgnoreCase(key, ".MIME")) {
+                } else if (isPartHeaders(key)) {
                     result.mime = try parseBodyValue(&tokens);
                 } else if (startsWithIgnoreCase(key, "BODY")) {
                     result.body = try parseBodyValue(&tokens);
@@ -289,6 +289,14 @@ fn parseFlags(tokens: *tokenizer.Tokenizer) Error!Flags {
             else => return error.Malformed,
         }
     }
+}
+
+/// `BODY[1.2.MIME]` holds a part's own headers. The section sits inside the
+/// brackets and the `]` is part of the key, so the suffix is not at the end of the
+/// text.
+fn isPartHeaders(key: []const u8) bool {
+    if (key.len < 3 or key[key.len - 1] != ']') return false;
+    return endsWithIgnoreCase(key[0 .. key.len - 1], ".MIME");
 }
 
 fn endsWithIgnoreCase(text: []const u8, suffix: []const u8) bool {
