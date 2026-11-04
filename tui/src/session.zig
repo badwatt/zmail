@@ -224,6 +224,9 @@ fn image_cells(size: ImageSize) ImageCells {
 }
 
 pub const Session = struct {
+    /// When the bar went up: the minimum-visible window is measured from here.
+    progress_since_ms: i64 = 0,
+
     gpa: std.mem.Allocator,
     deps: Deps,
 
@@ -384,6 +387,9 @@ pub const Session = struct {
         // Cache only: the first frame must not wait for a socket. Anything the
         // cache cannot serve is fetched by `boot`, after that frame is painted.
         self.load_cached(self.state.mailbox, true);
+        // The first screen is work to a terminal: the bar goes up with the frame
+        // and comes down when boot() has something to show.
+        self.sync_progress();
     }
 
     /// Whether this account is the one being looked at (or every one is).
@@ -497,8 +503,10 @@ pub const Session = struct {
         // both waiting forever (no mail, spinner forever). Later refreshes
         // reuse the open connection, so those can run in the background.
         self.state.booting = self.deps.splash;
+        self.sync_progress();
         self.reload(self.state.mailbox);
         self.state.booting = false;
+        self.sync_progress();
         self.repaint();
     }
 
@@ -563,6 +571,7 @@ pub const Session = struct {
             // for a moment before the slow part. A frozen one-frame splash read
             // as a bug.
             self.state.booting = true;
+            self.sync_progress();
             self.play_splash(4);
             self.boot();
         } else {
@@ -1049,16 +1058,29 @@ pub const Session = struct {
     /// in these three flags. Reconciling in one place means a wait cannot leave a
     /// bar behind, which is the failure that matters: a bar that never goes away
     /// says "busy" forever.
+    /// Shortest time the terminal's bar is allowed on screen: anything shorter
+    /// reads as a glitch rather than as work.
+    const progress_visible_ms: i64 = 400;
+
     fn sync_progress(self: *Session) void {
         const now = os.monotonic_ms();
         if (self.state.loading or self.state.booting or self.refreshing) {
+            if (self.progress_since_ms == 0) self.progress_since_ms = now;
             progress_mod.show(self.deps.system, .indeterminate, 0, now);
             // A wait long enough to outlive the terminal's memory of it says so
             // again, which is what keeps the bar up for a slow server.
             progress_mod.keep_alive(self.deps.system, now);
-        } else {
-            progress_mod.clear(self.deps.system);
+            return;
         }
+        if (self.progress_since_ms == 0) return;
+
+        // Work that took a blink is still work, and a bar that appears and
+        // vanishes inside one frame is read as a glitch. It stays up long enough
+        // to be seen; every later tick finds the window closed and takes it down.
+        if (now - self.progress_since_ms < progress_visible_ms) return;
+
+        progress_mod.clear(self.deps.system);
+        self.progress_since_ms = 0;
     }
 
     /// Test hook: the tail of the loading wrapper, without the effect.
@@ -1078,6 +1100,7 @@ pub const Session = struct {
     fn begin_loading(self: *Session) ?i64 {
         if (self.deps.loading_ms == 0) return null;
         self.state.loading = true;
+        self.sync_progress();
         self.render();
         return os.monotonic_ms();
     }
@@ -1095,6 +1118,7 @@ pub const Session = struct {
             if (elapsed < minimum) os.sleep_ms(@intCast(minimum - elapsed));
         }
         self.state.loading = false;
+        self.sync_progress();
         self.repaint();
     }
 
@@ -5030,8 +5054,16 @@ test "the terminal's bar goes up while loading, stays, and comes down after" {
     _ = rig.session.step();
     try testing.expectEqualStrings("", rig.fake_system.output_text());
 
-    // The work ended: the bar comes down, once.
+    // The work ended, but a bar that lived for a blink is a glitch: inside the
+    // window it stays up.
     rig.session.state.loading = false;
+    rig.session.needs_render = false;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    try testing.expectEqualStrings("", rig.fake_system.output_text());
+
+    // Once the window has passed, the next tick takes it down.
+    rig.session.progress_since_ms = os.monotonic_ms() - Session.progress_visible_ms - 1;
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
@@ -5070,8 +5102,10 @@ test "the splash counts as loading, and so does a refresh" {
     try testing.expectEqual(core.progress.State.indeterminate, progress_mod.state());
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;3;0") == null);
 
-    // And it comes down when the refresh does.
+    // And it comes down when the refresh does, once it has been up long enough
+    // to be seen.
     rig.session.settle_refresh_for_test();
+    rig.session.progress_since_ms = os.monotonic_ms() - Session.progress_visible_ms - 1;
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
