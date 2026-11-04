@@ -206,7 +206,9 @@ fn writeLine(
                 out[target + 3] = line[x * 4 + 3];
             },
             .palette => {
-                const entry = line[x] * 3;
+                // usize, not the byte's own width: an index of 200 times three is 600,
+                // and that is a number a u8 cannot hold. The bytes are mail.
+                const entry: usize = @as(usize, line[x]) * 3;
                 if (entry + 3 > palette.len) {
                     out[target] = 0;
                     out[target + 1] = 0;
@@ -311,4 +313,17 @@ test "average and paeth filters are undone, and an invented one is refused" {
     try testing.expectEqualSlices(u8, &.{ 100, 110, 120, 255 }, image.rgba[12..16]);
 
     try testing.expectError(error.Corrupt, decode(@embedFile("testdata/bad_filter.png"), &work, &out));
+}
+
+test "a palette index past the table is black, not an overflow" {
+    // Index 200 times three is 600: a u8 holds neither. This panicked on a real mail,
+    // because a palette index is a byte somebody else chose.
+    const file = @embedFile("testdata/palette_high_index.png");
+    var work: [4096]u8 = undefined;
+    var out: [64]u8 = undefined;
+    const image = try decode(file, &work, &out);
+    try testing.expectEqual(@as(u32, 2), image.width);
+    // Out of range: black. In range: the palette's second entry, white.
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, image.rgba[0..4]);
+    try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, image.rgba[4..8]);
 }
