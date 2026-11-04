@@ -995,11 +995,26 @@ pub const Session = struct {
         if (std.mem.eql(u8, bytes[0..4], "RIFF")) return "a WebP";
         if (bytes[0] == '<') return "an SVG or a web page";
         if (std.mem.startsWith(u8, bytes, "BM")) return "a BMP";
-        // Not a format we recognise: the first three bytes say what the server sent
-        // instead, which is the difference between a bug here and a wrong address.
+        // Not a format we recognise: what the server sent instead is the difference
+        // between a bug here and a wrong address, so say it in the shape it came --
+        // text when it reads as text, hex when it does not.
+        if (printablePrefix(bytes)) |text| {
+            return std.fmt.bufPrint(out, "not an image ({s})", .{text}) catch "not an image";
+        }
         return std.fmt.bufPrint(out, "not an image ({x:0>2} {x:0>2} {x:0>2})", .{
             bytes[0], bytes[1], bytes[2],
         }) catch "not an image";
+    }
+
+    /// The first printable run of `bytes`, for a message a human reads.
+    fn printablePrefix(bytes: []const u8) ?[]const u8 {
+        var length: usize = 0;
+        while (length < bytes.len and length < 40) : (length += 1) {
+            const byte = bytes[length];
+            if (byte < 0x20 or byte > 0x7e) break;
+        }
+        if (length == 0) return null;
+        return bytes[0..length];
     }
 
     /// A picture of the mail, drawn in the terminal: what a mail client shows,
@@ -5427,7 +5442,7 @@ test "a picture that is not a PNG is downloaded once and named as such" {
 
 test "a picture is named by what its bytes are" {
     // The message is the diagnosis: "not a PNG" is not enough to know what to do.
-    var out: [48]u8 = undefined;
+    var out: [64]u8 = undefined;
     try testing.expectEqualStrings("a JPEG", Session.picture_kind(&[_]u8{ 0xff, 0xd8, 0, 0 }, &out));
     try testing.expectEqualStrings("a WebP", Session.picture_kind("RIFF0000WEBP", &out));
     try testing.expectEqualStrings("an SVG or a web page", Session.picture_kind("<svg xmlns", &out));
@@ -5436,6 +5451,11 @@ test "a picture is named by what its bytes are" {
     try testing.expectEqualStrings("not an image (00 01 02)", Session.picture_kind("\x00\x01\x02\x03", &out));
     try testing.expectEqualStrings("empty", Session.picture_kind("", &out));
     try testing.expectEqualStrings("a PNG the terminal refused", Session.picture_kind("\x89PNG0000", &out));
+    // Text is quoted as text: a status line says far more than "48 54 54".
+    try testing.expectEqualStrings(
+        "not an image (HTTP/1.1 301 Moved)",
+        Session.picture_kind("HTTP/1.1 301 Moved\r\n\r\n", &out),
+    );
 }
 
 const RemoteFetch = struct {

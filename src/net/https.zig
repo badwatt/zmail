@@ -212,11 +212,26 @@ fn parseDepth(raw: []u8, depth: u8) Error!Response {
         return .{ .status = status, .body = decoded };
     }
     const usable = if (length) |value| body[0..@min(value, body.len)] else body;
-    if (depth < 2 and std.mem.startsWith(u8, usable, "HTTP/1.")) {
-        const offset = @intFromPtr(usable.ptr) - @intFromPtr(raw.ptr);
-        return parseDepth(raw[offset..], depth + 1);
+    // The second response can be preceded by its separator, or by nothing at all.
+    if (depth < 2) {
+        if (findResponseStart(usable)) |offset| {
+            const base = @intFromPtr(usable.ptr) - @intFromPtr(raw.ptr);
+            return parseDepth(raw[base + offset ..], depth + 1);
+        }
     }
     return .{ .status = status, .body = usable };
+}
+
+/// Where the next HTTP response starts inside `body`, if it starts there at all. A
+/// server that answers twice leaves one, and what comes before it is the blank line
+/// that ended the first.
+fn findResponseStart(body: []const u8) ?usize {
+    const window = @min(body.len, 16);
+    var index: usize = 0;
+    while (index + 7 <= window) : (index += 1) {
+        if (std.mem.startsWith(u8, body[index..], "HTTP/1.")) return index;
+    }
+    return null;
 }
 
 /// The payload of a `Transfer-Encoding: chunked` body, written over itself: every
