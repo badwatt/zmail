@@ -40,6 +40,10 @@ pub fn decode(png: []const u8, work: []u8, out: []u8) Error!Image {
     var compressed: usize = 0;
     var palette: [768]u8 = undefined;
     var palette_len: usize = 0;
+    // Alpha per palette entry, and the colour that means "nothing" in an RGB picture.
+    // Without this a logo with a transparent background is a logo on a rectangle.
+    var alpha: [256]u8 = @splat(255);
+    var key: ?[3]u8 = null;
 
     var index: usize = 8;
     while (index + 8 <= png.len) {
@@ -52,6 +56,15 @@ pub fn decode(png: []const u8, work: []u8, out: []u8) Error!Image {
 
         if (std.mem.eql(u8, kind, "IHDR")) {
             header = try parseHeader(body);
+        } else if (std.mem.eql(u8, kind, "tRNS")) {
+            const color = if (header) |parsed| parsed.color else .rgba;
+            if (color == .palette) {
+                const count = @min(body.len, alpha.len);
+                @memcpy(alpha[0..count], body[0..count]);
+            } else if (body.len == 6) {
+                // Three 16-bit values; an eight-bit picture uses the low byte of each.
+                key = .{ body[1], body[3], body[5] };
+            }
         } else if (std.mem.eql(u8, kind, "PLTE")) {
             palette_len = @min(body.len, palette.len);
             @memcpy(palette[0..palette_len], body[0..palette_len]);
@@ -92,7 +105,7 @@ pub fn decode(png: []const u8, work: []u8, out: []u8) Error!Image {
 
     const needed = @as(usize, head.width) * head.height * 4;
     if (needed > out.len) return error.NoRoom;
-    try unfilter(head, raw, channels, palette[0..palette_len], out);
+    try unfilter(head, raw, channels, palette[0..palette_len], &alpha, key, out);
     return .{ .width = head.width, .height = head.height, .rgba = out[0..needed] };
 }
 
@@ -134,6 +147,8 @@ fn unfilter(
     raw: []u8,
     channels: usize,
     palette: []const u8,
+    alpha: *const [256]u8,
+    key: ?[3]u8,
     out: []u8,
 ) Error!void {
     const stride = @as(usize, head.width) * channels;
@@ -165,7 +180,7 @@ fn unfilter(
             line[x] +%= add;
         }
 
-        writeLine(head, line, palette, out, y);
+        writeLine(head, line, palette, alpha, key, out, y);
         // The in-place filtering above already left the reconstructed bytes in
         // `line`; copy them into `previous` for the next row.
         @memcpy(previous[0..stride], line);
@@ -186,6 +201,8 @@ fn writeLine(
     head: Header,
     line: []const u8,
     palette: []const u8,
+    alpha: *const [256]u8,
+    key: ?[3]u8,
     out: []u8,
     y: usize,
 ) void {
@@ -197,7 +214,12 @@ fn writeLine(
                 out[target] = line[x * 3];
                 out[target + 1] = line[x * 3 + 1];
                 out[target + 2] = line[x * 3 + 2];
-                out[target + 3] = 255;
+                // A colour that means "transparent" is how older pictures spell alpha.
+                const clear = if (key) |value|
+                    value[0] == line[x * 3] and value[1] == line[x * 3 + 1] and value[2] == line[x * 3 + 2]
+                else
+                    false;
+                out[target + 3] = if (clear) 0 else 255;
             },
             .rgba => {
                 out[target] = line[x * 4];
@@ -218,7 +240,7 @@ fn writeLine(
                     out[target + 1] = palette[entry + 1];
                     out[target + 2] = palette[entry + 2];
                 }
-                out[target + 3] = 255;
+                out[target + 3] = if (line[x] < alpha.len) alpha[line[x]] else 255;
             },
         }
     }
@@ -326,4 +348,24 @@ test "a palette index past the table is black, not an overflow" {
     // Out of range: black. In range: the palette's second entry, white.
     try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, image.rgba[0..4]);
     try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, image.rgba[4..8]);
+}
+
+test "a palette entry that says transparent is transparent" {
+    const file = @embedFile("testdata/palette_transparent.png");
+    var work: [4096]u8 = undefined;
+    var out: [64]u8 = undefined;
+    const image = try decode(file, &work, &out);
+    // First pixel: red, and nothing of it. Second: blue, opaque.
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 0 }, image.rgba[0..4]);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, image.rgba[4..8]);
+}
+
+test "a colour that means nothing is transparent in an rgb picture" {
+    const file = @embedFile("testdata/rgb_key.png");
+    var work: [4096]u8 = undefined;
+    var out: [64]u8 = undefined;
+    const image = try decode(file, &work, &out);
+    // The key colour (1,2,3) is the transparent one; the other pixel is itself.
+    try testing.expectEqual(@as(u8, 0), image.rgba[3]);
+    try testing.expectEqual(@as(u8, 255), image.rgba[7]);
 }

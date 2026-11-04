@@ -14,6 +14,8 @@ const System = system_mod.System;
 pub const half_block = "\u{2580}";
 /// The bottom half: what is left when only the lower pixel of a cell has colour.
 pub const lower_half_block = "\u{2584}";
+/// Both halves the same colour: one cell, one escape, no texture that is not there.
+pub const full_block = "\u{2588}";
 /// A cell, or half of one, with nothing in it. Anything this transparent is the
 /// page behind it, and the terminal already knows what colour that is.
 pub const transparent: u32 = 0xFFFF_FFFE;
@@ -42,15 +44,22 @@ pub fn draw(
 
         var last_top: u32 = 0xFFFFFFFF;
         var last_bottom: u32 = 0xFFFFFFFF;
+        var last_solid: bool = false;
 
         var column: u16 = 0;
         while (column < columns) : (column += 1) {
             const top = sample(image, column, row * 2, columns, rows);
             const bottom = sample(image, column, row * 2 + 1, columns, rows);
+            // The glyph follows the two halves: nothing, one of them, or a solid cell
+            // when they are the same colour. A cell that is one colour drawn as a half
+            // block is a picture with a texture it does not have.
+            const solid = top == bottom and top != transparent;
             const glyph: []const u8 = if (top == transparent and bottom == transparent)
                 " "
             else if (top == transparent)
                 lower_half_block
+            else if (solid)
+                full_block
             else
                 half_block;
 
@@ -59,7 +68,7 @@ pub fn draw(
             // with nothing in it says "default", which is the terminal's own colour
             // -- that is what makes a logo with a transparent background sit on the
             // reader instead of on a white card.
-            if (top != last_top or bottom != last_bottom) {
+            if (top != last_top or bottom != last_bottom or solid != last_solid) {
                 // A half with nothing in it says "default", which is the terminal's
                 // own colour. Writing the sentinel's bits instead is how a transparent
                 // background became a white card: 0xFFFFFFFE is nearly white.
@@ -70,7 +79,7 @@ pub fn draw(
                 } else {
                     writer.print("\x1b[38;2;{d};{d};{d}m", .{ red(top), green(top), blue(top) }) catch return false;
                 }
-                if (bottom == transparent) {
+                if (bottom == transparent or solid) {
                     writer.writeAll("\x1b[49m") catch return false;
                 } else {
                     writer.print("\x1b[48;2;{d};{d};{d}m", .{ red(bottom), green(bottom), blue(bottom) }) catch return false;
@@ -78,6 +87,7 @@ pub fn draw(
                 system.write(writer.buffered()) catch return false;
                 last_top = top;
                 last_bottom = bottom;
+                last_solid = solid;
             }
             system.write(glyph) catch return false;
         }
@@ -212,4 +222,20 @@ test "nothing to draw is not drawn" {
     try testing.expect(!draw(fake.system(), empty, 0, 0, 4, 4));
     try testing.expect(!draw(fake.system(), two_by_two(), 0, 0, 0, 4));
     try testing.expectEqualStrings("", fake.output_text());
+}
+
+test "a cell that is one colour is drawn as one block" {
+    // Two rows of the same pixel: the terminal does not need a half block with two
+    // colours to draw a solid square.
+    const rgba = [_]u8{
+        9, 9, 9, 255, 9, 9, 9, 255,
+        9, 9, 9, 255, 9, 9, 9, 255,
+    };
+    const image = png.Image{ .width = 2, .height = 2, .rgba = &rgba };
+
+    var fake: system_mod.Fake = .{};
+    try testing.expect(draw(fake.system(), image, 0, 0, 2, 1));
+    const written = fake.output_text();
+    try testing.expect(std.mem.indexOf(u8, written, full_block) != null);
+    try testing.expect(std.mem.indexOf(u8, written, half_block) == null);
 }
