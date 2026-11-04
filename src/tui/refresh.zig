@@ -138,3 +138,56 @@ pub const BodyJob = struct {
         job.state.store(@backingInt(State.done), .release);
     }
 };
+
+/// One picture the message points at, fetched off the loop.
+///
+/// Only ever started when the reader has been told to show pictures: a receipt full of
+/// tracking pixels is not something to download because a key was pressed to open it.
+pub const ImageFetch = *const fn (context: *anyopaque, url: []const u8, out: []u8) ?[]const u8;
+
+pub const ImageJob = struct {
+    thread: std.Thread = undefined,
+    state: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(State.done)),
+    fetch: ImageFetch = undefined,
+    context: *anyopaque = undefined,
+    url: core.text.Text(core.limits.url_max) = .{},
+    buffer: []u8 = &.{},
+    len: u32 = 0,
+    ok: bool = false,
+
+    pub fn start(
+        job: *ImageJob,
+        fetch: ImageFetch,
+        context: *anyopaque,
+        url: []const u8,
+        buffer: []u8,
+    ) void {
+        job.fetch = fetch;
+        job.context = context;
+        job.url.set(url);
+        job.buffer = buffer;
+        job.len = 0;
+        job.ok = false;
+        job.state.store(@backingInt(State.running), .release);
+        job.thread = std.Thread.spawn(.{}, runImage, .{job}) catch {
+            job.state.store(@backingInt(State.done), .release);
+            return;
+        };
+    }
+
+    pub fn finished(job: *const ImageJob) bool {
+        return job.state.load(.acquire) == @backingInt(State.done);
+    }
+
+    pub fn join(job: *ImageJob) void {
+        job.thread.join();
+    }
+
+    fn runImage(job: *ImageJob) void {
+        if (job.fetch(job.context, job.url.slice(), job.buffer)) |bytes| {
+            job.len = @intCast(bytes.len);
+            job.ok = true;
+        }
+        job.state.store(@backingInt(State.done), .release);
+    }
+};
