@@ -62,7 +62,7 @@ pub const Painter = struct {
         if (size.columns == 0 or size.rows == 0) return;
         self.system = system;
         self.placement = render.splash_mark(size.columns, size.rows);
-        const line = render.splash_line(size.columns, size.rows, labels, &self.line);
+        const line = render.splash_line(size.rows, labels, &self.line);
         self.line_row = line.row;
         self.line_left = line.left;
         self.line_len = line.text.len;

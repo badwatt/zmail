@@ -444,8 +444,7 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     const labels = account_labels(inputs.state, &label_buffer);
 
     var line_buffer: [160]u8 = undefined;
-    const status = splash_line(out.columns, out.rows, labels, &line_buffer);
-    const status_text = status.left;
+    const status = splash_line(out.rows, labels, &line_buffer);
 
     const address_row = mark_top +| mark_rows +| 2;
     const footer_row = out.rows -| 1;
@@ -456,7 +455,7 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
             // Under the words it belongs to, so the block has one left edge --
             // unless it would run off the screen, where centred is the fallback.
             const width = screen.text_columns(address);
-            const x = if (status_text + width <= out.columns) status_text else (out.columns -| width) / 2;
+            const x = if (status.left +| width <= out.columns) status.left else (out.columns -| width) / 2;
             _ = out.put_text(x, address_row, address, out.columns -| x, theme.dim);
         }
     }
@@ -468,11 +467,11 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     const corner = splash_right(out.columns, out.rows, &right_buffer);
     _ = draw_shimmer(out, corner.left, corner.row, corner.text, elapsed, theme);
 
+    // The left sentence only when it stops before the right one: the middle of the
+    // last row stays empty so the row reads as a footer.
     const line_width = screen.text_columns(status.text);
-    const right_width = screen.text_columns("Ctrl+C quits");
-    const before_right: u16 = out.columns -| 2 -| right_width;
+    const before_right: u16 = corner.left -| 1;
     if (status.left +| line_width <= before_right) {
-        // One frame of the splash is 55ms, and `tick` moves two per frame.
         _ = draw_shimmer(out, status.left, status.row, status.text, elapsed, theme);
     }
 }
@@ -542,15 +541,20 @@ pub fn shimmer_level(cell: u16, width: u16, elapsed_ms: i64) u8 {
 
 /// The right corner of the footer, and where it sits: `Ctrl+C quits`, against the edge.
 pub fn splash_right(columns: u16, rows: u16, buffer: []u8) SplashLine {
-    const text = "Ctrl+C quits";
-    const width = screen.text_columns(text);
-    const length = @min(text.len, buffer.len);
-    @memcpy(buffer[0..length], text[0..length]);
+    const text = copy_into("Ctrl+C quits", buffer);
     return .{
         .row = rows -| 1,
-        .left = columns -| 2 -| width,
-        .text = buffer[0..length],
+        .left = columns -| 2 -| screen.text_columns(text),
+        .text = text,
     };
+}
+
+/// `text` in `buffer`, truncated to fit: the splash copies every sentence it shows,
+/// because the caller's may be a temporary.
+fn copy_into(text: []const u8, buffer: []u8) []const u8 {
+    const length = @min(text.len, buffer.len);
+    @memcpy(buffer[0..length], text[0..length]);
+    return buffer[0..length];
 }
 
 pub fn shimmer_style(theme: *const Theme, level: u8) Style {
@@ -568,19 +572,15 @@ pub const SplashLine = struct {
     text: []const u8,
 };
 
-pub fn splash_line(columns: u16, rows: u16, labels: []const u8, buffer: []u8) SplashLine {
+pub fn splash_line(rows: u16, labels: []const u8, buffer: []u8) SplashLine {
     var line: [160]u8 = undefined;
     const full = std.fmt.bufPrint(&line, "connecting to {s}", .{labels}) catch labels;
-    _ = columns;
-    const length = @min(full.len, buffer.len);
-    @memcpy(buffer[0..length], full[0..length]);
     return .{
-        // The last row: the sentence sits between "cached mail opens instantly" and
-        // "Ctrl+C quits", in the middle, which is where the eye already goes.
+        // The last row: what is happening on the left, the way out on the right.
         .row = rows -| 1,
         // One column in from the edge, like every other row of this app.
         .left = 1,
-        .text = buffer[0..length],
+        .text = copy_into(full, buffer),
     };
 }
 
@@ -2849,6 +2849,25 @@ test "the breath moves from the first tick, at a speed the eye can see" {
     // And it climbs again on the way back, without a plateau at the bottom.
     try testing.expect(breath_level_at(breath_ms / 2 + 540) > breath_level_at(breath_ms / 2 + 180));
     try testing.expect(breath_level_at(breath_ms / 2 + 540) > breath_floor);
+}
+
+test "the footer: two corners, and nothing between them" {
+    var buffer: [64]u8 = undefined;
+    const left = splash_line(24, "work, home", &buffer);
+    var other: [64]u8 = undefined;
+    const right = splash_right(80, 24, &other);
+
+    try testing.expectEqualStrings("connecting to work, home", left.text);
+    try testing.expectEqualStrings("Ctrl+C quits", right.text);
+    try testing.expectEqual(left.row, right.row);
+    try testing.expectEqual(@as(u16, 1), left.left);
+    // Two columns in from the right edge, and clear of the left sentence.
+    try testing.expectEqual(@as(u16, 80 - 2 - 12), right.left);
+    try testing.expect(left.left + screen.text_columns(left.text) < right.left);
+
+    // A buffer too small truncates instead of writing past it.
+    var small: [4]u8 = undefined;
+    try testing.expectEqualStrings("Ctrl", splash_right(80, 24, &small).text);
 }
 
 test "both sizes of the mark answer their own cells" {
