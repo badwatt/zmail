@@ -277,7 +277,13 @@ pub fn reference_at(text: []const u8, offset: u32) ?u32 {
 pub fn at(text: []const u8, offset: u32) ?Link {
     var buffer: [max_links]Link = undefined;
     const count = scan(text, &buffer);
-    for (buffer[0..count]) |link| {
+    return among(buffer[0..count], offset);
+}
+
+/// The link in `links` that holds `offset`. Separate from `at` because a caller that
+/// already has the ranges -- and has moved them with the text -- must not rescan.
+pub fn among(links: []const Link, offset: u32) ?Link {
+    for (links) |link| {
         if (offset >= link.start and offset < link.end) return link;
     }
     return null;

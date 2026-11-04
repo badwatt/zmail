@@ -39,6 +39,9 @@ pub const Now = *const fn () i64;
 /// take one: a bound on the line, not on the users' patience.
 pub const pending_effects_max: u8 = 8;
 
+/// Where the text was pushed down to make room for a picture.
+const Gap = struct { at: u32, extra: u16 };
+
 /// Which message the reader is showing, so a request for another one can blank
 /// the page instead of leaving the previous message under the new subject.
 const ShownMessage = struct {
@@ -255,6 +258,14 @@ pub const Session = struct {
     /// the text is moved out of its way instead of being printed only to be covered.
     gapped: [core.limits.body_max]u8 = undefined,
     gapped_len: u32 = 0,
+    /// Every place a picture pushed the text down, as "before this offset, this many
+    /// bytes were inserted". Links and anchors are ranges in the message's text, and
+    /// they have to move with it or the underline lands on the wrong words.
+    gaps: [wrap.max_lines]Gap = @splat(.{ .at = 0, .extra = 0 }),
+    gap_count: u32 = 0,
+    /// The link and anchor ranges moved into the text the frame draws.
+    link_view: [core.links.max_links]core.links.Link = undefined,
+    link_view_len: u32 = 0,
     html_part_len: u32 = 0,
     /// Set when a text browser has to lay the HTML out before it can be shown.
     html_text: [core.limits.body_max]u8 = undefined,
@@ -1115,27 +1126,25 @@ pub const Session = struct {
     /// view, or a written-out address. What the pointer lights up and what a
     /// click opens both come from here, so they cannot disagree.
     fn link_span_at(self: *Session, offset: u32) ?core.links.Link {
-        if (self.html_view) {
-            for (self.html_anchors[0..self.html_anchor_count]) |anchor| {
-                if (offset >= anchor.span.start and offset < anchor.span.end) return anchor.span;
-            }
-        }
-        return core.links.at(self.reader_text(), offset);
+        // The ranges the frame draws are already in the coordinates of the offset.
+        return core.links.among(self.reader_links(), offset);
     }
 
     /// The address under a cell of the body: the anchor whose words it is, the
     /// address written after those words, or a numbered reference.
     fn target_at(self: *Session, offset: u32, out: *[core.limits.url_max]u8) ?[]const u8 {
         if (self.html_view) {
+            // The anchors are ranges in the message's own text: walk the offset back.
+            const original = self.unshift_offset(offset);
             const anchors = self.html_anchors[0..self.html_anchor_count];
             for (anchors) |anchor| {
-                if (offset < anchor.span.start or offset >= anchor.span.end) continue;
+                if (original < anchor.span.start or original >= anchor.span.end) continue;
                 if (anchor.target.len == 0) continue;
                 return anchor.target;
             }
         }
         const text = self.gapped_text();
-        if (core.links.at(text, offset)) |link| return link.url(text, out);
+        if (core.links.among(self.reader_links(), offset)) |link| return link.url(text, out);
         if (core.links.reference_at(text, offset)) |number|
             return core.links.reference_url(text, number, out);
         return null;
@@ -1691,6 +1700,8 @@ pub const Session = struct {
 
     /// The links of the text the reader is showing, as ranges in that text.
     fn reader_links(self: *const Session) []const core.links.Link {
+        // When pictures moved the text, the ranges moved with it.
+        if (self.gap_count > 0 and self.link_view_len > 0) return self.link_view[0..self.link_view_len];
         if (self.html_view and self.html_len > 0) {
             return self.html_links[0..self.html_link_count];
         }
@@ -2319,6 +2330,7 @@ pub const Session = struct {
     /// nothing is printed over: the body simply gets longer.
     fn gapped_text(self: *Session) []const u8 {
         const text = self.reader_text();
+        self.gap_count = 0;
         if (!self.show_images or self.deps.draw_image == null) return text;
 
         var writer = std.Io.Writer.fixed(&self.gapped);
@@ -2333,8 +2345,12 @@ pub const Session = struct {
                 const rest = line[marker + 5 ..];
                 if (std.mem.indexOfScalar(u8, rest, ']')) |close| {
                     const rows = self.image_rows(rest[0..close]);
-                    var extra: u8 = 1;
+                    var extra: u16 = 1;
                     while (extra < rows) : (extra += 1) writer.writeByte('\n') catch break;
+                    if (extra > 1 and self.gap_count < self.gaps.len) {
+                        self.gaps[self.gap_count] = .{ .at = @intCast(end), .extra = extra - 1 };
+                        self.gap_count += 1;
+                    }
                 }
             }
             if (end < text.len) writer.writeByte('\n') catch break;
@@ -2343,7 +2359,46 @@ pub const Session = struct {
         }
         const gapped = writer.buffered();
         self.gapped_len = @intCast(gapped.len);
+        self.shift_links();
         return gapped;
+    }
+
+    /// How far the text moved at `offset`: everything inserted before it.
+    fn shift_at(self: *const Session, offset: u32) u32 {
+        var shift: u32 = 0;
+        for (self.gaps[0..self.gap_count]) |gap| {
+            if (gap.at < offset) shift += gap.extra;
+        }
+        return shift;
+    }
+
+    /// The links and anchors as ranges in the text the frame draws. Rebuilt with the
+    /// gaps, because the whole point of a gap is that everything after it moved.
+    fn shift_links(self: *Session) void {
+        const source = if (self.html_view and self.html_len > 0)
+            self.html_links[0..self.html_link_count]
+        else
+            self.text_links[0..self.text_link_count];
+        self.link_view_len = 0;
+        if (self.gap_count == 0) return;
+        for (source) |link| {
+            if (self.link_view_len == self.link_view.len) break;
+            self.link_view[self.link_view_len] = .{
+                .start = link.start + self.shift_at(link.start),
+                .end = link.end + self.shift_at(link.end),
+            };
+            self.link_view_len += 1;
+        }
+    }
+
+    /// Where a place in the drawn text is in the message: the same walk, backwards.
+    fn unshift_offset(self: *const Session, offset: u32) u32 {
+        var shift: u32 = 0;
+        for (self.gaps[0..self.gap_count]) |gap| {
+            if (gap.at + shift < offset) shift += gap.extra;
+        }
+        if (offset < shift) return 0;
+        return offset - shift;
     }
 
     /// Paints the images of the message over the text, at the markers the layout
@@ -5495,6 +5550,42 @@ test "the ground a picture is drawn over is the terminal's own background" {
     // A theme with no background of its own: black, which is what the terminal paints.
     theme.ground = null;
     try testing.expectEqual(@as(u32, 0x000000), Session.ground_colour(&theme));
+}
+
+test "pictures moving the text do not move the link off its words" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.show_images = true;
+    rig.session.deps.draw_image = ImageSink.draw;
+
+    // A picture the message carries, then a link: the gap it needs pushes the link's
+    // line down, and the underline has to go with it.
+    const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const raw = "Content-Type: multipart/related; boundary=\"b\"\n\n--b\nContent-Type: text/html\n\n" ++
+        "<p><img src=\"cid:logo@x\"></p><p>need help! <a href=\"https://example.com/s\">Contact our team</a></p>\n" ++
+        "--b\nContent-Type: image/png\nContent-Transfer-Encoding: base64\nContent-ID: <logo@x>\n\n" ++
+        png_base64 ++ "\n--b--\n";
+    try rig.open_reader(raw);
+
+    const text = rig.session.gapped_text();
+    const links = rig.session.reader_links();
+    var url_buffer: [core.limits.url_max]u8 = undefined;
+    try testing.expect(links.len == 1);
+    // The range the frame is given lands exactly on the words in the text it draws.
+    try testing.expectEqualStrings(
+        "Contact our team",
+        text[links[0].start..links[0].end],
+    );
+    // And walking it back finds the words in the message's own text, which is where
+    // the anchor's target lives.
+    const original = rig.session.unshift_offset(links[0].start);
+    try testing.expectEqualStrings(
+        "Contact our team",
+        rig.session.reader_text()[original..][0.."Contact our team".len],
+    );
+    try testing.expectEqualStrings("https://example.com/s", rig.session.target_at(links[0].start, &url_buffer).?);
 }
 
 test "the pointer becomes a chain over a link and an arrow when it leaves" {
