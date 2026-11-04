@@ -1072,8 +1072,20 @@ pub const Session = struct {
         // Clicking past the end of a line is clicking nothing, not clicking the
         // text that happens to follow it in the buffer.
         const column = mouse.x - 1;
-        if (column >= line.len) return null;
-        return line_start + column;
+        // Each link starts with a mark of its own, and the frame moved everything after
+        // it one column right. Walk back the same way, and a click on the mark itself
+        // is a click on the link.
+        var shift: u32 = 0;
+        for (self.reader_links()) |link| {
+            if (link.end <= line_start or link.start >= line_start + line.len) continue;
+            if (link.start < line_start) continue;
+            const starts_at = (link.start - line_start) + shift;
+            if (column == starts_at) return link.start;
+            if (column < starts_at) break;
+            shift += 1;
+        }
+        if (column < shift or column - shift >= line.len) return null;
+        return line_start + (column - shift);
     }
 
     /// Ctrl held and the pointer over a link: it lights up, so the click is not
@@ -6111,4 +6123,28 @@ test "the picture worker and the body worker never run at once" {
     try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
     rig.session.poll_images();
     try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
+}
+
+test "clicking a link works with the mark in front of it" {
+    var rig: Rig = .{};
+    defer rig.deinit();
+    var sink: LinkSink = .{};
+    try rig.start_with_links(&sink);
+    try rig.open_reader("go to https://example.com/a now");
+
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    const row = lay.reader_body_y;
+    const line = rig.session.wrapped.at(rig.session.state.reader_scroll, rig.session.gapped_text());
+    const start: u16 = @intCast(std.mem.indexOf(u8, line, "https://").?);
+
+    // Column of the link's first letter on screen: one gutter cell, the text before
+    // it, and the mark.
+    const x = 1 + start + 1;
+    const offset = rig.session.cell_offset(lay, .{ .x = x, .y = row, .kind = .press, .button = .left }) orelse
+        unreachable;
+    try testing.expect(offset == @as(u32, @intCast(std.mem.indexOf(u8, rig.session.gapped_text(), "https://").?)));
+
+    // And the mark itself opens the link too.
+    const on_mark = rig.session.cell_offset(lay, .{ .x = 1 + start, .y = row, .kind = .press, .button = .left }).?;
+    try testing.expectEqual(offset, on_mark);
 }
