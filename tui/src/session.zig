@@ -13,6 +13,7 @@ const clipboard_mod = @import("clipboard.zig");
 const keymap = @import("keymap.zig");
 const layout_mod = @import("layout.zig");
 const render_mod = @import("render.zig");
+const splash_mod = @import("splash.zig");
 const progress_mod = @import("progress.zig");
 const splash_painter_mod = @import("splash_painter.zig");
 const media = @import("media.zig");
@@ -1820,7 +1821,7 @@ pub const Session = struct {
                 self.deps.theme,
                 self.deps.reduced_motion,
                 self.splash_started_ms,
-                render_mod.account_labels(&self.state, &labels),
+                splash_mod.account_labels(&self.state, &labels),
             );
         }
         defer self.splash_painter.finish();

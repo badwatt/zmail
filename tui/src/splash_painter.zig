@@ -13,14 +13,14 @@
 const std = @import("std");
 const core = @import("core");
 const os = @import("os.zig");
-const render = @import("render.zig");
+const splash = @import("splash.zig");
 const screen = @import("screen.zig");
 const system_mod = @import("system.zig");
 const theme_mod = @import("theme.zig");
 const System = system_mod.System;
 
 /// One row of the mark, in bytes, at its largest scale.
-const mark_row_bytes: usize = 35 * render.mark_max_scale * 3;
+const mark_row_bytes: usize = 35 * splash.mark_max_scale * 3;
 
 /// Frames per second while the loop is away. Ten is what the loop itself manages;
 /// more only makes the terminal busier at a time when nobody is typing.
@@ -30,7 +30,7 @@ pub const Painter = struct {
     thread: ?std.Thread = null,
     stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     system: System = undefined,
-    placement: render.MarkPlacement = .{ .left = 0, .top = 0, .height = 0, .width = 0, .scale = 1 },
+    placement: splash.MarkPlacement = .{ .left = 0, .top = 0, .height = 0, .width = 0, .scale = 1 },
     /// `connecting to <accounts>`, copied: the caller's text lives on the stack.
     line: [160]u8 = undefined,
     line_row: u16 = 0,
@@ -61,13 +61,13 @@ pub const Painter = struct {
         if (self.thread != null) return;
         if (size.columns == 0 or size.rows == 0) return;
         self.system = system;
-        self.placement = render.splash_mark(size.columns, size.rows);
-        const line = render.splash_line(size.rows, labels, &self.line);
+        self.placement = splash.splash_mark(size.columns, size.rows);
+        const line = splash.splash_line(size.rows, labels, &self.line);
         self.line_row = line.row;
         self.line_left = line.left;
         self.line_len = line.text.len;
 
-        const corner = render.splash_right(size.columns, size.rows, &self.right);
+        const corner = splash.splash_right(size.columns, size.rows, &self.right);
         self.right_row = corner.row;
         self.right_left = corner.left;
         self.right_len = corner.text.len;
@@ -108,8 +108,8 @@ pub const Painter = struct {
         if (placement.height == 0 or placement.width == 0) return;
 
         const elapsed = os.monotonic_ms() - self.started_ms;
-        const level = if (self.reduced_motion) 1.0 else render.breath_level_at(elapsed);
-        if (level < render.hidden_level) return;
+        const level = if (self.reduced_motion) 1.0 else splash.breath_level_at(elapsed);
+        if (level < splash.hidden_level) return;
 
         // The line first, then the mark: the line sets and resets colours of its own,
         // and the mark's colour has to be the last thing said before its glyphs --
@@ -132,7 +132,7 @@ pub const Painter = struct {
             var length: usize = 0;
             var column: u16 = 0;
             while (column < placement.width) : (column += 1) {
-                const cell = render.mark_cell(placement.scale, row, column);
+                const cell = splash.mark_cell(placement.scale, row, column);
                 if (cell == ' ') {
                     if (length == row_text.len) break;
                     row_text[length] = ' ';
@@ -169,11 +169,11 @@ pub const Painter = struct {
         var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
         while (it.nextCodepoint()) |codepoint| {
             if (cells >= width) break;
-            const level = render.shimmer_level(cells, width, elapsed);
+            const level = splash.shimmer_level(cells, width, elapsed);
             if (current == null or current.? != level) {
                 var sgr: [48]u8 = undefined;
                 var writer = std.Io.Writer.fixed(&sgr);
-                screen.write_sgr(&writer, render.shimmer_style(&self.theme, level), self.theme.colored) catch return;
+                screen.write_sgr(&writer, splash.shimmer_style(&self.theme, level), self.theme.colored) catch return;
                 self.system.write(writer.buffered()) catch return;
                 current = level;
             }
@@ -190,7 +190,7 @@ pub const Painter = struct {
 /// The colour of the next step of the breath, through the screen's encoder so there
 /// is one SGR builder in the program.
 fn write_sgr(writer: *std.Io.Writer, theme: theme_mod.Theme, level: f32) std.Io.Writer.Error!void {
-    return screen.write_sgr(writer, render.breath_style(&theme, level), theme.colored);
+    return screen.write_sgr(writer, splash.breath_style(&theme, level), theme.colored);
 }
 
 const testing = std.testing;

@@ -12,6 +12,7 @@ const theme_mod = @import("theme.zig");
 const layout_mod = @import("layout.zig");
 const selection = @import("selection.zig");
 const wrap = @import("wrap.zig");
+const splash = @import("splash.zig");
 
 const Screen = screen.Screen;
 const Style = screen.Style;
@@ -183,7 +184,7 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
         return;
     }
     if (inputs.state.booting) {
-        render_splash(inputs, out);
+        splash.draw(out, inputs.state, inputs.theme, inputs.elapsed_ms, inputs.reduced_motion);
         return;
     }
 
@@ -212,394 +213,6 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
 /// The footer's busy glyph: one cell, so it has to say "working" at a glance and
 /// not be a second animation competing with the breath.
 const spinner_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
-
-/// The wordmark, drawn rather than typed: five rows, one-cell strokes, and air
-/// between the letters, so it reads as a masthead instead of as a fence. A
-/// terminal cannot set type, and this is the closest it gets.
-const wordmark_rows = [_][]const u8{
-    "▐██████ ▐█   ██ ▐██████ ▐██ ▐██    ",
-    "   ▐██  ▐██ ███ ▐██ ▐██ ▐██ ▐██    ",
-    "  ▐██   ▐█ █ ██ ▐██████ ▐██ ▐██    ",
-    " ▐██    ▐█   ██ ▐██ ▐██ ▐██ ▐██    ",
-    "▐██████ ▐█   ██ ▐██ ▐██ ▐██ ▐█████ ",
-};
-
-/// One wordmark, two sizes. The big one is the small one with every cell drawn
-/// twice: a terminal cannot scale type, so the only way to have a bigger
-/// wordmark is to draw more of it, and deriving it from one shape is what keeps
-/// the two from drifting apart.
-const wordmark = Words{
-    .small = decode(5, 35, wordmark_rows),
-};
-
-const Words = struct {
-    small: [5][35]u21,
-};
-
-fn decode(
-    comptime rows: usize,
-    comptime width: usize,
-    comptime lines: [rows][]const u8,
-) [rows][width]u21 {
-    @setEvalBranchQuota(4000);
-    var out: [rows][width]u21 = @splat(@splat(' '));
-    for (lines, 0..) |line, y| {
-        var index: usize = 0;
-        var cell: usize = 0;
-        while (index < line.len and cell < width) {
-            const length = std.unicode.utf8ByteSequenceLength(line[index]) catch 1;
-            const stop = @min(line.len, index + length);
-            out[y][cell] = std.unicode.utf8Decode(line[index..stop]) catch ' ';
-            index = stop;
-            cell += 1;
-        }
-    }
-    return out;
-}
-
-/// One breath, in ticks of the first screen's clock. A tick is one frame of the
-/// loop, 90ms: forty-four of them is a four-second breath, in and out.
-pub const breath_ticks: u16 = 44;
-
-/// Below this a letter is not drawn at all. The breath bottoms out well above it
-/// (`breath_floor`), so this only bites if that floor is set to nothing: the fade is
-/// a mix towards the ground, which is invisible on the ground itself, and only when
-/// the ground is known -- a cell that is not painted is gone on every terminal.
-pub const hidden_level: f32 = 0.02;
-
-/// How long one breath takes, in milliseconds.
-pub const breath_ms: i64 = @as(i64, breath_ticks) * 90;
-
-/// How solid the wordmark is, one at the peak. The whole word breathes together,
-/// which is what makes it read as one thing drawing breath rather than as letters
-/// flickering on their own.
-/// The breath at a moment in the first screen's life, from zero upwards.
-///
-/// It takes milliseconds, not a frame count: two things paint this mark -- the loop
-/// and the thread that keeps it moving while the connection blocks -- and a frame
-/// counter each of them incremented was two clocks, which showed up as the mark
-/// jumping a quarter of a breath whenever one handed over to the other.
-pub fn breath_level_at(elapsed_ms: i64) f32 {
-    // Full on the first frame, then a long, slow breath.
-    //
-    // A plain triangle this long would move by under two per cent a frame, which is
-    // the "it looks frozen" problem again. The travel is eased instead: steep at the
-    // ends of the breath and slow through the middle, so the first step after the
-    // first frame is already visible and the whole cycle still takes its four.
-    const half = breath_ms / 2;
-    const phase = @mod(elapsed_ms, breath_ms);
-    const travelled = if (phase <= half) phase else breath_ms - phase;
-    const fraction = @as(f32, @floatFromInt(travelled)) / @as(f32, half);
-    const shape = 1.0 - std.math.pow(f32, fraction, breath_ease);
-    // Never fully transparent: the breath is the mark getting quieter, not the mark
-    // leaving. Below this it is a shape that appears and disappears.
-    return breath_floor + (1.0 - breath_floor) * shape;
-}
-
-/// How dim the mark is allowed to get.
-pub const breath_floor: f32 = 0.45;
-
-/// Below one, so the ends of the breath are steep: the shape of air leaving slowly
-/// and coming back, not of a bar sliding.
-const breath_ease: f32 = 0.55;
-
-/// The style of one cell at `level` of opacity.
-///
-/// A terminal has no alpha channel, so transparency is a mix towards the colour
-/// behind the letter: the theme's own ground when it knows it, in OKLCH, so a light
-/// terminal fades towards paper and a dark one towards its own dark. Without a
-/// derivation to follow -- no colour, or the built-in palette -- the ramp is carried
-/// by weight and by the palette's steps instead.
-pub fn breath_style(theme: *const Theme, level: f32) Style {
-    const clamped = std.math.clamp(level, 0.0, 1.0);
-
-    if (!theme.colored) {
-        return if (clamped < 0.55) theme.accent.with_dim() else theme.accent.with_bold();
-    }
-
-    switch (theme.accent.fg) {
-        // A derived theme fades towards the ground it was made for.
-        .rgb => |rgb| {
-            const accent = core.oklch.from_rgb(.{ .r = rgb.r, .g = rgb.g, .b = rgb.b });
-            const ground_rgb: core.oklch.Rgb = theme.ground orelse core.oklch.Rgb{ .r = 0, .g = 0, .b = 0 };
-            const ground = core.oklch.from_rgb(ground_rgb);
-            const mixed = core.oklch.Oklch{
-                .l = ground.l + (accent.l - ground.l) * clamped,
-                .c = accent.c * clamped,
-                .h = accent.h,
-            };
-            const out = core.oklch.to_rgb(mixed);
-            return (Style{}).with_fg(.{ .rgb = .{ .r = out.r, .g = out.g, .b = out.b } });
-        },
-        // The built-in palette has no derivation: four steps of its own ramp.
-        else => {
-            const fixed = [_]u8{ 64, 68, 74, 80 };
-            const step: usize = @intFromFloat(clamped * @as(f32, fixed.len - 1) + 0.5);
-            return (Style{}).with_fg(.{ .ansi256 = fixed[@min(step, fixed.len - 1)] }).with_bold();
-        },
-    }
-}
-
-fn draw_wordmark(out: *Screen, placement: MarkPlacement, elapsed_ms: i64, theme: *const Theme) void {
-    const level = breath_level_at(elapsed_ms);
-    if (level < hidden_level) return;
-
-    var row: u16 = 0;
-    while (row < placement.height) : (row += 1) {
-        const y = placement.top +| row;
-        if (y >= out.rows) return;
-        var column: u16 = 0;
-        while (column < placement.width) : (column += 1) {
-            const cell = mark_cell(placement.scale, row, column);
-            if (cell == ' ') continue;
-            out.put(placement.left +| column, y, cell, breath_style(theme, level));
-        }
-    }
-}
-
-/// The welcome screen: the wordmark breathing, and what is happening. It stays
-/// up while the first connection blocks, so it is built to be looked at while
-/// still: the light is the only thing that moves, and a frozen frame of it is
-/// still a lit wordmark.
-/// Where the mark sits, for the one other place that has to know: the thread that
-/// keeps it breathing while the first connection blocks. Same arithmetic, one source.
-pub const MarkPlacement = struct {
-    left: u16,
-    top: u16,
-    height: u16,
-    width: u16,
-    /// 1, 2 or 3: how many cells of the drawing each stroke is worth.
-    scale: u8,
-};
-
-/// The largest scale the drawing is ever asked for.
-pub const mark_max_scale: u16 = 4;
-
-pub fn splash_mark(columns: u16, rows: u16) MarkPlacement {
-    // The biggest drawing that fits with air around it: the name is the first thing
-    // on screen and it should use the screen.
-    const scale: u8 = if (fits(mark_max_scale, columns, rows))
-        4
-    else if (fits(3, columns, rows))
-        3
-    else if (fits(2, columns, rows))
-        2
-    else
-        1;
-    const height: u16 = @intCast(wordmark.small.len * scale);
-    const width: u16 = @intCast(wordmark.small[0].len * scale);
-    const middle = rows / 2;
-    return .{
-        .left = (columns -| width) / 2,
-        .top = middle -| (height / 2) -| 2,
-        .height = height,
-        .width = width,
-        .scale = scale,
-    };
-}
-
-/// Whether the drawing at `scale` fits with room to breathe: three columns of air
-/// each side, and the sentence, the version and the footer under it.
-fn fits(scale: u8, columns: u16, rows: u16) bool {
-    const width: u16 = @intCast(wordmark.small[0].len * scale);
-    const height: u16 = @intCast(wordmark.small.len * scale);
-    return columns >= width + 6 and rows >= height + 8;
-}
-
-/// One cell of the mark, for the places that draw it themselves.
-pub fn mark_cell(scale: u8, row: u16, column: u16) u21 {
-    const source = wordmark.small[row / scale][column / scale];
-    if (source == ' ' or scale == 1) return source;
-    // A half block repeated sideways is a pair of stripes, not an edge: enlarged,
-    // every stroke is solid.
-    return 0x2588;
-}
-
-fn render_splash(inputs: Inputs, out: *Screen) void {
-    out.clear();
-    const theme = inputs.theme;
-    const elapsed: i64 = if (inputs.reduced_motion) 0 else inputs.elapsed_ms;
-
-    // The mark and the two lines under it are one block: place the block on the
-    // middle of the screen, not the mark alone, or the big size drags it up.
-    const placement = splash_mark(out.columns, out.rows);
-    const mark_rows = placement.height;
-    const mark_top = placement.top;
-    draw_wordmark(out, placement, elapsed, theme);
-
-    // The version, quiet, right under the mark: the one thing a first screen can
-    // honestly say about itself, and it comes from the manifest -- the release is
-    // that file, so nothing here spells a number.
-    var version_buffer: [64]u8 = undefined;
-    if (std.fmt.bufPrint(&version_buffer, "version: {s}", .{core.meta.version})) |text| {
-        const width = screen.text_columns(text);
-        // Under the mark and against its right edge: signed under the wordmark, the
-        // way a maker's mark sits under the name and not in the middle of the page.
-        const right_edge = placement.left +| placement.width;
-        const x = right_edge -| width;
-        _ = out.put_text(x, mark_top +| mark_rows +| 1, text, out.columns -| x, theme.border);
-    } else |_| {}
-
-    var label_buffer: [96]u8 = undefined;
-    const labels = account_labels(inputs.state, &label_buffer);
-
-    var line_buffer: [160]u8 = undefined;
-    const status = splash_line(out.rows, labels, &line_buffer);
-
-    const address_row = mark_top +| mark_rows +| 2;
-    const footer_row = out.rows -| 1;
-    if (inputs.state.accounts.len == 1 and address_row < footer_row) {
-        var address_buffer: [core.limits.address_max]u8 = undefined;
-        const address = inputs.state.accounts.items[0].address.addr_spec(&address_buffer);
-        if (address.len > 0) {
-            // Under the words it belongs to, so the block has one left edge --
-            // unless it would run off the screen, where centred is the fallback.
-            const width = screen.text_columns(address);
-            const x = if (status.left +| width <= out.columns) status.left else (out.columns -| width) / 2;
-            _ = out.put_text(x, address_row, address, out.columns -| x, theme.dim);
-        }
-    }
-
-    // The two corners of the last row: what is happening on the left, the way out on
-    // the right, and the middle kept clear so the row reads as a footer and not as a
-    // sentence with something appended to it.
-    var right_buffer: [32]u8 = undefined;
-    const corner = splash_right(out.columns, out.rows, &right_buffer);
-    _ = draw_shimmer(out, corner.left, corner.row, corner.text, elapsed, theme);
-
-    // The left sentence only when it stops before the right one: the middle of the
-    // last row stays empty so the row reads as a footer.
-    const line_width = screen.text_columns(status.text);
-    const before_right: u16 = corner.left -| 1;
-    if (status.left +| line_width <= before_right) {
-        _ = draw_shimmer(out, status.left, status.row, status.text, elapsed, theme);
-    }
-}
-
-/// The shimmer: a band of light of one fixed width, travelling across a line of
-/// text from the left and wrapping round, the way Pi marks work that is still
-/// happening.
-///
-/// This is the one shape a "pulse" can take inside a terminal: the terminal's own
-/// progress bar (`OSC 9;4`) is a fill from zero to a percentage of the width, so a
-/// band that keeps its size and moves has to be drawn here. Fixed width, fixed
-/// speed, and the band never grows -- what travels is the light, not the amount of
-/// text it covers.
-pub const shimmer_width: u16 = 6;
-/// Cells per second. Pi uses ten on a line of prose; a splash is read from further
-/// away, so this is quicker without being a blur.
-pub const shimmer_speed: u16 = 18;
-
-/// Draws `text` with the band at `elapsed_ms`. Returns the columns used.
-pub fn draw_shimmer(
-    out: *Screen,
-    x: u16,
-    y: u16,
-    text: []const u8,
-    elapsed_ms: i64,
-    theme: *const Theme,
-) u16 {
-    if (y >= out.rows or x >= out.columns) return 0;
-    const width: u16 = @intCast(@min(screen.text_columns(text), out.columns -| x));
-    if (width == 0) return 0;
-
-    var cells: u16 = 0;
-    var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
-    while (it.nextCodepoint()) |codepoint| {
-        if (cells >= width) break;
-        const level = shimmer_level(@intCast(cells), width, elapsed_ms);
-        out.put(x +| cells, y, codepoint, shimmer_style(theme, level));
-        cells += screen.cell_width(codepoint);
-    }
-    return cells;
-}
-
-/// How lit the cell at `cell` is: three levels, because a terminal has no alpha and
-/// the band needs an edge. One function, so the screen and the painter thread cannot
-/// disagree about where the light is.
-pub const shimmer_bright = 2;
-pub const shimmer_soft = 1;
-pub const shimmer_dim = 0;
-
-pub fn shimmer_level(cell: u16, width: u16, elapsed_ms: i64) u8 {
-    // One way only: the band enters from the left, crosses, and leaves by the right,
-    // then starts again at the left. It spends a moment off the line at each end,
-    // which is what keeps the restart from reading as a jump.
-    const span: i64 = @as(i64, width) + shimmer_width;
-    const travelled: i64 = @divTrunc(elapsed_ms * @as(i64, shimmer_speed), 1000);
-    const offset: i64 = @mod(travelled, span);
-    const band_start = offset - @as(i64, shimmer_width);
-    const band_end = offset;
-
-    const here: i64 = cell;
-    if (here >= band_start and here < band_end) return shimmer_bright;
-    if ((here >= band_start - 1 and here < band_start) or (here >= band_end and here < band_end + 1)) {
-        return shimmer_soft;
-    }
-    return shimmer_dim;
-}
-
-/// The right corner of the footer, and where it sits: `Ctrl+C quits`, against the edge.
-pub fn splash_right(columns: u16, rows: u16, buffer: []u8) SplashLine {
-    const text = copy_into("Ctrl+C quits", buffer);
-    return .{
-        .row = rows -| 1,
-        .left = columns -| 2 -| screen.text_columns(text),
-        .text = text,
-    };
-}
-
-/// `text` in `buffer`, truncated to fit: the splash copies every sentence it shows,
-/// because the caller's may be a temporary.
-fn copy_into(text: []const u8, buffer: []u8) []const u8 {
-    const length = @min(text.len, buffer.len);
-    @memcpy(buffer[0..length], text[0..length]);
-    return buffer[0..length];
-}
-
-pub fn shimmer_style(theme: *const Theme, level: u8) Style {
-    return switch (level) {
-        shimmer_bright => theme.accent.with_bold(),
-        shimmer_soft => theme.text,
-        else => theme.dim,
-    };
-}
-
-/// The line under the mark, and where it sits: `connecting to <accounts>`.
-pub const SplashLine = struct {
-    row: u16,
-    left: u16,
-    text: []const u8,
-};
-
-pub fn splash_line(rows: u16, labels: []const u8, buffer: []u8) SplashLine {
-    var line: [160]u8 = undefined;
-    const full = std.fmt.bufPrint(&line, "connecting to {s}", .{labels}) catch labels;
-    return .{
-        // The last row: what is happening on the left, the way out on the right.
-        .row = rows -| 1,
-        // One column in from the edge, like every other row of this app.
-        .left = 1,
-        .text = copy_into(full, buffer),
-    };
-}
-
-pub fn account_labels(state: *const State, buffer: []u8) []const u8 {
-    if (state.accounts.len == 0) return "mail";
-    if (state.account_filter) |filter| {
-        const label = state.accounts.label_for(filter);
-        if (label.len > 0) return label;
-    }
-
-    var writer = std.Io.Writer.fixed(buffer);
-    var index: u8 = 0;
-    while (index < state.accounts.len) : (index += 1) {
-        const account = state.accounts.at(index) orelse continue;
-        if (index > 0) writer.writeAll(", ") catch break;
-        writer.writeAll(account.label.slice()) catch break;
-    }
-    return writer.buffered();
-}
 
 fn render_list(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     if (inputs.state.mode == .search) {
@@ -2017,7 +1630,7 @@ test "frame shows reader hints and a scroll percentage" {
     try row_contains(&out, 23, "75%");
 }
 
-test "the boot splash is a wordmark, the account, and a footer" {
+test "the boot splash is a splash.wordmark, the account, and a footer" {
     var f = try fixture();
     defer f.deinit();
     f.state.booting = true;
@@ -2049,7 +1662,7 @@ test "the boot splash is a wordmark, the account, and a footer" {
     try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
 }
 
-test "the light moves across the wordmark while its shape stays put" {
+test "the light moves across the splash.wordmark while its shape stays put" {
     var f = try fixture();
     defer f.deinit();
     f.state.booting = true;
@@ -2104,7 +1717,7 @@ test "a cramped splash drops the address before it reaches the footer" {
 
     var out = Screen.init(40, 10);
     frame(f.inputs(40, 10), &out);
-    // Ten rows: middle is 5, so the wordmark starts at 1 and the footer is 9.
+    // Ten rows: middle is 5, so the splash.wordmark starts at 1 and the footer is 9.
     try row_contains(&out, 1, "█████");
     var footer_buffer: [512]u8 = undefined;
     const footer = out.row_text(9, &footer_buffer);
@@ -2129,7 +1742,7 @@ test "the splash names the account in scope, not every account" {
     try testing.expect(std.mem.indexOf(u8, out.row_text(17, &row_buffer), "home") == null);
 }
 
-test "the wordmark is lit by the derived theme, not by a fixed palette" {
+test "the splash.wordmark is lit by the derived theme, not by a fixed palette" {
     var f = try fixture();
     defer f.deinit();
     f.theme = theme_mod.Theme.from_background(.{ .r = 25, .g = 25, .b = 37 });
@@ -2666,20 +2279,20 @@ test "the band keeps its width and travels along the line" {
     // Two moments where the band is fully over the text: it does not grow, it
     // moves, which is what a pulse is and a fill is not.
     var early = Screen.init(60, 1);
-    _ = draw_shimmer(&early, 0, 0, "connecting to home", 400, &theme);
+    _ = splash.draw_shimmer(&early, 0, 0, "connecting to home", 400, &theme);
     const before = shimmer_columns(&early, 0, &theme, &buffer);
     const before_len = before.len;
     const before_start = if (before.len > 0) before[0] else 0;
 
     var later = Screen.init(60, 1);
-    _ = draw_shimmer(&later, 0, 0, "connecting to home", 700, &theme);
+    _ = splash.draw_shimmer(&later, 0, 0, "connecting to home", 700, &theme);
     const after = shimmer_columns(&later, 0, &theme, &buffer);
 
     try testing.expect(before_len > 0);
     try testing.expectEqual(before_len, after.len);
     try testing.expect(before_start < after[0]);
     // A band, never the whole line.
-    try testing.expect(@as(u16, @intCast(before_len)) <= shimmer_width);
+    try testing.expect(@as(u16, @intCast(before_len)) <= splash.shimmer_width);
 }
 
 test "the band crosses one way only" {
@@ -2697,7 +2310,7 @@ test "the band crosses one way only" {
     var moment: i64 = 0;
     while (moment < 5_000) : (moment += 20) {
         var out = Screen.init(60, 1);
-        _ = draw_shimmer(&out, 0, 0, text, moment, &theme);
+        _ = splash.draw_shimmer(&out, 0, 0, text, moment, &theme);
         const columns = shimmer_columns(&out, 0, &theme, &buffer);
         const position: i64 = if (columns.len > 0) columns[0] else -1;
         if (previous >= 0 and position >= 0) {
@@ -2716,19 +2329,19 @@ test "the band leaves the line at both ends and comes round" {
     const theme = theme_mod.Theme.dark();
     const text = "connecting";
     const width: u16 = @intCast(screen.text_columns(text));
-    const span: i64 = width + shimmer_width;
+    const span: i64 = width + splash.shimmer_width;
 
     var seen_off = false;
     var seen_on = false;
     var buffer: [64]u16 = undefined;
     var moment: i64 = 0;
-    const cycle_ms: i64 = @divTrunc(3 * span * 1000, @as(i64, shimmer_speed));
+    const cycle_ms: i64 = @divTrunc(3 * span * 1000, @as(i64, splash.shimmer_speed));
     while (moment < cycle_ms) : (moment += 40) {
         var out = Screen.init(40, 1);
-        _ = draw_shimmer(&out, 0, 0, text, moment, &theme);
+        _ = splash.draw_shimmer(&out, 0, 0, text, moment, &theme);
         const columns = shimmer_columns(&out, 0, &theme, &buffer);
         if (columns.len == 0) seen_off = true;
-        if (columns.len == shimmer_width) seen_on = true;
+        if (columns.len == splash.shimmer_width) seen_on = true;
     }
     // It enters, it crosses, it leaves, it starts again.
     try testing.expect(seen_off);
@@ -2738,24 +2351,24 @@ test "the band leaves the line at both ends and comes round" {
 test "a shimmer with nothing to shine on draws nothing" {
     const theme = theme_mod.Theme.dark();
     var out = Screen.init(10, 1);
-    try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 0, 0, "", 0, &theme));
-    try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 0, 5, "text", 0, &theme));
-    try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 12, 0, "text", 0, &theme));
+    try testing.expectEqual(@as(u16, 0), splash.draw_shimmer(&out, 0, 0, "", 0, &theme));
+    try testing.expectEqual(@as(u16, 0), splash.draw_shimmer(&out, 0, 5, "text", 0, &theme));
+    try testing.expectEqual(@as(u16, 0), splash.draw_shimmer(&out, 12, 0, "text", 0, &theme));
 }
 
-test "the wordmark breathes: it dims and comes back, and never leaves" {
+test "the splash.wordmark breathes: it dims and comes back, and never leaves" {
     var lowest: f32 = 1;
     var highest: f32 = 0;
     var moment: i64 = 0;
-    while (moment < breath_ms) : (moment += 90) {
-        const level = breath_level_at(moment);
+    while (moment < splash.breath_ms) : (moment += 90) {
+        const level = splash.breath_level_at(moment);
         lowest = @min(lowest, level);
         highest = @max(highest, level);
     }
     // Solid at the peak, quieter at the trough -- and never transparent enough to be
     // gone: the mark stays readable while it breathes.
     try testing.expect(highest >= 0.99);
-    try testing.expect(lowest >= breath_floor - 0.01);
+    try testing.expect(lowest >= splash.breath_floor - 0.01);
     try testing.expect(lowest < 0.6);
 }
 
@@ -2770,7 +2383,7 @@ test "at the trough the mark is dimmer, and at the peak it is whole" {
 
     var hidden = Screen.init(80, 24);
     // Half a breath in -- the trough of the cosine: nothing is painted at all.
-    f.elapsed_ms = breath_ms / 2;
+    f.elapsed_ms = splash.breath_ms / 2;
     frame(f.inputs(80, 24), &hidden);
 
     var drawn_shown = false;
@@ -2804,8 +2417,8 @@ test "a faded letter is mixed towards the terminal's own ground" {
     const paper = theme_mod.Theme.from_background(.{ .r = 253, .g = 246, .b = 227 });
     const night = theme_mod.Theme.from_background(.{ .r = 20, .g = 20, .b = 24 });
 
-    const faint_on_paper = breath_style(&paper, 0.05);
-    const faint_at_night = breath_style(&night, 0.05);
+    const faint_on_paper = splash.breath_style(&paper, 0.05);
+    const faint_at_night = splash.breath_style(&night, 0.05);
     try testing.expect(faint_on_paper.fg == .rgb);
     try testing.expect(faint_at_night.fg == .rgb);
 
@@ -2813,23 +2426,23 @@ test "a faded letter is mixed towards the terminal's own ground" {
     const night_level = core.oklch.luminance(.{ .r = faint_at_night.fg.rgb.r, .g = faint_at_night.fg.rgb.g, .b = faint_at_night.fg.rgb.b });
     try testing.expect(paper_level > night_level);
     // Faded is dimmer than solid, on the same ground.
-    const solid = breath_style(&night, 1.0);
+    const solid = splash.breath_style(&night, 1.0);
     const solid_level = core.oklch.luminance(.{ .r = solid.fg.rgb.r, .g = solid.fg.rgb.g, .b = solid.fg.rgb.b });
     try testing.expect(solid_level > night_level);
 }
 
 test "without a derivation the breath is carried by weight and the palette's steps" {
     const mono = theme_mod.Theme.mono();
-    try testing.expect(breath_style(&mono, 0.2).attrs.dim);
-    try testing.expect(breath_style(&mono, 0.9).attrs.bold);
+    try testing.expect(splash.breath_style(&mono, 0.2).attrs.dim);
+    try testing.expect(splash.breath_style(&mono, 0.9).attrs.bold);
 
     // The built-in palette has no ground to mix towards: it walks its own ramp.
     const dark = theme_mod.Theme.dark();
     var lowest: u8 = 255;
     var highest: u8 = 0;
     var tick: u16 = 0;
-    while (tick < breath_ticks * 2) : (tick += 1) {
-        const index = breath_style(&dark, breath_level_at(tick * 90)).fg.ansi256;
+    while (tick < splash.breath_ticks * 2) : (tick += 1) {
+        const index = splash.breath_style(&dark, splash.breath_level_at(tick * 90)).fg.ansi256;
         lowest = @min(lowest, index);
         highest = @max(highest, index);
     }
@@ -2839,23 +2452,23 @@ test "without a derivation the breath is carried by weight and the palette's ste
 test "the breath moves from the first tick, at a speed the eye can see" {
     // A cosine would spend its first quarter within two per cent of the peak: a mark
     // that looks frozen. The level has to be a visible step away by the second tick.
-    const first = breath_level_at(0);
-    const second = breath_level_at(90);
+    const first = splash.breath_level_at(0);
+    const second = splash.breath_level_at(90);
     try testing.expectEqual(@as(f32, 1.0), first);
     try testing.expect(first - second > 0.05);
     // And the way back is the same movement in reverse: empty at the trough, and up
     // again four ticks later.
-    try testing.expectEqual(breath_floor, breath_level_at(breath_ms / 2));
+    try testing.expectEqual(splash.breath_floor, splash.breath_level_at(splash.breath_ms / 2));
     // And it climbs again on the way back, without a plateau at the bottom.
-    try testing.expect(breath_level_at(breath_ms / 2 + 540) > breath_level_at(breath_ms / 2 + 180));
-    try testing.expect(breath_level_at(breath_ms / 2 + 540) > breath_floor);
+    try testing.expect(splash.breath_level_at(splash.breath_ms / 2 + 540) > splash.breath_level_at(splash.breath_ms / 2 + 180));
+    try testing.expect(splash.breath_level_at(splash.breath_ms / 2 + 540) > splash.breath_floor);
 }
 
 test "the footer: two corners, and nothing between them" {
     var buffer: [64]u8 = undefined;
-    const left = splash_line(24, "work, home", &buffer);
+    const left = splash.splash_line(24, "work, home", &buffer);
     var other: [64]u8 = undefined;
-    const right = splash_right(80, 24, &other);
+    const right = splash.splash_right(80, 24, &other);
 
     try testing.expectEqualStrings("connecting to work, home", left.text);
     try testing.expectEqualStrings("Ctrl+C quits", right.text);
@@ -2867,22 +2480,22 @@ test "the footer: two corners, and nothing between them" {
 
     // A buffer too small truncates instead of writing past it.
     var small: [4]u8 = undefined;
-    try testing.expectEqualStrings("Ctrl", splash_right(80, 24, &small).text);
+    try testing.expectEqualStrings("Ctrl", splash.splash_right(80, 24, &small).text);
 }
 
 test "both sizes of the mark answer their own cells" {
-    const huge = splash_mark(120, 24);
+    const huge = splash.splash_mark(120, 24);
     try testing.expectEqual(@as(u8, 3), huge.scale);
     // As big as the screen allows, up to four cells a stroke.
-    const widest = splash_mark(170, 45);
+    const widest = splash.splash_mark(170, 45);
     try testing.expectEqual(@as(u8, 4), widest.scale);
-    const large = splash_mark(90, 24);
+    const large = splash.splash_mark(90, 24);
     try testing.expectEqual(@as(u8, 2), large.scale);
-    try testing.expect(mark_cell(2, 0, 0) != 0);
+    try testing.expect(splash.mark_cell(2, 0, 0) != 0);
 
-    const small = splash_mark(36, 24);
+    const small = splash.splash_mark(36, 24);
     try testing.expectEqual(@as(u8, 1), small.scale);
-    try testing.expect(mark_cell(1, 0, 0) != 0);
+    try testing.expect(splash.mark_cell(1, 0, 0) != 0);
     // The masthead is the same word at twice the size, in both directions.
     try testing.expectEqual(small.width * 2, large.width);
     try testing.expectEqual(small.width * 3, huge.width);
