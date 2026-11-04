@@ -1072,7 +1072,6 @@ pub const Session = struct {
             // The bar moves itself: the wait it reports is often one blocking
             // call that nothing here could tick through.
             progress_mod.begin(self.deps.system, os.monotonic_ms());
-            progress_mod.keep_alive(os.monotonic_ms());
             return;
         }
         if (self.progress_since_ms == 0) return;

@@ -288,8 +288,12 @@ const pulse_offsets = [_]f32{ -0.14, -0.07, 0.0, 0.07 };
 /// column to its left. `tick` moves the whole ramp; nothing else on the screen
 /// moves at all.
 fn pulse_shade(tick: u16, column: u16, width: u16) u8 {
+    // The light crosses and comes back, like the shimmer under it: one movement on
+    // the screen, not two that disagree.
     const steps = pulse_offsets.len;
-    const travel = (@as(u32, tick % pulse_ticks)) * steps / pulse_ticks;
+    // A triangle, not a sawtooth: the light reaches the edge and turns round.
+    const phase = (@as(u32, tick % (pulse_ticks * 2)) * steps) / pulse_ticks;
+    const travel = if (phase <= steps) phase else steps * 2 - phase;
     const across = @as(u32, column) * steps / @max(1, width);
     return @intCast((travel + across) % steps);
 }
@@ -426,11 +430,13 @@ pub fn draw_shimmer(
     const width: u16 = @intCast(@min(screen.text_columns(text), out.columns -| x));
     if (width == 0) return 0;
 
-    // From fully off the left to fully off the right, then round again: the band
-    // enters and leaves instead of appearing in the middle of the words.
-    const span = width + shimmer_width;
+    // Left to right, then back from the right to the left: a band that reaches the
+    // end and turns round reads as one thing moving, where a band that wraps reads
+    // as a flicker back to the start.
+    const span: i64 = @as(i64, width) + shimmer_width;
     const travelled: i64 = @divTrunc(elapsed_ms * @as(i64, shimmer_speed), 1000);
-    const offset: i64 = @mod(travelled, @as(i64, span));
+    const phase: i64 = @mod(travelled, span * 2);
+    const offset: i64 = if (phase <= span) phase else span * 2 - phase;
     const band_start = offset - @as(i64, shimmer_width);
     const band_end = offset;
 
@@ -2531,6 +2537,42 @@ test "the band keeps its width and travels along the line" {
     try testing.expect(before_start < after[0]);
     // A band, never the whole line.
     try testing.expect(@as(u16, @intCast(before_len)) <= shimmer_width);
+}
+
+test "the band turns round at the end instead of jumping back" {
+    const theme = theme_mod.Theme.dark();
+    const text = "connecting to home";
+    const width: u16 = @intCast(screen.text_columns(text));
+
+    var buffer: [64]u16 = undefined;
+    var previous: i64 = -1;
+    var rising_seen = false;
+    var falling_seen = false;
+    var largest_step: i64 = 0;
+
+    // One pixel every 20ms over two whole passes of the line.
+    var moment: i64 = 0;
+    while (moment < 6_000) : (moment += 20) {
+        var out = Screen.init(60, 1);
+        _ = draw_shimmer(&out, 0, 0, text, moment, &theme);
+        const columns = shimmer_columns(&out, 0, &theme, &buffer);
+        // Where the band is, or off the line at the start of a pass.
+        const position: i64 = if (columns.len > 0) columns[0] else -1;
+        if (previous >= 0 and position >= 0) {
+            const step_by = position - previous;
+            if (step_by > 0) rising_seen = true;
+            if (step_by < 0) falling_seen = true;
+            largest_step = @max(largest_step, if (step_by < 0) -step_by else step_by);
+        }
+        previous = position;
+    }
+
+    // Both directions, and no jump back to the left edge: going back is the same
+    // trip in reverse, a cell at a time.
+    try testing.expect(rising_seen);
+    try testing.expect(falling_seen);
+    try testing.expect(largest_step <= @as(i64, shimmer_width));
+    _ = width;
 }
 
 test "the band leaves the line at both ends and comes round" {

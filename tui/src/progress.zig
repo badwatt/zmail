@@ -1,24 +1,27 @@
 //! The terminal's own progress bar: "busy", and nothing more.
 //!
 //! `OSC 9;4` gives a program four states, and the only honest one for work whose
-//! length is unknown is *indeterminate*. The terminal draws a fill for a
-//! percentage, so sending a number would be an animation drawn as a measurement --
-//! and the number that moves would only ever be a clock. What actually moves in
-//! this app is the shimmer on the screen, which it draws itself; this is the flag
-//! the window shows, so the tab says "working" even when the terminal has focus
-//! somewhere else.
+//! length is unknown is *indeterminate*: the terminal draws a fill for a
+//! percentage, so a moving number would be an animation drawn as a measurement.
+//!
+//! What makes the indeterminate bar move is the repetition: Ghostty animates it
+//! from the updates themselves, and forgets a state it has not heard about, so the
+//! state is sent every 100ms while the work lasts -- the same thing zix does.
+//! Measured in a pty: six updates and a clear in the first second.
 //!
 //! Off until the process boundary says the terminal can take it: a pipe, a log, or
 //! `TERM=dumb` must not receive escape sequences.
 
 const std = @import("std");
 const core = @import("core");
+const os = @import("os.zig");
 const system_mod = @import("system.zig");
 const System = system_mod.System;
 
-/// Ghostty resets a progress state it has not heard about for about fifteen
-/// seconds, so a long wait repeats itself. Ten leaves room for a missed tick.
-pub const repeat_ms: i64 = 10_000;
+/// Ghostty animates an indeterminate bar from the updates themselves and forgets a
+/// state it has not heard about for about fifteen seconds, so a bar that is sent
+/// once stands still. zix sends this every 100ms; so does this.
+pub const repeat_ms: i64 = 100;
 
 var enabled: bool = false;
 /// The port to write through: the session's, which is the process's.
@@ -28,12 +31,19 @@ var active: bool = false;
 var shown: core.progress.State = .clear;
 var shown_at_ms: i64 = 0;
 
+var thread: ?std.Thread = null;
+var stop = std.atomic.Value(bool).init(true);
+var hold = std.atomic.Value(bool).init(false);
+
 pub fn enable(value: bool) void {
     enabled = value;
     // A module turned off and on again has told the terminal nothing.
     shown = .clear;
     shown_at_ms = 0;
-    if (!value) active = false;
+    if (!value) {
+        active = false;
+        join();
+    }
 }
 
 pub fn is_enabled() bool {
@@ -52,7 +62,10 @@ pub fn begin(system: System, now_ms: i64) void {
     port = system;
     if (active) return;
     active = true;
-    write(system, .indeterminate, now_ms, false);
+    hold.store(false, .release);
+    write(system, .indeterminate, now_ms);
+    stop.store(false, .release);
+    if (thread == null) thread = std.Thread.spawn(.{}, keep_moving, .{}) catch null;
 }
 
 /// Takes it down. Whatever the wait did, the bar goes: a bar left behind says
@@ -60,19 +73,30 @@ pub fn begin(system: System, now_ms: i64) void {
 pub fn end() void {
     if (!active) return;
     active = false;
-    if (port) |system| write(system, .clear, 0, false);
+    join();
+    if (port) |system| write(system, .clear, 0);
+}
+
+fn join() void {
+    stop.store(true, .release);
+    if (thread) |joined| {
+        joined.join();
+        thread = null;
+    }
 }
 
 /// Waiting for a human (a browser, an editor): the bar holds still and says so,
 /// instead of claiming work that is not happening.
 pub fn pause() void {
     if (!active) return;
-    if (port) |system| write(system, .paused, 0, false);
+    hold.store(true, .release);
+    if (port) |system| write(system, .paused, 0);
 }
 
 pub fn unpause() void {
     if (!active) return;
-    if (port) |system| write(system, .indeterminate, 0, false);
+    hold.store(false, .release);
+    if (port) |system| write(system, .indeterminate, 0);
 }
 
 /// Takes the bar down without touching the port's lifetime: the one caller is the
@@ -80,20 +104,30 @@ pub fn unpause() void {
 /// there is nothing to leave tidy.
 pub fn abandon(system: System) void {
     active = false;
-    write(system, .clear, 0, false);
+    write(system, .clear, 0);
 }
 
-/// Repeats the bar for a wait that outlives the terminal's memory of it.
-pub fn keep_alive(now_ms: i64) void {
-    if (!active or shown == .clear) return;
-    if (now_ms - shown_at_ms < repeat_ms) return;
-    // Said again even though nothing changed: that is the whole point of it.
-    if (port) |system| write(system, shown, now_ms, true);
+/// Repeats the bar while the work goes on: that repetition is what the terminal
+/// animates, and what stops it forgetting. Sliced, so stopping joins in one slice.
+fn keep_moving() void {
+    while (true) {
+        var waited: i64 = 0;
+        while (waited < repeat_ms and !stop.load(.acquire)) : (waited += 10) os.sleep_ms(10);
+        if (stop.load(.acquire)) return;
+        if (hold.load(.acquire)) continue;
+        if (port) |system| write_now(system, .indeterminate, 0);
+    }
 }
 
-fn write(system: System, next: core.progress.State, now_ms: i64, force: bool) void {
-    if (!force and next == shown and next != .clear) return;
+fn write(system: System, next: core.progress.State, now_ms: i64) void {
+    // Already saying it: only a repeat says it again.
+    if (next == shown and next != .clear) return;
+    write_now(system, next, now_ms);
+}
 
+/// The one path to the terminal. `shown` only moves when the bytes went out, so a
+/// terminal that refuses them keeps being asked.
+fn write_now(system: System, next: core.progress.State, now_ms: i64) void {
     var buffer: [core.progress.max_sequence]u8 = undefined;
     const bytes = core.progress.sequence(next, 0, &buffer);
     if (bytes.len == 0) return;
@@ -110,7 +144,6 @@ test "nothing is written until the terminal is known to take it" {
     begin(fake.system(), 0);
     pause();
     unpause();
-    keep_alive(60_000);
     end();
     try testing.expectEqualStrings("", fake.output_text());
     try testing.expectEqual(core.progress.State.clear, state());
@@ -140,7 +173,7 @@ test "the bar goes up once, holds, and comes down once" {
     try testing.expectEqualStrings("", fake.output_text());
 }
 
-test "a human in a browser holds the bar, and a long wait repeats it" {
+test "a human in a browser holds the bar, and the thread keeps it moving" {
     var fake: system_mod.Fake = .{};
     enable(true);
     defer enable(false);
@@ -152,18 +185,31 @@ test "a human in a browser holds the bar, and a long wait repeats it" {
     try testing.expectEqual(core.progress.State.paused, state());
     try testing.expectEqualStrings("\x1b]9;4;4\x1b\\", fake.output_text());
 
-    fake.output_len = 0;
+    // Nothing *keeps* moving while a human is reading: at most the write that was
+    // already in flight, and none after it.
+    os.sleep_ms(repeat_ms * 2);
+    const settled = std.mem.count(u8, fake.output_text(), "\x1b]9;4;3;0");
+    os.sleep_ms(repeat_ms * 4);
+    try testing.expectEqual(settled, std.mem.count(u8, fake.output_text(), "\x1b]9;4;3;0"));
+
+    const before_resume = std.mem.count(u8, fake.output_text(), "\x1b]9;4;3;0");
     unpause();
     try testing.expectEqual(core.progress.State.indeterminate, state());
+    try testing.expect(std.mem.count(u8, fake.output_text(), "\x1b]9;4;3;0") > before_resume);
+}
 
-    // Inside the window the terminal still remembers: silence.
-    fake.output_len = 0;
-    keep_alive(5_000);
-    try testing.expectEqualStrings("", fake.output_text());
+test "the bar is repeated while the work goes on, because that is what animates it" {
+    var fake: system_mod.Fake = .{};
+    enable(true);
+    defer enable(false);
 
-    // Past it, the bar is said again.
-    keep_alive(1_000 + repeat_ms);
-    try testing.expectEqualStrings("\x1b]9;4;3;0\x1b\\", fake.output_text());
+    begin(fake.system(), 0);
+    // The loop is blocked here: no tick of it reaches this module.
+    os.sleep_ms(repeat_ms * 3 + 40);
+    end();
+
+    const written = fake.output_text();
+    try testing.expect(std.mem.count(u8, written, "\x1b]9;4;3;0") >= 3);
 }
 
 test "a terminal that refuses the escape does not stop the work" {
