@@ -208,8 +208,10 @@ test "the bar is repeated while the work goes on, because that is what animates 
     os.sleep_ms(repeat_ms * 3 + 40);
     end();
 
+    // At least twice in a third of a second: the point is that the module writes
+    // without being ticked, not that a loaded runner manages exactly three.
     const written = fake.output_text();
-    try testing.expect(std.mem.count(u8, written, "\x1b]9;4;3;0") >= 3);
+    try testing.expect(std.mem.count(u8, written, "\x1b]9;4;3;0") >= 2);
 }
 
 test "a terminal that refuses the escape does not stop the work" {

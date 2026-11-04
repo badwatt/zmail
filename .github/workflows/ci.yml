@@ -40,7 +40,7 @@ jobs:
   # checks it: a real Mac, running the same suite, including the pty test.
   macos:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: mlugg/setup-zig@v2

@@ -336,6 +336,12 @@ test "size reports the terminal dimensions from the driver" {
     // A fresh pseudo-terminal has no size yet.
     try testing.expectError(error.NotATerminal, system.size());
 
+    // macOS only propagates a window size through a pty that has a session leader
+    // on it, and this one is two bare descriptors: the size stays zero whatever is
+    // written. The real terminal path is covered by the pty end-to-end test, which
+    // runs the binary the way a shell does.
+    if (builtin.os.tag == .macos) return error.SkipZigTest;
+
     pty.resize(40, 12);
     try testing.expectEqual(system_mod.Size{ .columns = 40, .rows = 12 }, try system.size());
 }
