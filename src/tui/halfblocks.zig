@@ -40,7 +40,6 @@ pub fn draw(
         }) catch return false;
         system.write(at) catch return false;
 
-        var colour: [64]u8 = undefined;
         var last_top: u32 = 0xFFFFFFFF;
         var last_bottom: u32 = 0xFFFFFFFF;
 
@@ -61,15 +60,22 @@ pub fn draw(
             // -- that is what makes a logo with a transparent background sit on the
             // reader instead of on a white card.
             if (top != last_top or bottom != last_bottom) {
-                const escape = std.fmt.bufPrint(&colour, "\x1b[38;2;{d};{d};{d}m\x1b[48;2;{d};{d};{d}m", .{
-                    red(if (top == transparent) bottom else top),
-                    green(if (top == transparent) bottom else top),
-                    blue(if (top == transparent) bottom else top),
-                    red(bottom),
-                    green(bottom),
-                    blue(bottom),
-                }) catch return false;
-                system.write(escape) catch return false;
+                // A half with nothing in it says "default", which is the terminal's
+                // own colour. Writing the sentinel's bits instead is how a transparent
+                // background became a white card: 0xFFFFFFFE is nearly white.
+                var escape: [64]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&escape);
+                if (top == transparent) {
+                    writer.writeAll("\x1b[39m") catch return false;
+                } else {
+                    writer.print("\x1b[38;2;{d};{d};{d}m", .{ red(top), green(top), blue(top) }) catch return false;
+                }
+                if (bottom == transparent) {
+                    writer.writeAll("\x1b[49m") catch return false;
+                } else {
+                    writer.print("\x1b[48;2;{d};{d};{d}m", .{ red(bottom), green(bottom), blue(bottom) }) catch return false;
+                }
+                system.write(writer.buffered()) catch return false;
                 last_top = top;
                 last_bottom = bottom;
             }
@@ -179,8 +185,10 @@ test "a picture with nothing in its background shows the reader through it" {
     var fake: system_mod.Fake = .{};
     try testing.expect(draw(fake.system(), image, 0, 0, 2, 1));
     const written = fake.output_text();
-    // The first cell is a space: no colour, no background, the terminal's own.
+    // The first cell is a space with the terminal's own colours, not a white one:
+    // the transparent sentinel is nearly white, and writing its bits made a card.
     try testing.expect(std.mem.indexOf(u8, written, " ") != null);
+    try testing.expect(std.mem.startsWith(u8, written, "\x1b[1;1H\x1b[39m\x1b[49m "));
     // The second is the picture, and nothing was blended towards white.
     try testing.expect(std.mem.indexOf(u8, written, "38;2;255;0;0") != null);
     try testing.expect(std.mem.indexOf(u8, written, "38;2;255;255;255") == null);
