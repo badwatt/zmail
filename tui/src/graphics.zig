@@ -197,3 +197,55 @@ test "draw refuses an empty picture or no room for it" {
     try testing.expect(!draw(fake.system(), "x", 1, 1, 0, 10));
     try testing.expectEqualStrings("", fake.output_text());
 }
+
+test "a picture is sent once under an id, in chunks, then only placed" {
+    var fake: system_mod.Fake = .{};
+    var png: [raw_chunk_max + 3]u8 = undefined;
+    @memset(&png, 0x41);
+
+    // Sending is the expensive half: the first chunk announces the picture, the
+    // second continues it, and only the last one ends the transmission.
+    try testing.expect(transmit(fake.system(), &png, 7));
+    const sent = fake.output_text();
+    try testing.expect(std.mem.startsWith(u8, sent, "\x1b_Ga=t,f=100,i=7,q=2,m=1;"));
+    try testing.expect(std.mem.indexOf(u8, sent, "\x1b_Gm=0;") != null);
+    try testing.expect(std.mem.count(u8, sent, "\x1b\\") == 2);
+
+    // Placing is a cursor move and one short escape: that is what a scroll costs.
+    fake.output_len = 0;
+    try testing.expect(place(fake.system(), 7, 3, 4, 20, 10));
+    try testing.expectEqualStrings("\x1b[5;4H\x1b_Ga=p,i=7,c=20,r=10,q=2\x1b\\", fake.output_text());
+
+    // Nothing to send, or nothing to name it by.
+    fake.output_len = 0;
+    try testing.expect(!transmit(fake.system(), "", 7));
+    try testing.expect(!transmit(fake.system(), "x", 0));
+    try testing.expectEqualStrings("", fake.output_text());
+}
+
+test "a terminal that will not take the escape makes transmit and place say so" {
+    var broken: system_mod.Fake = .{ .write_failure = error.IoError };
+    try testing.expect(!transmit(broken.system(), "x", 1));
+    try testing.expect(!place(broken.system(), 1, 0, 0, 1, 1));
+
+    // Clearing is best effort: a terminal that has gone away is not an error.
+    clear_all(broken.system());
+}
+
+test "clearing asks for every picture, silently" {
+    var fake: system_mod.Fake = .{};
+    clear_all(fake.system());
+    // d=a: all of them. q=2: do not answer, because an answer reads like a key.
+    try testing.expectEqualStrings("\x1b_Ga=d,d=a,q=2\x1b\\", fake.output_text());
+}
+
+test "the support flag is what the terminal answered, and nothing else" {
+    var answering: system_mod.Fake = .{};
+    answering.push_input("\x1b_Gi=31;OK\x1b\\");
+    detect(answering.system());
+    try testing.expect(supported());
+
+    var silent: system_mod.Fake = .{};
+    detect(silent.system());
+    try testing.expect(!supported());
+}

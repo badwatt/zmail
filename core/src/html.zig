@@ -373,7 +373,6 @@ fn entity(text: []const u8, index: usize) ?Decoded {
         else
             std.fmt.parseInt(u21, digits, 10) catch return null;
         if (value == 0 or value > 0x10ffff) return null;
-        if (value >= 0xd800 and value <= 0xdfff) return null;
         return .{ .codepoint = value, .space = value == 0xa0, .consumed = consumed };
     }
 
@@ -802,6 +801,72 @@ test "entities become their characters, and nbsp is a space" {
     var anchor_buffer: [max_anchors]Anchor = undefined;
     const rendered = render("<p>Hello&nbsp;<b>world</b> &amp; friends &lt;3 &#233;</p>", &out, &link_buffer, &.{}, &anchor_buffer);
     try testing.expectEqualStrings("Hello world & friends <3 é", rendered.text);
+}
+
+test "an entity that cannot be encoded is visible, not dropped" {
+    var out: [64]u8 = undefined;
+    var link_buffer: [2]links.Link = undefined;
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    // A surrogate is not a character. Printing '?' says so; dropping it silently
+    // would leave a hole where the sender wrote something.
+    const rendered = render("<p>&#xD800;x</p>", &out, &link_buffer, &.{}, &anchor_buffer);
+    try testing.expectEqualStrings("?x", rendered.text);
+}
+
+test "an entity that is not one is left as it was written" {
+    var out: [128]u8 = undefined;
+    var link_buffer: [2]links.Link = undefined;
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render(
+        "<p>&#xzz; &#zz; &bogus; &amp;</p>",
+        &out,
+        &link_buffer,
+        &.{},
+        &anchor_buffer,
+    );
+    try testing.expectEqualStrings("&#xzz; &#zz; &bogus; &", rendered.text);
+}
+
+test "every kind of space is one space, including the ideographic one" {
+    var out: [32]u8 = undefined;
+    // The text part of a mail written from HTML carries these as entities, and a
+    // terminal has one space.
+    try testing.expectEqualStrings(
+        "a b c",
+        clean_spacing("a&#x3000;b&emsp;c", &out),
+    );
+}
+
+test "an unterminated tag is dropped, not printed" {
+    var out: [64]u8 = undefined;
+    var link_buffer: [2]links.Link = undefined;
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    const rendered = render("<p>text</p><div", &out, &link_buffer, &.{}, &anchor_buffer);
+    try testing.expectEqualStrings("text", rendered.text);
+}
+
+test "more images than the reader can name are still mentioned" {
+    var out: [512]u8 = undefined;
+    var html_buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&html_buffer);
+    for (0..max_remote_images + 1) |index| {
+        try writer.print("<img src=\"https://x/{d}.png\" alt=\"pic{d}\">", .{ index, index });
+    }
+    const marked = mark_images(writer.buffered(), &out);
+    try testing.expect(std.mem.indexOf(u8, marked, "[imagen: pic8]") != null);
+}
+
+test "an attribute that runs to the end of the tag is still an attribute" {
+    var out: [128]u8 = undefined;
+    try testing.expectEqualStrings("<p>[IMG:r0] logo</p>", mark_images("<p><img alt=logo></p>", &out));
+
+    // The same for a link whose address is unquoted and last in the tag.
+    var link_buffer: [2]links.Link = undefined;
+    var anchor_buffer: [max_anchors]Anchor = undefined;
+    try testing.expectEqualStrings(
+        "go",
+        render("<p><a href=https://x>go</a></p>", &out, &link_buffer, &.{}, &anchor_buffer).text,
+    );
 }
 
 test "script content is dropped, not shown" {
