@@ -26,9 +26,11 @@ var shown: core.progress.State = .clear;
 var shown_percent: u8 = 0;
 var shown_at_ms: i64 = 0;
 
-/// Ghostty drops a bar it has not heard about for about fifteen seconds. Ten
-/// leaves room for a tick or two missed.
-pub const repeat_ms: i64 = 10_000;
+/// How often a bar is repeated while the work goes on. Ghostty animates the
+/// indeterminate bar from the updates themselves, so a bar that is sent once
+/// stands still: the number here is the animation's frame rate, not a timeout.
+/// 100ms is what zix sends, and it is what the tab needs to move.
+pub const repeat_ms: i64 = 100;
 
 pub fn enable(value: bool) void {
     enabled = value;
@@ -132,7 +134,7 @@ test "a state is written once, and the bar is taken down at the end" {
     try testing.expectEqualStrings("\x1b]9;4;0;0\x1b\\", fake.output_text());
 }
 
-test "a long wait repeats its bar before the terminal forgets it" {
+test "a wait that goes on repeats its bar, which is what animates it" {
     var fake: system_mod.Fake = .{};
     enable(true);
     defer enable(false);
@@ -140,8 +142,9 @@ test "a long wait repeats its bar before the terminal forgets it" {
     show(fake.system(), .indeterminate, 0, 1_000);
     fake.output_len = 0;
 
-    // Inside the window: nothing.
-    keep_alive(fake.system(), 5_000);
+    // Inside the window: nothing, or the bar would be sent a hundred times a
+    // second by a busy loop.
+    keep_alive(fake.system(), 1_000 + repeat_ms - 1);
     try testing.expectEqualStrings("", fake.output_text());
 
     // Past it: said again, with the state that was up.
