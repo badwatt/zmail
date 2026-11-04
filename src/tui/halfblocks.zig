@@ -12,6 +12,11 @@ const system_mod = @import("system.zig");
 const System = system_mod.System;
 
 pub const half_block = "\u{2580}";
+/// The bottom half: what is left when only the lower pixel of a cell has colour.
+pub const lower_half_block = "\u{2584}";
+/// A cell, or half of one, with nothing in it. Anything this transparent is the
+/// page behind it, and the terminal already knows what colour that is.
+pub const transparent: u32 = 0xFFFF_FFFE;
 
 /// Paints `image` with its top-left corner at (x, y), `columns` by `rows` cells.
 /// The picture is sampled, not scaled with a filter: a mail logo is a few dozen
@@ -43,19 +48,32 @@ pub fn draw(
         while (column < columns) : (column += 1) {
             const top = sample(image, column, row * 2, columns, rows);
             const bottom = sample(image, column, row * 2 + 1, columns, rows);
+            const glyph: []const u8 = if (top == transparent and bottom == transparent)
+                " "
+            else if (top == transparent)
+                lower_half_block
+            else
+                half_block;
 
             // Two colours per cell: the terminal is told only when they change,
-            // which is what keeps a picture from being thousands of escapes.
+            // which is what keeps a picture from being thousands of escapes. A half
+            // with nothing in it says "default", which is the terminal's own colour
+            // -- that is what makes a logo with a transparent background sit on the
+            // reader instead of on a white card.
             if (top != last_top or bottom != last_bottom) {
                 const escape = std.fmt.bufPrint(&colour, "\x1b[38;2;{d};{d};{d}m\x1b[48;2;{d};{d};{d}m", .{
-                    red(top),    green(top),    blue(top),
-                    red(bottom), green(bottom), blue(bottom),
+                    red(if (top == transparent) bottom else top),
+                    green(if (top == transparent) bottom else top),
+                    blue(if (top == transparent) bottom else top),
+                    red(bottom),
+                    green(bottom),
+                    blue(bottom),
                 }) catch return false;
                 system.write(escape) catch return false;
                 last_top = top;
                 last_bottom = bottom;
             }
-            system.write(half_block) catch return false;
+            system.write(glyph) catch return false;
         }
         system.write("\x1b[0m") catch return false;
     }
@@ -75,6 +93,7 @@ fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16
     var red_total: u32 = 0;
     var green_total: u32 = 0;
     var blue_total: u32 = 0;
+    var alpha_total: u32 = 0;
     var count: u32 = 0;
 
     var y = @min(from_y, image.height - 1);
@@ -82,22 +101,18 @@ fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16
         var x = @min(from_x, image.width - 1);
         while (x < @min(to_x, image.width)) : (x += 1) {
             const index = (@as(usize, y) * image.width + x) * 4;
-            const alpha: u32 = image.rgba[index + 3];
-            red_total += flatten(image.rgba[index], alpha);
-            green_total += flatten(image.rgba[index + 1], alpha);
-            blue_total += flatten(image.rgba[index + 2], alpha);
+            // No blending: a picture sits on whatever colour the reader is, and
+            // flattening over white is what put a white card behind every logo.
+            alpha_total += image.rgba[index + 3];
+            red_total += image.rgba[index];
+            green_total += image.rgba[index + 1];
+            blue_total += image.rgba[index + 2];
             count += 1;
         }
     }
-    if (count == 0) return 0;
+    if (count == 0) return transparent;
+    if (alpha_total / count < 16) return transparent;
     return ((red_total / count) << 16) | ((green_total / count) << 8) | (blue_total / count);
-}
-
-/// Alpha against white: mail is read on paper, not on a checkerboard.
-fn flatten(channel: u8, alpha: u32) u8 {
-    if (alpha == 255) return channel;
-    const value = @as(u32, channel) * alpha + 255 * (255 - alpha);
-    return @intCast(value / 255);
 }
 
 fn red(colour: u32) u32 {
@@ -153,11 +168,31 @@ test "the same colour twice is not sent twice" {
     try testing.expect(std.mem.count(u8, written, "\x1b[38;2;") == 1);
 }
 
-test "a translucent pixel is flattened over white" {
-    try testing.expectEqual(@as(u8, 255), flatten(0, 0));
-    // 255 * 128 / 255 = 127.5, rounded down: the same as the compositor.
-    try testing.expectEqual(@as(u8, 127), flatten(0, 128));
-    try testing.expectEqual(@as(u8, 1), flatten(1, 255));
+test "a picture with nothing in its background shows the reader through it" {
+    // Left column: fully transparent. Right column: opaque red.
+    const rgba = [_]u8{
+        0, 0, 0, 0, 255, 0, 0, 255,
+        0, 0, 0, 0, 255, 0, 0, 255,
+    };
+    const image = png.Image{ .width = 2, .height = 2, .rgba = &rgba };
+
+    var fake: system_mod.Fake = .{};
+    try testing.expect(draw(fake.system(), image, 0, 0, 2, 1));
+    const written = fake.output_text();
+    // The first cell is a space: no colour, no background, the terminal's own.
+    try testing.expect(std.mem.indexOf(u8, written, " ") != null);
+    // The second is the picture, and nothing was blended towards white.
+    try testing.expect(std.mem.indexOf(u8, written, "38;2;255;0;0") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "38;2;255;255;255") == null);
+}
+
+test "a cell with only its lower half painted uses the lower block" {
+    const rgba = [_]u8{ 0, 0, 0, 0, 9, 9, 9, 255 };
+    const image = png.Image{ .width = 1, .height = 2, .rgba = &rgba };
+
+    var fake: system_mod.Fake = .{};
+    try testing.expect(draw(fake.system(), image, 0, 0, 1, 1));
+    try testing.expect(std.mem.indexOf(u8, fake.output_text(), lower_half_block) != null);
 }
 
 test "nothing to draw is not drawn" {
