@@ -900,6 +900,10 @@ pub const Session = struct {
         // Whatever was decoded belongs to the frame that asked for it.
         self.image_slot_count = 0;
         self.image_painted = 0;
+        // A picture drawn in half blocks is not in the screen buffer, so the diff has
+        // nothing to compare against: without this the blocks stay where they were, and
+        // turning pictures off leaves them on.
+        self.screen.pristine = true;
         if (self.show_images and self.deps.draw_image == null) {
             // Turning them on in a terminal that cannot paint them is worth saying
             // once, instead of leaving a key that seems to do nothing.
@@ -977,6 +981,9 @@ pub const Session = struct {
         // Kept even when it failed: a picture that did not come is not asked for
         // again on the next frame, and the next, and the next.
         self.image_slot_count += 1;
+        // The picture now hides rows that the last frame filled with text: the screen
+        // buffer knows nothing about it, so the next frame is a whole one.
+        self.screen.pristine = true;
         if (slot.len > 0 and media.png_size(slot.bytes[0..slot.len]) == null) {
             // Downloaded, and unusable: a terminal paints PNG, and what the server
             // actually sent is the one thing worth saying.
@@ -2196,7 +2203,7 @@ pub const Session = struct {
         if (self.body_loaded) {
             wrap.wrap(self.reader_text(), lay.reader_text_width, &self.wrapped);
         }
-        self.prepare_cover();
+        self.prepare_cover(lay);
 
         _ = core.update.apply(&self.state, &self.store, .{ .set_viewport = .{
             .list_rows = lay.list_rows,
@@ -2282,7 +2289,7 @@ pub const Session = struct {
 
     /// Measures the pictures on the visible lines before the frame is drawn, so
     /// the text underneath them is not printed only to be covered.
-    fn prepare_cover(self: *Session) void {
+    fn prepare_cover(self: *Session, lay: layout_mod.Layout) void {
         self.cover_len = 0;
         if (!self.html_view or self.deps.draw_image == null) return;
         const text = self.reader_text();
@@ -2293,7 +2300,13 @@ pub const Session = struct {
             const marker = std.mem.indexOf(u8, content, "[IMG:") orelse continue;
             const rest = content[marker + 5 ..];
             const close = std.mem.indexOfScalar(u8, rest, ']') orelse continue;
-            self.cover_rows[line] = self.image_rows(rest[0..close]);
+            const wanted = self.image_rows(rest[0..close]);
+            // The picture is clipped at the bottom of the reader, so the rows reserved
+            // for it are clipped the same way. Reserving twelve rows for a picture that
+            // only has three of them on screen hides nine lines of somebody's mail.
+            const row = line -| self.state.reader_scroll;
+            const room: u8 = if (row < lay.reader_rows) @intCast(lay.reader_rows - row) else 0;
+            self.cover_rows[line] = @min(wanted, room);
             self.cover_len = line + 1;
         }
     }
@@ -5384,6 +5397,51 @@ test "a big html mail with many links and pictures renders without arithmetic su
         rig.session.needs_render = true;
         _ = rig.session.step();
     }
+}
+
+test "turning pictures off repaints the rows they were drawn over" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.deps.draw_image = ImageSink.draw;
+    try rig.open_reader("<p>hello</p>");
+
+    rig.fake_system.push_input("i");
+    _ = rig.session.step();
+    try testing.expect(rig.session.show_images);
+
+    // A block drawing never entered the screen buffer, so the next frame must not be a
+    // diff: that is why the pictures used to stay after being turned off.
+    const before = rig.fake_system.output_len;
+    rig.fake_system.push_input("i");
+    _ = rig.session.step();
+    try testing.expect(!rig.session.show_images);
+    // The frame that follows is a whole one: the body text is written again, over the
+    // blocks that the diff did not know were there.
+    const written = rig.fake_system.output_text()[before..];
+    try testing.expect(std.mem.indexOf(u8, written, "hello") != null);
+}
+
+test "a picture near the bottom reserves the rows it has, not the rows it wants" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // A tall picture: sixteen rows of cells at this size, on the last line of a body
+    // that is scrolled to its end.
+    rig.session.show_images = true;
+    rig.session.deps.draw_image = ImageSink.draw;
+    try rig.open_reader("<p><img src=\"cid:tall\" alt=\"tall\"></p>");
+    rig.session.wrapped = .{};
+
+    const lay = layout_mod.Layout.compute(110, 34, 0);
+    rig.session.state.reader_scroll = 0;
+    rig.session.prepare_cover(lay);
+    // No image bytes, so nothing is reserved: the text is not hidden for a picture
+    // that is not there.
+    try testing.expectEqual(@as(u32, 0), rig.session.cover_len);
 }
 
 test "pictures are off until asked for, and then they arrive off the loop" {
