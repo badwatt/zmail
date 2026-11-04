@@ -287,6 +287,16 @@ pub const Session = struct {
     /// thread swaps the result into the store when the job reports done.
     refreshing: bool = false,
     refresh_job: refresh_mod.Job = .{},
+    /// The body being fetched off the loop, and the one asked for while the worker
+    /// was busy. One connection per account: the two jobs take turns.
+    body_job: refresh_mod.BodyJob = .{},
+    body_request: ?refresh_mod.BodyRequest = null,
+    /// True from the tick the worker starts until its bytes are taken. Without it,
+    /// "the job is done" cannot tell "never started" from "landed and waiting".
+    body_in_flight: bool = false,
+    /// The message the reader is waiting for, so a body that arrives after the user
+    /// left is cached and not painted over whatever is on screen.
+    body_wanted: ?core.id.MessageId = null,
     refresh_scratch: []Message = undefined,
     refresh_sources: [core.state.accounts_max]refresh_mod.Source = undefined,
     /// Which of the session's sources each job slot came from, and how many.
@@ -300,8 +310,6 @@ pub const Session = struct {
     source_count: u8 = 0,
     /// A body asked for while the worker holds the connection. Applied as soon
     /// as the refresh finishes, so the reader shows text instead of a frozen UI.
-    pending_body: ?struct { account: core.id.AccountId, mailbox: Mailbox, id: MessageId } = null,
-
     /// The account form, when it is open. It lives here, not in the core state,
     /// because it holds a password and is pure UI.
     settings: ?Settings = null,
@@ -529,6 +537,11 @@ pub const Session = struct {
             while (!self.refresh_job.finished()) std.atomic.spinLoopHint();
             self.refresh_job.join();
         }
+        // A body in the air holds `self.raw`: wait before the session goes away.
+        if (self.body_in_flight) {
+            while (!self.body_job.finished()) std.atomic.spinLoopHint();
+            self.body_job.join();
+        }
         if (self.settings) |*form| form.setup.deinit();
         self.store.deinit(self.gpa);
         self.gpa.free(self.refresh_scratch);
@@ -539,6 +552,7 @@ pub const Session = struct {
     /// Advances the loop by one step. Returns false when the session is over.
     pub fn step(self: *Session) bool {
         self.poll_refresh();
+        self.poll_body();
         self.boot_step();
         if (self.state.booting) self.needs_render = true;
         self.sync_progress();
@@ -561,6 +575,9 @@ pub const Session = struct {
             self.repaint();
         }
 
+        // A body asked for by the key that just came in starts now, not a tick later:
+        // the worker is a spawn, and the loop is not waiting for it either way.
+        self.poll_body();
         self.sync_size();
         self.state.spinner +%= 1;
         self.now_unix = self.deps.now();
@@ -678,11 +695,9 @@ pub const Session = struct {
             self.state.set_alert("Could not refresh {s}", .{self.refresh_mailbox.title()});
         }
 
-        // Deliver a body that was requested while the worker was busy.
-        if (self.pending_body) |request| {
-            self.pending_body = null;
-            self.fetch_body(request.account, request.mailbox, request.id);
-        }
+        // A body asked for while the worker was busy gets its turn now; the reader
+        // keeps showing its placeholder until it lands.
+        self.poll_body();
     }
 
     /// Waits for an in-flight refresh, then applies its results. Used when a
@@ -699,6 +714,15 @@ pub const Session = struct {
 
     pub fn settle_refresh_for_test(self: *Session) void {
         self.wait_refresh();
+    }
+
+    /// Lets a body fetch in the air land, the way the loop would: start it, wait for
+    /// the worker, take the answer.
+    pub fn settle_body_for_test(self: *Session) void {
+        self.poll_body();
+        if (!self.body_in_flight) return;
+        while (!self.body_job.finished()) std.atomic.spinLoopHint();
+        self.poll_body();
     }
 
     /// After another full-screen flow (the assistant) painted the terminal, the
@@ -1015,6 +1039,11 @@ pub const Session = struct {
 
     fn apply(self: *Session, command: core.command.Command) bool {
         const effects = core.update.apply(&self.state, &self.store, command);
+        // Leaving the reader abandons whatever body was on its way: the bytes are
+        // worth caching when they land, and worth showing to nobody.
+        if (self.state.view != .reader) {
+            self.body_wanted = null;
+        }
         self.run_effects(effects.slice());
         self.quote_original(command);
         self.repaint();
@@ -1172,23 +1201,21 @@ pub const Session = struct {
             // the UI; everything else waits for the worker.
             switch (effect) {
                 .refresh => {},
+                // The body is never fetched here: the reader is already on screen, and
+                // asking is all this does. `poll_body` starts the worker on a later tick
+                // and the loop stays free -- Esc works while the bytes are in the air.
                 .fetch_body => |args| {
                     self.begin_body(args.account, args.mailbox, args.id);
-                    if (self.refreshing) {
-                        self.pending_body = .{
-                            .account = args.account,
-                            .mailbox = args.mailbox,
-                            .id = args.id,
-                        };
-                        continue;
-                    }
+                    self.request_body(args.account, args.mailbox, args.id);
+                    continue;
                 },
                 else => self.wait_refresh(),
             }
 
             const timer = self.begin_loading();
             switch (effect) {
-                .fetch_body => |args| self.fetch_body(args.account, args.mailbox, args.id),
+                // Requested above, before the loading wrapper: it must not block.
+                .fetch_body => {},
                 .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags),
                 .move_message => |args| self.move_message(args.account, args.id, args.to),
                 .delete_message => |args| self.delete_message(args.account, args.mailbox, args.id),
@@ -1256,33 +1283,74 @@ pub const Session = struct {
         self.wrapped = .{};
     }
 
-    fn fetch_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
-        // The local copy first: opening a message you have read is instant.
+    /// Asks for a body: the cache answers now, the network answers on a later tick.
+    fn request_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
         if (self.deps.bodies) |bodies| {
             if (bodies.load(account, mailbox, id, &self.raw) catch null) |cached| {
                 self.set_raw(account, mailbox, id, cached);
                 return;
             }
         }
-
         const mail = self.source_for(account) orelse {
+            self.body_failed(mailbox, id);
             self.state.set_alert("That account is not connected", .{});
             return;
         };
-        const raw = mail.fetch_raw(mailbox, id, &self.raw) catch {
-            self.raw_len = 0;
-            self.body_len = 0;
-            self.shown_len = 0;
-            self.image_slot_count = 0;
-            self.html_len = 0;
-            self.body_loaded = true;
-            self.wrapped = .{};
-            self.repaint();
-            self.state.set_alert("Could not load this message", .{});
+        self.body_request = .{ .account = account, .mailbox = mailbox, .id = id, .mail = mail };
+        self.body_wanted = id;
+        self.repaint();
+    }
+
+    /// One turn of the worker: start it when the connection is free, take its answer
+    /// when it lands. Called every tick, so a body costs the loop a flag read.
+    fn poll_body(self: *Session) void {
+        if (self.body_in_flight) {
+            if (!self.body_job.finished()) return;
+            self.finish_body();
             return;
-        };
-        if (self.deps.bodies) |bodies| bodies.save(account, mailbox, id, raw) catch {};
-        self.set_raw(account, mailbox, id, raw);
+        }
+        const request = self.body_request orelse return;
+        // One connection per account: a refresh owns it until it finishes.
+        if (self.refreshing) return;
+        self.body_request = null;
+        self.body_in_flight = true;
+        self.body_job.start(request, &self.raw);
+    }
+
+    fn finish_body(self: *Session) void {
+        self.body_job.join();
+        self.body_in_flight = false;
+        const request = self.body_job.request;
+        const wanted = self.body_wanted == request.id;
+        self.body_wanted = null;
+
+        if (!self.body_job.ok) {
+            self.body_failed(request.mailbox, request.id);
+            self.state.set_alert("Could not load this message", .{});
+            self.repaint();
+            return;
+        }
+
+        const raw = self.body_job.bytes();
+        if (self.deps.bodies) |bodies| bodies.save(request.account, request.mailbox, request.id, raw) catch {};
+        // The reader moved on while this was in the air: the bytes are kept for next
+        // time and not painted under whatever is on screen now.
+        if (!wanted) return;
+        self.set_raw(request.account, request.mailbox, request.id, raw);
+    }
+
+    /// Nothing arrived: the reader says so rather than showing an empty page forever.
+    fn body_failed(self: *Session, mailbox: Mailbox, id: MessageId) void {
+        _ = mailbox;
+        if (self.state.opened != id) return;
+        self.raw_len = 0;
+        self.body_len = 0;
+        self.shown_len = 0;
+        self.image_slot_count = 0;
+        self.html_len = 0;
+        self.body_loaded = true;
+        self.wrapped = .{};
+        self.repaint();
     }
 
     /// Renders both views from one message: the text one (what the reader shows
@@ -2113,7 +2181,22 @@ const FakeMail = struct {
     fetch_failure: ?core.mail_port.Error = null,
     fail_body: bool = false,
     fail_flags: bool = false,
+    gate: ?*Gate = null,
     fail_move: bool = false,
+
+    /// Holds a body fetch until a test opens it, so the loading state can be watched
+    /// instead of raced against.
+    const Gate = struct {
+        released: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+        fn release(self: *Gate) void {
+            self.released.store(true, .release);
+        }
+
+        fn wait(self: *Gate) void {
+            while (!self.released.load(.acquire)) std.atomic.spinLoopHint();
+        }
+    };
 
     fn mail(self: *FakeMail) core.mail_port.Mail {
         return .{ .context = self, .vtable = &.{
@@ -2141,6 +2224,7 @@ const FakeMail = struct {
         out: []u8,
     ) core.mail_port.Error![]const u8 {
         const self: *FakeMail = @ptrCast(@alignCast(context));
+        if (self.gate) |gate| gate.wait();
         if (self.fail_body) return error.Rejected;
         return self.inner.mail().fetch_raw(mailbox, id, out);
     }
@@ -2279,10 +2363,17 @@ const Rig = struct {
         _ = self.session.step();
     }
 
+    /// A key, and then the ticks the real loop would run until nothing is in the
+    /// air. A body now arrives a tick later, which is the whole point of the worker.
     fn send(self: *Rig, bytes: []const u8) void {
         self.fake_system.push_input(bytes);
         _ = self.session.step();
         self.session.settle_refresh_for_test();
+        const waiting = self.session.body_in_flight or self.session.body_request != null;
+        self.session.settle_body_for_test();
+        // The body lands between two ticks, and the next one paints it: that is the
+        // loop the reader lives in, so the rig runs it.
+        if (waiting) _ = self.session.step();
     }
 };
 
@@ -2924,6 +3015,7 @@ test "a fetched body is saved for next time" {
         .mailbox = .inbox,
         .id = MessageId.from_int(1),
     } }});
+    rig.session.settle_body_for_test();
     try testing.expectEqual(@as(u32, 1), bodies.saves);
     try testing.expect(bodies.have);
     try testing.expect(rig.session.body_len > 0);
@@ -3697,16 +3789,51 @@ test "an effect paints the spinner, even when it is instant" {
     rig.session.render();
     rig.fake_system.output_len = 0;
 
-    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+    // A body is not one of these any more: it is fetched off the loop, with the
+    // reader's own placeholder doing the work. Everything that still waits on the
+    // connection gets the spinner.
+    rig.session.run_effects_for_test(&.{.{ .sync_flags = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .flags = .{ .unread = false },
     } }});
 
     // A spinner frame was written before the work, and the flag is cleared.
     try testing.expect(rig.fake_system.output_len > 0);
-    try testing.expect(rig.session.body_len > 0);
     try testing.expect(!rig.session.state.loading);
+}
+
+test "leaving a message while its body is still loading is instant" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // The server takes its time: the worker blocks until this test opens the gate.
+    var gate: FakeMail.Gate = .{};
+    rig.fake_mail.gate = &gate;
+    defer gate.release();
+
+    rig.fake_system.push_input("\r");
+    _ = rig.session.step();
+    try testing.expectEqual(core.state.View.reader, rig.session.state.view);
+    try testing.expect(rig.session.body_in_flight);
+    try testing.expect(!rig.session.body_loaded);
+    // The reader says so, instead of showing an empty page.
+    try testing.expect(rig.session.wrapped.len == 0);
+
+    // The way out works while the bytes are in the air: no waiting, no join. A lone
+    // ESC is ambiguous until the read after it times out, which is one more tick.
+    rig.fake_system.push_input("\x1b");
+    _ = rig.session.step();
+    _ = rig.session.step();
+    try testing.expectEqual(core.state.View.list, rig.session.state.view);
+
+    // When it lands it is not painted over the list, and the session is still whole.
+    gate.release();
+    rig.session.settle_body_for_test();
+    try testing.expectEqual(core.state.View.list, rig.session.state.view);
+    try testing.expect(!rig.session.body_in_flight);
 }
 
 test "opening another message blanks the page instead of keeping the last one" {
@@ -3739,6 +3866,7 @@ test "opening another message blanks the page instead of keeping the last one" {
 
     // And when it lands, it is the second message that is on screen.
     rig.session.settle_refresh_for_test();
+    rig.session.settle_body_for_test();
     try testing.expect(rig.session.body_loaded);
     // The second message's own words, from the fake's template for id 2.
     try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "Heads up: the build is green again") != null);
@@ -3782,14 +3910,17 @@ test "a body asked for during a refresh is delivered when it finishes" {
         .id = MessageId.from_int(1),
     } }});
 
-    // Deferred, not refused and not blocking.
+    // Queued, not refused and not blocking: the reader is on screen with its
+    // placeholder while the refresh owns the connection.
     try testing.expect(rig.session.refreshing);
-    try testing.expect(rig.session.pending_body != null);
+    try testing.expect(rig.session.body_request != null);
     try testing.expect(rig.session.body_len == 0);
 
     rig.session.settle_refresh_for_test();
     try testing.expect(!rig.session.refreshing);
-    try testing.expect(rig.session.pending_body == null);
+    // The refresh finishing hands the connection over, and the next tick takes it.
+    try testing.expect(rig.session.body_request == null or rig.session.body_job.finished() == false);
+    rig.session.settle_body_for_test();
     try testing.expect(rig.session.body_len > 0);
 }
 

@@ -81,3 +81,60 @@ pub const Job = struct {
         job.state.store(@backingInt(State.done), .release);
     }
 };
+
+/// One message's body, fetched off the loop.
+///
+/// The same shape as `Job`, and for the same reason: the transport blocks, the reader
+/// must not. The worker writes into the session's buffer and turns the flag to `done`;
+/// the session joins it on a later tick and parses the bytes itself, so the body, the
+/// wrapped lines and the links are only ever built by the thread that draws them.
+pub const BodyRequest = struct {
+    account: AccountId,
+    mailbox: Mailbox,
+    id: core.id.MessageId,
+    mail: core.mail_port.Mail,
+};
+
+pub const BodyJob = struct {
+    thread: std.Thread = undefined,
+    state: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(State.done)),
+    request: BodyRequest = undefined,
+    buffer: []u8 = &.{},
+    len: u32 = 0,
+    /// False when the server refused, or when the bytes did not fit: either way the
+    /// reader says so instead of showing half a message.
+    ok: bool = false,
+
+    pub fn start(job: *BodyJob, request: BodyRequest, buffer: []u8) void {
+        job.request = request;
+        job.buffer = buffer;
+        job.len = 0;
+        job.ok = false;
+        job.state.store(@backingInt(State.running), .release);
+        job.thread = std.Thread.spawn(.{}, runBody, .{job}) catch {
+            job.state.store(@backingInt(State.done), .release);
+            return;
+        };
+    }
+
+    pub fn finished(job: *const BodyJob) bool {
+        return job.state.load(.acquire) == @backingInt(State.done);
+    }
+
+    pub fn join(job: *BodyJob) void {
+        job.thread.join();
+    }
+
+    pub fn bytes(job: *const BodyJob) []const u8 {
+        return job.buffer[0..job.len];
+    }
+
+    fn runBody(job: *BodyJob) void {
+        const request = job.request;
+        if (request.mail.fetch_raw(request.mailbox, request.id, job.buffer)) |raw| {
+            job.len = @intCast(raw.len);
+            job.ok = true;
+        } else |_| {}
+        job.state.store(@backingInt(State.done), .release);
+    }
+};
