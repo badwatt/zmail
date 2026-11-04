@@ -824,7 +824,7 @@ pub const Session = struct {
                 'H' => return self.toggle_html(),
                 'o' => return self.open_external_message(),
                 'i' => return self.toggle_images(),
-                'v' => return self.toggle_details(),
+                '\\' => return self.toggle_details(),
                 else => {},
             }
         }
@@ -6315,14 +6315,14 @@ test "the reader knows who else was on the message" {
     try testing.expectEqualStrings("<abc@example.com>", rig.session.details.message_id.slice());
 }
 
-test "v shows every header, and v again puts them away" {
+test "the backslash shows every header, and again puts them away" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
     try rig.open_reader("From: Alice <alice@example.com>\nTo: bob@example.com\nSubject: hi\n\nbody");
 
-    rig.fake_system.push_input("v");
+    rig.fake_system.push_input("\\");
     _ = rig.session.step();
     try testing.expect(rig.session.show_details);
 
@@ -6341,7 +6341,7 @@ test "v shows every header, and v again puts them away" {
     try testing.expect(found_title);
     try testing.expect(found_to);
 
-    rig.fake_system.push_input("v");
+    rig.fake_system.push_input("\\");
     _ = rig.session.step();
     try testing.expect(!rig.session.show_details);
 }

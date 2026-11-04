@@ -951,7 +951,7 @@ const help_rows = [_]Hint{
     .{ .keys = "", .action = "-- the reader" },
     .{ .keys = "q / h / Esc / Left", .action = "back to the list" },
     .{ .keys = "H", .action = "HTML view, or the plain text one" },
-    .{ .keys = "v", .action = "every header: to, cc, reply-to, date, id" },
+    .{ .keys = "\\", .action = "every header: to, cc, reply-to, date, id" },
     .{ .keys = "i", .action = "the pictures the message carries" },
     .{ .keys = "o", .action = "open the mail in a browser" },
     .{ .keys = "Ctrl+click", .action = "open the link under the pointer" },
@@ -1081,7 +1081,7 @@ fn render_details(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         _ = out.put_text(rect.x + 12, row, entry.value, card_width -| 14, inputs.theme.text);
         row += 1;
     }
-    _ = out.put_text(rect.x + 2, rect.bottom() -| 1, " v closes ", card_width -| 4, inputs.theme.dim);
+    _ = out.put_text(rect.x + 2, rect.bottom() -| 1, " \\ closes ", card_width -| 4, inputs.theme.dim);
 }
 
 fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
