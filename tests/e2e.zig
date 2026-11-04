@@ -179,7 +179,13 @@ const Drainer = struct {
 
     fn run(self: Drainer) void {
         var buffer: [4096]u8 = undefined;
+        var fds = [1]std.posix.pollfd{.{ .fd = self.master, .events = std.posix.POLL.IN, .revents = 0 }};
         while (self.running.load(.acquire)) {
+            // The master is blocking (a pty opened by `openpty` has no O_NONBLOCK),
+            // so the read is asked for only when there is something to read -- or the
+            // thread would sleep in `read` and `join` would never return.
+            const ready = std.posix.poll(&fds, 20) catch 0;
+            if (ready == 0) continue;
             const count = std.posix.read(self.master, &buffer) catch 0;
             if (count > 0 and self.filled.* < self.sink.len) {
                 const room = self.sink.len - self.filled.*;
