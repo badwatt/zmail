@@ -734,6 +734,12 @@ pub const Session = struct {
     }
 
     fn handle_key(self: *Session, key: input.Key) bool {
+        // The first screen is not the interface yet. Until the mail is here, the only
+        // key with something to act on is the one that leaves: everything else would
+        // act on a list that is not there -- a search field opening behind the splash,
+        // a mailbox switched before it was ever loaded, a reply to a message nobody
+        // has seen.
+        if (self.state.booting) return self.leaving_key(key);
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
@@ -751,6 +757,16 @@ pub const Session = struct {
         if (command == .compose_send) {
             return self.apply(.{ .compose_send_held = .{ .now_unix = self.now_unix } });
         }
+        return self.apply(command);
+    }
+
+    /// Whether `key` is the way out, for the one screen where that is all a key can
+    /// do. Ctrl+C is also a signal, so this is the byte path; the handler in `launch`
+    /// covers the case where no key is ever read.
+    fn leaving_key(self: *Session, key: input.Key) bool {
+        if (key == .mouse) return false;
+        const command = keymap.translate(key, .{ .mode = self.state.mode, .view = self.state.view }) orelse return false;
+        if (command != .quit) return false;
         return self.apply(command);
     }
 
@@ -5190,6 +5206,47 @@ test "a wait raises the bar, keeps it for a moment, and takes it down" {
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
     try testing.expectEqual(core.progress.State.clear, progress_mod.state());
+}
+
+test "during the splash the only key that does anything is the one that leaves" {
+    var rig: Rig = .{};
+    try rig.seed();
+    try rig.arm(.{ .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    rig.session.splash_on();
+    _ = rig.session.step();
+    try testing.expect(rig.session.state.booting);
+
+    // Nothing the interface offers is available yet: no search, no movement, no
+    // compose, no mailbox switch, no mouse. The list is not there to act on.
+    rig.send("/");
+    try testing.expectEqual(core.state.Mode.normal, rig.session.state.mode);
+    rig.send("j");
+    try testing.expectEqual(@as(u32, 0), rig.session.state.cursor);
+    rig.send("c");
+    try testing.expect(rig.session.state.compose.active == false);
+    rig.send("\t");
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+    rig.send("\x1b[<0;5;5M");
+    try testing.expect(rig.session.state.booting);
+    try testing.expect(!rig.session.state.quit);
+}
+
+test "during the splash Ctrl+C still quits, and it is the only way out" {
+    var rig: Rig = .{};
+    try rig.seed();
+    try rig.arm(.{ .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    rig.session.splash_on();
+    _ = rig.session.step();
+    try testing.expect(rig.session.state.booting);
+
+    rig.send("\x03");
+    try testing.expect(rig.session.state.quit);
 }
 
 test "the splash breathes until the inbox is here, and then it is gone" {
