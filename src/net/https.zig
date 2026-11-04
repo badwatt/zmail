@@ -166,7 +166,16 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 }
 
 /// Splits "HTTP/1.1 200 OK\r\n...\r\n\r\nbody".
+///
+/// Some servers write two responses on one connection -- a redirect and then the thing
+/// it pointed at -- so the body can begin with another status line. That is not a
+/// picture, and it is not what the server meant either: the second response is taken
+/// instead, twice at most.
 pub fn parse(raw: []u8) Error!Response {
+    return parseDepth(raw, 0);
+}
+
+fn parseDepth(raw: []u8, depth: u8) Error!Response {
     const split = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.Malformed;
     const head = raw[0..split];
     // The body is decoded in place, so `parse` takes the buffer it was given.
@@ -196,9 +205,17 @@ pub fn parse(raw: []u8) Error!Response {
     // bytes that are not a PNG, and a reader that says "not a PNG" about a PNG.
     if (chunked) {
         const decoded = dechunk(body) orelse return error.Malformed;
+        if (depth < 2 and std.mem.startsWith(u8, decoded, "HTTP/1.")) {
+            const offset = @intFromPtr(decoded.ptr) - @intFromPtr(raw.ptr);
+            return parseDepth(raw[offset..], depth + 1);
+        }
         return .{ .status = status, .body = decoded };
     }
     const usable = if (length) |value| body[0..@min(value, body.len)] else body;
+    if (depth < 2 and std.mem.startsWith(u8, usable, "HTTP/1.")) {
+        const offset = @intFromPtr(usable.ptr) - @intFromPtr(raw.ptr);
+        return parseDepth(raw[offset..], depth + 1);
+    }
     return .{ .status = status, .body = usable };
 }
 
@@ -222,4 +239,26 @@ pub fn dechunk(body: []u8) ?[]const u8 {
         if (read + 2 <= body.len and std.mem.eql(u8, body[read..][0..2], "\r\n")) read += 2;
     }
     return null;
+}
+
+const testing = std.testing;
+
+test "a body that begins with another response is that response" {
+    // Two responses on one connection: a redirect and the picture it pointed at.
+    const raw_text = "HTTP/1.1 301 Moved\r\nLocation: https://x/y.png\r\nContent-Length: 0\r\n\r\n" ++
+        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 4\r\n\r\n\x89PNG";
+    var raw: [256]u8 = undefined;
+    @memcpy(raw[0..raw_text.len], raw_text);
+    const response = try parse(raw[0..raw_text.len]);
+    try testing.expectEqual(@as(u16, 200), response.status);
+    try testing.expectEqualStrings("\x89PNG", response.body);
+}
+
+test "a chunked body is dechunked" {
+    const raw_text = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "4\r\n\x89PNG\r\n0\r\n\r\n";
+    var raw: [256]u8 = undefined;
+    @memcpy(raw[0..raw_text.len], raw_text);
+    const response = try parse(raw[0..raw_text.len]);
+    try testing.expectEqualStrings("\x89PNG", response.body);
 }
