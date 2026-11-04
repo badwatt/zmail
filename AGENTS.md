@@ -78,7 +78,7 @@ ci: run the suite with two cores, as the runner does
   shows subjects, the history keeps the argument.
 - The last line may name a closed issue: `Closes #12`.
 
-The release notes are grouped by these prefixes (`scripts/changelog.sh`), so a
+The release notes are grouped by these prefixes (`.github/workflows/release.yml`), so a
 subject without one is a change nobody reading the release will see in the right
 place.
 

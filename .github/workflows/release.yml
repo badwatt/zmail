@@ -101,13 +101,42 @@ jobs:
         run: |
           PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
           echo "prev=$PREV" >> $GITHUB_OUTPUT
-      # The notes come from the commits, not from a service that reads labels: a
-      # commit without a conventional prefix still happened, and leaving it out is
-      # how a forty-change release advertises two dependabot bumps.
-      - name: Changelog
-        run: |
-          sh scripts/changelog.sh "${{ steps.prev.outputs.prev }}" "${{ needs.tag.outputs.version }}" > notes.md
-          cat notes.md
+      # The notes are built here, from the commits, by the same action the other
+      # project uses: `mode: COMMIT` reads the subjects and `label_extractor` turns a
+      # conventional prefix into a category. The catch-all rule at the end of both
+      # lists is the point -- a commit that matches nothing is still a change, and a
+      # release that drops it is how forty changes advertise two.
+      - name: Build changelog
+        id: changelog
+        uses: mikepenz/release-changelog-builder-action@v6
+        with:
+          fromTag: ${{ steps.prev.outputs.prev }}
+          toTag: ${{ needs.tag.outputs.version }}
+          mode: "COMMIT"
+          configurationJson: |
+            {
+              "pr_template": "- #{{TITLE}}",
+              "categories": [
+                { "title": "## 🚨 Breaking Changes", "labels": ["breaking"] },
+                { "title": "## 🚀 Features", "labels": ["feat", "feature"] },
+                { "title": "## 🐛 Fixes", "labels": ["fix", "bug"] },
+                { "title": "## ⚡️ Performance", "labels": ["perf"] },
+                { "title": "## ♻️ Refactoring", "labels": ["refactor"] },
+                { "title": "## 🧪 Tests", "labels": ["test"] },
+                { "title": "## 📝 Docs", "labels": ["docs"] },
+                { "title": "## 💄 Style", "labels": ["style"] },
+                { "title": "## 👷 CI", "labels": ["ci"] },
+                { "title": "## 🔨 Chores", "labels": ["chore", "build"] },
+                { "title": "## 📦 Other Changes", "labels": ["other"] }
+              ],
+              "label_extractor": [
+                { "pattern": ".*!.*|^breaking:.*", "target": "breaking", "on_property": "title" },
+                { "pattern": "^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test){1}(\\([\\w\\-\\.]+\\))?(: ([\\w ])+([\\s\\S]*))?", "target": "$1", "on_property": "title" },
+                { "pattern": ".*", "target": "other", "on_property": "title" }
+              ]
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Generate checksums
         run: |
           cd zig-out/bin
@@ -119,4 +148,4 @@ jobs:
           # the second upload of the same name is what fails.
           files: |
             zig-out/bin/*
-          body_path: notes.md
+          body: ${{ steps.changelog.outputs.changelog }}
