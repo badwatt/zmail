@@ -34,6 +34,10 @@ const System = system_mod.System;
 /// tests and correct in the real client.
 pub const Now = *const fn () i64;
 
+/// How many effects may wait for the connection before the session has to stop and
+/// take one: a bound on the line, not on the users' patience.
+pub const pending_effects_max: u8 = 8;
+
 /// Which message the reader is showing, so a request for another one can blank
 /// the page instead of leaving the previous message under the new subject.
 const ShownMessage = struct {
@@ -300,6 +304,10 @@ pub const Session = struct {
     /// When the footer spinner may stop: a bar that appears and vanishes inside one
     /// frame reads as a glitch, so the body keeps it up for the minimum.
     body_loading_until_ms: i64 = 0,
+    /// Effects that need the connection and arrived while a refresh had it. Bounded,
+    /// and drained one per tick once the worker is free.
+    pending_effects: [pending_effects_max]core.effect.Effect = undefined,
+    pending_len: u8 = 0,
     refresh_scratch: []Message = undefined,
     refresh_sources: [core.state.accounts_max]refresh_mod.Source = undefined,
     /// Which of the session's sources each job slot came from, and how many.
@@ -555,6 +563,7 @@ pub const Session = struct {
     /// Advances the loop by one step. Returns false when the session is over.
     pub fn step(self: *Session) bool {
         self.poll_refresh();
+        self.poll_pending();
         self.poll_body();
         self.boot_step();
         if (self.state.booting) self.needs_render = true;
@@ -717,6 +726,15 @@ pub const Session = struct {
 
     pub fn settle_refresh_for_test(self: *Session) void {
         self.wait_refresh();
+    }
+
+    /// Drains effects that were waiting for the connection, the way the loop does.
+    pub fn settle_pending_for_test(self: *Session) void {
+        var guard: u8 = 0;
+        while (self.pending_len > 0 and guard < pending_effects_max + 1) : (guard += 1) {
+            self.poll_pending();
+            self.settle_refresh_for_test();
+        }
     }
 
     /// Lets a body fetch in the air land, the way the loop would: start it, wait for
@@ -1199,40 +1217,74 @@ pub const Session = struct {
     fn run_effects(self: *Session, effects: []const core.effect.Effect) void {
         for (effects) |effect| {
             if (self.state.quit) return;
-            // One connection: a body asked for while the worker has it is
-            // deferred (the reader shows its placeholder) instead of freezing
-            // the UI; everything else waits for the worker.
             switch (effect) {
-                .refresh => {},
+                .refresh => self.start_refresh(),
                 // The body is never fetched here: the reader is already on screen, and
-                // asking is all this does. `poll_body` starts the worker on a later tick
-                // and the loop stays free -- Esc works while the bytes are in the air.
+                // asking is all this does. `poll_body` starts the worker and the loop
+                // stays free -- Esc works while the bytes are in the air.
                 .fetch_body => |args| {
                     self.begin_body(args.account, args.mailbox, args.id);
                     self.request_body(args.account, args.mailbox, args.id);
-                    continue;
                 },
-                else => self.wait_refresh(),
+                // Everything else needs the one connection a refresh may be using.
+                // It waits by getting in line, not by stopping the loop: a key must
+                // answer while the accounts are being fetched.
+                else => {
+                    if (self.refreshing) {
+                        self.defer_effect(effect);
+                        continue;
+                    }
+                    self.run_effect(effect);
+                },
             }
-
-            const timer = self.begin_loading();
-            switch (effect) {
-                // Requested above, before the loading wrapper: it must not block.
-                .fetch_body => {},
-                .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags),
-                .move_message => |args| self.move_message(args.account, args.id, args.to),
-                .delete_message => |args| self.delete_message(args.account, args.mailbox, args.id),
-                .empty_mailbox => |args| self.empty_mailbox(args.account, args.mailbox),
-                .remove_account => |args| self.remove_account(args.account),
-                .edit_account => |args| self.open_settings(args.account),
-                .rename_account => |args| self.open_rename(args.account),
-                .oauth_account => |args| self.oauth_account(args.account),
-                .refresh => self.start_refresh(),
-                .send => |outgoing| self.send(&outgoing),
-                .edit_body => |request| self.edit_body(request.initial),
-            }
-            self.end_loading(timer);
         }
+    }
+
+    /// Runs one effect that needs the connection. Blocking, and only ever called when
+    /// nothing else holds it.
+    fn run_effect(self: *Session, effect: core.effect.Effect) void {
+        const timer = self.begin_loading();
+        switch (effect) {
+            .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags),
+            .move_message => |args| self.move_message(args.account, args.id, args.to),
+            .delete_message => |args| self.delete_message(args.account, args.mailbox, args.id),
+            .empty_mailbox => |args| self.empty_mailbox(args.account, args.mailbox),
+            .remove_account => |args| self.remove_account(args.account),
+            .edit_account => |args| self.open_settings(args.account),
+            .rename_account => |args| self.open_rename(args.account),
+            .oauth_account => |args| self.oauth_account(args.account),
+            .refresh => self.start_refresh(),
+            .send => |outgoing| self.send(&outgoing),
+            .edit_body => |request| self.edit_body(request.initial),
+            .fetch_body => |args| self.request_body(args.account, args.mailbox, args.id),
+        }
+        self.end_loading(timer);
+    }
+
+    /// A wait for the connection, held in a line instead of in the loop.
+    fn defer_effect(self: *Session, effect: core.effect.Effect) void {
+        if (self.pending_len == self.pending_effects.len) {
+            // Full: there is nowhere to put it, and dropping a move or a delete would
+            // be worse than waiting for one. The loop stops only in this corner.
+            self.wait_refresh();
+            self.run_effect(effect);
+            return;
+        }
+        self.pending_effects[self.pending_len] = effect;
+        self.pending_len += 1;
+        self.repaint();
+    }
+
+    /// Starts the next thing that was waiting for the connection.
+    fn poll_pending(self: *Session) void {
+        if (self.pending_len == 0 or self.refreshing) return;
+        const effect = self.pending_effects[0];
+        var index: u8 = 1;
+        while (index < self.pending_len) : (index += 1) {
+            self.pending_effects[index - 1] = self.pending_effects[index];
+        }
+        self.pending_len -= 1;
+        self.run_effect(effect);
     }
 
     fn source_for(self: *Session, account: core.id.AccountId) ?core.mail_port.Mail {
@@ -2231,6 +2283,7 @@ const FakeMail = struct {
 
     fn fetchThunk(context: *anyopaque, mailbox: Mailbox, out: []Message) core.mail_port.Error!u32 {
         const self: *FakeMail = @ptrCast(@alignCast(context));
+        if (self.gate) |gate| gate.wait();
         self.fetch_calls += 1;
         if (self.fetch_failure) |failure| return failure;
         return self.inner.mail().fetch(mailbox, out);
@@ -3820,6 +3873,91 @@ test "an effect paints the spinner, even when it is instant" {
     // A spinner frame was written before the work, and the flag is cleared.
     try testing.expect(rig.fake_system.output_len > 0);
     try testing.expect(!rig.session.state.loading);
+}
+
+test "a refresh does not stop the loop: keys answer while the accounts load" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // The server takes its time with the refresh.
+    var gate: FakeMail.Gate = .{};
+    rig.fake_mail.gate = &gate;
+    defer gate.release();
+
+    rig.fake_system.push_input("\x12");
+    _ = rig.session.step();
+    try testing.expect(rig.session.refreshing);
+
+    // Movement, and opening a mail, answer now -- not when the server does.
+    rig.fake_system.push_input("j");
+    _ = rig.session.step();
+    try testing.expectEqual(@as(u32, 1), rig.session.state.cursor);
+    rig.fake_system.push_input("k");
+    _ = rig.session.step();
+    try testing.expectEqual(@as(u32, 0), rig.session.state.cursor);
+
+    // The first message is unread, so opening it wants to sync a flag.
+    rig.fake_system.push_input("\r");
+    _ = rig.session.step();
+    try testing.expectEqual(core.state.View.reader, rig.session.state.view);
+
+    // And marking it read waits its turn instead of taking the loop hostage.
+    try testing.expect(rig.session.pending_len > 0);
+    gate.release();
+    rig.session.settle_refresh_for_test();
+    rig.session.settle_body_for_test();
+    rig.session.settle_pending_for_test();
+    try testing.expectEqual(@as(u8, 0), rig.session.pending_len);
+}
+
+test "the line of waiting effects is bounded" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var gate: FakeMail.Gate = .{};
+    rig.fake_mail.gate = &gate;
+    rig.fake_system.push_input("\x12");
+    _ = rig.session.step();
+    try testing.expect(rig.session.refreshing);
+
+    var index: u8 = 0;
+    while (index < pending_effects_max) : (index += 1) {
+        rig.session.defer_effect(.{ .sync_flags = .{
+            .account = core.id.AccountId.from_int(1),
+            .id = MessageId.from_int(1),
+            .flags = .{ .unread = false },
+        } });
+    }
+    try testing.expectEqual(pending_effects_max, rig.session.pending_len);
+
+    // The one that does not fit stops and takes its turn instead of being dropped:
+    // losing a move is worse than a slow tick. The refresh ends first.
+    gate.release();
+    rig.session.defer_effect(.{ .sync_flags = .{
+        .account = core.id.AccountId.from_int(1),
+        .id = MessageId.from_int(1),
+        .flags = .{ .unread = false },
+    } });
+    try testing.expect(!rig.session.refreshing);
+
+    // A body and a refresh can be in the line too, and they still do their work
+    // when their turn comes.
+    rig.session.defer_effect(.{ .fetch_body = .{
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+        .id = MessageId.from_int(1),
+    } });
+    rig.session.defer_effect(.{ .refresh = .{ .account = null, .mailbox = .inbox } });
+
+    // And the line drains, one effect per tick.
+    rig.session.settle_pending_for_test();
+    try testing.expectEqual(@as(u8, 0), rig.session.pending_len);
+    rig.session.settle_body_for_test();
+    try testing.expect(rig.session.body_len > 0);
 }
 
 test "while a body loads, the footer turns and the terminal's bar runs" {
