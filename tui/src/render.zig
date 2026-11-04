@@ -281,7 +281,7 @@ pub const breath_ticks: u16 = 16;
 /// which is invisible on the ground itself -- but only when the ground is known; a
 /// cell that is not painted is gone on every terminal, so the mark hides and shows
 /// the same way everywhere.
-const breath_hidden: f32 = 0.02;
+pub const hidden_level: f32 = 0.02;
 
 /// How solid the wordmark is at `tick`: one at the peak, zero at the trough. The
 /// whole word breathes together, which is what makes it read as one thing drawing
@@ -304,7 +304,7 @@ pub fn breath_level(tick: u16) f32 {
 /// terminal fades towards paper and a dark one towards its own dark. Without a
 /// derivation to follow -- no colour, or the built-in palette -- the ramp is carried
 /// by weight and by the palette's steps instead.
-fn breath_style(theme: *const Theme, level: f32) Style {
+pub fn breath_style(theme: *const Theme, level: f32) Style {
     const clamped = std.math.clamp(level, 0.0, 1.0);
 
     if (!theme.colored) {
@@ -352,7 +352,7 @@ fn draw_grid(out: *Screen, grid: anytype, top: u16, tick: u16, theme: *const The
         const row = top +| @as(u16, @intCast(index));
         if (row >= out.rows) return;
         const level = breath_level(tick);
-        if (level < breath_hidden) continue;
+        if (level < hidden_level) continue;
         for (line, 0..) |cell, column| {
             if (cell == ' ') continue;
             out.put(left +| @as(u16, @intCast(column)), row, cell, breath_style(theme, level));
@@ -364,17 +364,46 @@ fn draw_grid(out: *Screen, grid: anytype, top: u16, tick: u16, theme: *const The
 /// up while the first connection blocks, so it is built to be looked at while
 /// still: the light is the only thing that moves, and a frozen frame of it is
 /// still a lit wordmark.
+/// Where the mark sits, for the one other place that has to know: the thread that
+/// keeps it breathing while the first connection blocks. Same arithmetic, one source.
+pub const MarkPlacement = struct {
+    left: u16,
+    top: u16,
+    height: u16,
+    width: u16,
+    large: bool,
+};
+
+pub fn splash_mark(columns: u16, rows: u16) MarkPlacement {
+    const large = columns >= wordmark.large[0].len + 6 and rows >= 18;
+    const height: u16 = if (large) wordmark.large.len else wordmark.small.len;
+    const width: u16 = if (large) wordmark.large[0].len else wordmark.small[0].len;
+    const middle = rows / 2;
+    return .{
+        .left = (columns -| width) / 2,
+        .top = middle -| (height / 2) -| 2,
+        .height = height,
+        .width = width,
+        .large = large,
+    };
+}
+
+/// One cell of the mark, for the places that draw it themselves.
+pub fn mark_cell(large: bool, row: u16, column: u16) u21 {
+    if (large) return wordmark.large[row][column];
+    return wordmark.small[row][column];
+}
+
 fn render_splash(inputs: Inputs, out: *Screen) void {
     out.clear();
     const theme = inputs.theme;
-    const middle = out.rows / 2;
     const tick: u16 = if (inputs.reduced_motion) 0 else @intCast(inputs.state.spinner);
 
     // The mark and the two lines under it are one block: place the block on the
     // middle of the screen, not the mark alone, or the big size drags it up.
-    const big = out.columns >= wordmark.large[0].len + 6 and out.rows >= 18;
-    const mark_rows: u16 = if (big) wordmark.large.len else wordmark.small.len;
-    const mark_top = middle -| (mark_rows / 2) -| 2;
+    const placement = splash_mark(out.columns, out.rows);
+    const mark_rows = placement.height;
+    const mark_top = placement.top;
     draw_wordmark(out, mark_top, tick, theme);
 
     var label_buffer: [96]u8 = undefined;
@@ -2625,7 +2654,7 @@ test "the wordmark breathes: it goes away and comes back" {
         highest = @max(highest, level);
     }
     // All the way: empty at the trough, solid at the peak.
-    try testing.expect(lowest <= breath_hidden);
+    try testing.expect(lowest <= hidden_level);
     try testing.expect(highest >= 0.99);
 }
 
@@ -2707,4 +2736,16 @@ test "the breath moves from the first tick, at a speed the eye can see" {
     // again four ticks later.
     try testing.expectEqual(@as(f32, 0.0), breath_level(breath_ticks / 2));
     try testing.expect(breath_level(breath_ticks / 2 + 4) > 0.2);
+}
+
+test "both sizes of the mark answer their own cells" {
+    const large = splash_mark(120, 24);
+    try testing.expect(large.large);
+    try testing.expect(mark_cell(true, 0, 0) != 0);
+
+    const small = splash_mark(30, 24);
+    try testing.expect(!small.large);
+    try testing.expect(mark_cell(false, 0, 0) != 0);
+    // The small mark is the same word, half the columns.
+    try testing.expectEqual(small.width * 2, large.width);
 }

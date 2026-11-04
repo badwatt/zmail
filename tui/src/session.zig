@@ -14,6 +14,7 @@ const keymap = @import("keymap.zig");
 const layout_mod = @import("layout.zig");
 const render_mod = @import("render.zig");
 const progress_mod = @import("progress.zig");
+const splash_painter_mod = @import("splash_painter.zig");
 const screen_mod = @import("screen.zig");
 const system_mod = @import("system.zig");
 const theme_mod = @import("theme.zig");
@@ -229,6 +230,7 @@ pub const Session = struct {
     progress_since_ms: i64 = 0,
     /// The first connection, one account per tick so the splash keeps breathing.
     /// `boot_cursor` is how far it got; `booting_now` says it is still going.
+    splash_painter: splash_painter_mod.Painter = .{},
     boot_cursor: u8 = 0,
     boot_ticks: u16 = 0,
     /// Whether the first connection still has accounts to fetch.
@@ -1857,6 +1859,20 @@ pub const Session = struct {
     /// animated boot step work in, so a mailbox cannot be read one way on a refresh
     /// and another on the first screen.
     fn fetch_source(self: *Session, source: MailSource, index: u8, mailbox: Mailbox) void {
+        // While this call blocks -- seconds, against a real server -- the splash is on
+        // screen and nobody else is painting: the mark keeps breathing from here, and
+        // stops the moment the mail is in, before this thread touches the terminal.
+        if (self.state.booting) {
+            self.splash_painter.start(
+                self.deps.system,
+                self.size,
+                self.deps.theme,
+                self.deps.reduced_motion,
+                @intCast(self.state.spinner),
+            );
+        }
+        defer self.splash_painter.finish();
+
         const count = source.mail.fetch(mailbox, self.scratch) catch |err| {
             self.reload_failed = true;
             if (err == error.Rejected) self.reload_login_failed = true;

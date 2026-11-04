@@ -27,6 +27,7 @@ pub const render = @import("render.zig");
 pub const system = @import("system.zig");
 pub const os = @import("os.zig");
 pub const progress = @import("progress.zig");
+pub const splash_painter = @import("splash_painter.zig");
 pub const session = @import("session.zig");
 pub const refresh = @import("refresh.zig");
 pub const setup_session = @import("setup_session.zig");
@@ -49,6 +50,7 @@ test {
     _ = @import("system.zig");
     _ = @import("os.zig");
     _ = @import("progress.zig");
+    _ = @import("splash_painter.zig");
     _ = @import("session.zig");
     _ = @import("setup_session.zig");
     _ = @import("run.zig");
