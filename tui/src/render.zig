@@ -413,6 +413,19 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     const mark_top = placement.top;
     draw_wordmark(out, mark_top, tick, theme);
 
+    // The version, quiet, right under the mark: the one thing a first screen can
+    // honestly say about itself, and it comes from the manifest -- the release is
+    // that file, so nothing here spells a number.
+    var version_buffer: [64]u8 = undefined;
+    if (std.fmt.bufPrint(&version_buffer, "version: {s}", .{core.meta.version})) |text| {
+        const width = screen.text_columns(text);
+        // Under the mark and against its right edge: signed under the wordmark, the
+        // way a maker's mark sits under the name and not in the middle of the page.
+        const right_edge = placement.left +| placement.width;
+        const x = right_edge -| width;
+        _ = out.put_text(x, mark_top +| mark_rows +| 1, text, out.columns -| x, theme.border);
+    } else |_| {}
+
     var label_buffer: [96]u8 = undefined;
     const labels = account_labels(inputs.state, &label_buffer);
 
@@ -1982,6 +1995,12 @@ test "the boot splash is a wordmark, the account, and a footer" {
     try row_contains(&out, 14, "██████████████  ████      ████  ██████  ██████  ██████  ████████████");
     try row_contains(&out, 23, "connecting to work");
     try row_contains(&out, 17, "alice@example.com");
+    // The version, from the manifest, right under the mark.
+    var version_buffer: [64]u8 = undefined;
+    let_version: {
+        const line = std.fmt.bufPrint(&version_buffer, "version: {s}", .{core.meta.version}) catch break :let_version;
+        try row_contains(&out, 16, line);
+    }
     var footer_buffer: [512]u8 = undefined;
     const footer = std.mem.trim(u8, out.row_text(23, &footer_buffer), " ");
     // The footer is the sentence on the left and the way out on the right, with the
