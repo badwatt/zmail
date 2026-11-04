@@ -270,8 +270,12 @@ fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 
     defer threaded.deinit();
     const io = threaded.io();
 
-    const argv = [_][]const u8{
-        "curl",
+    // Where curl is, from PATH: it is at `/usr/bin` on a distribution, at
+    // `/opt/homebrew/bin` on a Mac and at a store path on Nix, and a list of
+    // guesses only ever knows the first two.
+    var path_buffer: [1024]u8 = undefined;
+    var argv = [_][]const u8{
+        "",
         "--silent",
         "--show-error",
         "--fail",
@@ -289,16 +293,24 @@ fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 
         "--url",
         url,
     };
-    const result = std.process.run(self.gpa, io, .{
-        .argv = &argv,
-        .stdout_limit = .limited(out.len),
-        .stderr_limit = .limited(256),
-    }) catch return null;
-    defer self.gpa.free(result.stdout);
-    defer self.gpa.free(result.stderr);
-    if (!result.term.success() or result.stdout.len == 0) return null;
-    @memcpy(out[0..result.stdout.len], result.stdout);
-    return out[0..result.stdout.len];
+    const search = os.env("PATH") orelse return null;
+    var dirs = std.mem.splitScalar(u8, search, ':');
+    while (dirs.next()) |dir| {
+        if (dir.len == 0) continue;
+        const path = std.fmt.bufPrint(&path_buffer, "{s}/curl", .{dir}) catch continue;
+        argv[0] = path;
+        const result = std.process.run(self.gpa, io, .{
+            .argv = &argv,
+            .stdout_limit = .limited(out.len),
+            .stderr_limit = .limited(256),
+        }) catch continue;
+        defer self.gpa.free(result.stdout);
+        defer self.gpa.free(result.stderr);
+        if (!result.term.success() or result.stdout.len == 0) return null;
+        @memcpy(out[0..result.stdout.len], result.stdout);
+        return out[0..result.stdout.len];
+    }
+    return null;
 }
 
 /// One image of the message, painted where the layout left its marker.

@@ -199,6 +199,10 @@ const html_message =
     "<p>The plain-text part of this message is what the reader shows by default, " ++
     "so pressing H reads the HTML version instead: headings, lists and links, " ++
     "all in the terminal.</p>" ++
+    // A picture the mail points at, for the reader's `i`: nothing is fetched until
+    // the reader asks for pictures, and `o` opens the mail where they always load.
+    "<p><img src=\"https://account.brave.com/images/email/brave-white-288x96.png\" " ++
+    "alt=\"a logo\"></p>" ++
     "<p>Nothing in this demo leaves the machine: the mail lives in memory and " ++
     "the rendering happens from that copy.</p>\n" ++
     "--demo--\n";
