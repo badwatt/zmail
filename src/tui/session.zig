@@ -297,6 +297,9 @@ pub const Session = struct {
     /// The message the reader is waiting for, so a body that arrives after the user
     /// left is cached and not painted over whatever is on screen.
     body_wanted: ?core.id.MessageId = null,
+    /// When the footer spinner may stop: a bar that appears and vanishes inside one
+    /// frame reads as a glitch, so the body keeps it up for the minimum.
+    body_loading_until_ms: i64 = 0,
     refresh_scratch: []Message = undefined,
     refresh_sources: [core.state.accounts_max]refresh_mod.Source = undefined,
     /// Which of the session's sources each job slot came from, and how many.
@@ -1298,12 +1301,20 @@ pub const Session = struct {
         };
         self.body_request = .{ .account = account, .mailbox = mailbox, .id = id, .mail = mail };
         self.body_wanted = id;
+        // The footer turns and the terminal's own bar runs: the wait is real, and it is
+        // the only thing on screen that says so until the bytes land.
+        self.state.loading = true;
+        self.body_loading_until_ms = os.monotonic_ms() + @as(i64, @intCast(self.deps.loading_ms));
+        self.sync_progress();
         self.repaint();
     }
 
     /// One turn of the worker: start it when the connection is free, take its answer
     /// when it lands. Called every tick, so a body costs the loop a flag read.
     fn poll_body(self: *Session) void {
+        if (self.body_loading_until_ms != 0 and !self.body_in_flight and self.body_request == null) {
+            if (os.monotonic_ms() >= self.body_loading_until_ms) self.end_body_loading();
+        }
         if (self.body_in_flight) {
             if (!self.body_job.finished()) return;
             self.finish_body();
@@ -1337,6 +1348,14 @@ pub const Session = struct {
         // time and not painted under whatever is on screen now.
         if (!wanted) return;
         self.set_raw(request.account, request.mailbox, request.id, raw);
+    }
+
+    /// The bytes are in: the spinner has done its job.
+    fn end_body_loading(self: *Session) void {
+        self.body_loading_until_ms = 0;
+        self.state.loading = false;
+        self.sync_progress();
+        self.repaint();
     }
 
     /// Nothing arrived: the reader says so rather than showing an empty page forever.
@@ -3803,6 +3822,54 @@ test "an effect paints the spinner, even when it is instant" {
     try testing.expect(!rig.session.state.loading);
 }
 
+test "while a body loads, the footer turns and the terminal's bar runs" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var gate: FakeMail.Gate = .{};
+    rig.fake_mail.gate = &gate;
+    defer gate.release();
+    // The process boundary enables the bar; a terminal that cannot take the escape
+    // never sees a byte of it.
+    progress_mod.enable(true);
+    defer progress_mod.enable(false);
+
+    rig.fake_system.push_input("\r");
+    _ = rig.session.step();
+    // The reader is on screen with its placeholder, the footer has a spinner next to
+    // the position, and the progress bar is up: three ways of saying "working" that
+    // do not stop anyone from leaving.
+    try testing.expectEqual(core.state.View.reader, rig.session.state.view);
+    try testing.expect(rig.session.state.loading);
+    try testing.expect(rig.session.state.busy());
+    rig.fake_system.output_len = 0;
+    // A full frame, not the diff of an unchanged one.
+    rig.session.invalidate_screen();
+    rig.session.render();
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Loading...") != null);
+    // The spinner is next to the position, in the footer's right corner.
+    var footer_buffer: [512]u8 = undefined;
+    const last = rig.session.screen.row_text(rig.session.screen.rows - 1, &footer_buffer);
+    // Any frame of the spinner: which one depends on the tick.
+    const frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+    var spun = false;
+    for (frames) |glyph| {
+        if (std.mem.indexOf(u8, last, glyph) != null) spun = true;
+    }
+    try testing.expect(spun);
+    try testing.expect(progress_mod.state() != core.progress.State.clear);
+
+    gate.release();
+    rig.session.settle_body_for_test();
+    // `loading_ms` is 90 by default: the spinner stays for its minimum, then goes.
+    os.sleep_ms(120);
+    rig.session.settle_body_for_test();
+    try testing.expect(!rig.session.state.loading);
+    try testing.expect(!rig.session.state.busy());
+}
+
 test "leaving a message while its body is still loading is instant" {
     var rig: Rig = .{};
     try rig.start();
@@ -3813,6 +3880,10 @@ test "leaving a message while its body is still loading is instant" {
     var gate: FakeMail.Gate = .{};
     rig.fake_mail.gate = &gate;
     defer gate.release();
+    // The process boundary enables the bar; a terminal that cannot take the escape
+    // never sees a byte of it.
+    progress_mod.enable(true);
+    defer progress_mod.enable(false);
 
     rig.fake_system.push_input("\r");
     _ = rig.session.step();
