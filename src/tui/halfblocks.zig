@@ -90,11 +90,13 @@ pub fn draw(
 /// over white. Averaging is what keeps a picture from turning into a staircase
 /// when it is far bigger than the cells it has to fit in.
 fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16) u32 {
-    const target_rows = @max(1, rows * 2);
-    const from_x = (@as(u32, column) * image.width) / @max(1, columns);
-    const to_x = @max(from_x + 1, ((@as(u32, column) + 1) * image.width) / @max(1, columns));
-    const from_y = (@as(u32, pixel_row) * image.height) / target_rows;
-    const to_y = @max(from_y + 1, ((@as(u32, pixel_row) + 1) * image.height) / target_rows);
+    // Wide arithmetic: a cell count times a pixel count is bigger than a u32 once either
+    // side is large, and the picture is untrusted bytes either way.
+    const target_rows: u64 = @max(1, @as(u64, rows) * 2);
+    const from_x = (@as(u64, column) * image.width) / @max(1, columns);
+    const to_x = @max(from_x + 1, ((@as(u64, column) + 1) * image.width) / @max(1, columns));
+    const from_y = (@as(u64, pixel_row) * image.height) / target_rows;
+    const to_y = @max(from_y + 1, ((@as(u64, pixel_row) + 1) * image.height) / target_rows);
 
     var red_total: u32 = 0;
     var green_total: u32 = 0;

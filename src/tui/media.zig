@@ -11,6 +11,8 @@ const core = @import("core");
 pub const cell_width: u32 = 9;
 pub const cell_height: u32 = 18;
 pub const max_image_rows: u32 = 12;
+/// The largest side a picture may claim. Beyond this the header is not a picture.
+pub const max_dimension: u32 = 100_000;
 
 pub const ImageSize = struct { width: u32, height: u32 };
 const ImageCells = struct { columns: u16, rows: u16 };
@@ -50,11 +52,17 @@ pub fn png_size(bytes: []const u8) ?ImageSize {
     const width = std.mem.readInt(u32, bytes[16..20], .big);
     const height = std.mem.readInt(u32, bytes[20..24], .big);
     if (width == 0 or height == 0) return null;
+    // A terminal cell is eighteen pixels tall and nine wide: a picture that claims to be
+    // a hundred thousand pixels across is a header that lies, and the arithmetic that
+    // lays it out is not obliged to survive it.
+    if (width > max_dimension or height > max_dimension) return null;
     return .{ .width = width, .height = height };
 }
 
 pub fn image_cells(size: ImageSize) ImageCells {
-    const wanted_rows = (size.height + cell_height - 1) / cell_height;
+    // Saturating: a PNG header is attacker-controlled bytes, and "four billion rows" is
+    // a header that lies. It must not take the reader down on its way to being ignored.
+    const wanted_rows = (size.height +| (cell_height - 1)) / cell_height;
     const scale = if (wanted_rows > max_image_rows)
         @as(f64, @floatFromInt(max_image_rows)) / @as(f64, @floatFromInt(wanted_rows))
     else
@@ -124,4 +132,13 @@ test "a marker is a local file name, not an address" {
     try testing.expect(!is_remote_marker("r1a"));
     try testing.expect(!is_remote_marker("x0"));
     try testing.expect(!is_remote_marker("r"));
+}
+
+test "a picture with absurd dimensions is not a picture" {
+    // A header that says four billion pixels tall is bytes that were not a picture,
+    // and the arithmetic that lays it out must not overflow on the way to saying so.
+    const huge = ImageSize{ .width = 4096, .height = 0xFFFF_FFFF };
+    const cells = image_cells(huge);
+    try testing.expect(cells.rows <= max_image_rows);
+    try testing.expect(cells.columns >= 1);
 }
