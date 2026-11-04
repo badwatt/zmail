@@ -116,16 +116,11 @@ pub const Command = union(enum) {
     /// Viewport updates arrive on every resize and must not erase it.
     pub fn clears_status(self: Command) bool {
         return switch (self) {
-            // These set their own status message.
             .noop, .set_viewport, .send_succeeded, .send_failed, .compose_body_set => false,
             else => true,
         };
     }
 };
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 

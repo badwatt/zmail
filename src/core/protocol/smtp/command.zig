@@ -151,10 +151,6 @@ fn valid_domain(domain: []const u8) bool {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 fn expect_command(expected: []const u8, actual: Error![]const u8) !void {
@@ -230,7 +226,6 @@ test "headers encode a non-ASCII subject and display name" {
         mime.decode_encoded_words(header_line(headers, "Subject"), &decoded),
     );
 
-    // The name is encoded, the angle-addr stays readable to every server.
     const from = header_line(headers, "From");
     const bracket = std.mem.indexOfScalar(u8, from, '<').?;
     try testing.expectEqualStrings(
@@ -239,7 +234,6 @@ test "headers encode a non-ASCII subject and display name" {
     );
     try testing.expectEqualStrings("<alvaro@example.com>", from[bracket..]);
 
-    // ASCII stays as it is: an encoded word there is noise nobody needs.
     try testing.expectEqualStrings("alice@example.com", header_line(headers, "To"));
 }
 

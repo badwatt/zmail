@@ -321,10 +321,6 @@ pub const State = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 fn fill(store: *Store) !void {
@@ -343,18 +339,15 @@ test "Accounts.remove drops one account, and at() reports the rest" {
     accounts.add(AccountId.from_int(2), "work", .{}, .{});
     accounts.add(AccountId.from_int(3), "club", .{}, .{});
 
-    // Listed by name: club, home, work.
     try testing.expectEqualStrings("home", accounts.at(1).?.label.slice());
     try testing.expect(accounts.at(9) == null);
 
-    // Removing the middle one leaves the rest, still by name.
     accounts.remove(AccountId.from_int(2));
     try testing.expectEqual(@as(u8, 2), accounts.len);
     try testing.expectEqualStrings("club", accounts.at(0).?.label.slice());
     try testing.expectEqualStrings("home", accounts.at(1).?.label.slice());
     try testing.expectEqualStrings("", accounts.label_for(AccountId.from_int(2)));
 
-    // Removing something that is not there is a no-op.
     accounts.remove(AccountId.from_int(9));
     try testing.expectEqual(@as(u8, 2), accounts.len);
 }
@@ -519,8 +512,6 @@ test "labels that share a prefix sort shortest first" {
     accounts.add(AccountId.from_int(3), "WORK-one", .{}, .{});
 
     var order: [accounts_max]u8 = undefined;
-    // "work" is a prefix of the other two, so it comes first; the rest differ at
-    // the character after it, and case is not a difference.
     try testing.expectEqualSlices(u8, &.{ 1, 2, 0 }, accounts.sorted_order(&order));
 }
 

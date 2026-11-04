@@ -29,8 +29,6 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
     var posix = os.Posix.init(std.posix.STDIN_FILENO, std.posix.STDOUT_FILENO);
     const system = posix.system();
 
-    // `--oauth` talks to a human in a browser: it runs on the normal screen,
-    // before the alternate one, so the URL and the QR are actually visible.
     if (options.oauth) {
         const failure = run_oauth(gpa, io, options, system);
         if (failure) |problem| {
@@ -42,15 +40,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
 
     try system.enter_raw();
     install_panic_button(&posix);
-    // Asked while the terminal is raw and before anything reads keys: both
-    // answers come on stdin, and a parser would read them as typing.
-    // Both of these block before a single cell is painted, and a terminal answers
-    // in microseconds or never: one short try each, not two long ones.
     graphics.detect(system);
     background = os.query_background(system);
-    // A pipe, a log, or a `dumb` terminal must not be sent a progress bar; one
-    // that shows it must be told when the work stops, which is what restoreNow
-    // and deinit are for.
     progress.enable(!std.mem.eql(u8, os.env("TERM") orelse "", "dumb"));
     try system.write(enter_screen);
 
@@ -100,8 +91,6 @@ fn install_panic_button(posix: *os.Posix) void {
     std.posix.sigaction(std.posix.SIG.INT, &action, null);
     std.posix.sigaction(std.posix.SIG.QUIT, &action, null);
 
-    // Ctrl+Z would suspend into a screen nobody repaints on the way back: keep
-    // it inert, the way it was while Ctrl turned it into a byte.
     const ignore = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.IGN },
         .mask = std.posix.sigemptyset(),
@@ -114,8 +103,6 @@ fn install_panic_button(posix: *os.Posix) void {
 var interrupting: ?*os.Posix = null;
 
 fn onInterrupt(_: std.posix.SIG) callconv(.c) void {
-    // Only a write and a syscall here: the terminal is the whole point, and the
-    // process is about to end, so there is nothing to free and nothing to join.
     if (interrupting) |posix| posix.restoreNow();
     std.c._exit(130);
 }
@@ -177,8 +164,6 @@ fn run_session(
     splash: bool,
     notice: ?[]const u8,
 ) ?Failure {
-    // The session owns megabytes of bounded buffers; keeping it on the stack
-    // next to the adapters overflows it.
     var dir_buffer: [512]u8 = undefined;
     const cache_dir = cli.default_cache_dir(&dir_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
     var browser = Browser{ .io = io, .cache_dir = cache_dir, .gpa = gpa, .system = system };
@@ -207,8 +192,6 @@ fn run_session(
         .edit_text_context = &editor,
         .fetch_image = fetchImageThunk,
         .fetch_image_context = &browser,
-        // Wired only where the terminal said it can paint: the session then has an
-        // honest answer for a key that asks for pictures.
         .draw_image = if (graphics.supported()) drawImageThunk else null,
         .draw_image_context = &browser,
         .clear_images = clearImagesThunk,
@@ -217,8 +200,6 @@ fn run_session(
     defer session.deinit();
 
     session.loop();
-    // The terminal belongs to the shell again: the pointer shape and the bar are ours to
-    // put back, and a chain left behind is a chain in every later command.
     system.write(core.osc.Pointer.default.sequence()) catch {};
     return null;
 }
@@ -273,9 +254,6 @@ fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 
     defer threaded.deinit();
     const io = threaded.io();
 
-    // Where curl is, from PATH: it is at `/usr/bin` on a distribution, at
-    // `/opt/homebrew/bin` on a Mac and at a store path on Nix, and a list of
-    // guesses only ever knows the first two.
     var path_buffer: [1024]u8 = undefined;
     var argv = [_][]const u8{
         "",
@@ -285,8 +263,6 @@ fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 
         "--location",
         "--max-time",
         "20",
-        // The size the reader can hold, so a runaway response is cut rather than
-        // buffered: a picture bigger than the screen is not a picture at this size.
         "--max-filesize",
         "4194304",
         "--user-agent",
@@ -338,10 +314,6 @@ fn drawImageThunk(
 ) bool {
     const self = browser_of(context);
 
-    // The terminal's own protocol first: it paints the picture with its alpha, over
-    // whatever is behind it. Blocks are the fallback, never both -- a transparent
-    // pixel in the picture would show the blocks we drew under it, and a logo would
-    // arrive with a checkerboard behind the letters.
     if (graphics.supported()) {
         if (graphics.transmit(self.system, png_bytes, id)) {
             if (graphics.place(self.system, id, x, y, columns, rows)) return true;
@@ -437,8 +409,6 @@ fn writeHtmlFile(
     }
     const file = std.Io.Dir.cwd().createFile(self.io, path, .{ .permissions = file_mode }) catch
         return null;
-    // The page is shifted up by the scroll, because a screenshot can only be
-    // taken from the top: the offset is what makes the picture scrollable.
     var style_buffer: [256]u8 = undefined;
     const style = std.fmt.bufPrint(&style_buffer, "<!doctype html><meta charset=utf-8>" ++
         "<style>body{{background:#fff;color:#111;font-family:sans-serif;margin:16px}}" ++
@@ -518,7 +488,6 @@ const LiveAccount = struct {
     fn openMail(context: *anyopaque) core.mail_port.Error!core.mail_port.Mail {
         const self: *LiveAccount = @ptrCast(@alignCast(context));
         if (self.has_imap) return self.imap.mail();
-        // An OAuth account has a token, not a password: do not demand one.
         if (self.token.access.is_empty() and !self.password_ready) {
             self.failure = "No password for an account: run setup again or set ZMAIL_PASSWORD";
             return error.Unavailable;
@@ -547,7 +516,6 @@ const LiveAccount = struct {
         opened catch |err| {
             self.imap_transport.deinit();
             self.failure = login_message(err);
-            // A refused login is not "unavailable": say so.
             return switch (err) {
                 error.LoginFailed, error.Rejected, error.ProtocolError => error.Rejected,
                 else => error.Unavailable,
@@ -596,8 +564,6 @@ const LiveAccount = struct {
     }
 };
 
-// A `Live` is only a table of owned copies plus borrowed slices: the test below
-// is what keeps those slices from pointing at a loop variable.
 const testing = std.testing;
 
 const Live = struct {
@@ -646,8 +612,6 @@ const Live = struct {
         };
         self.mail_count += 1;
 
-        // Always initialised, even without SMTP: `close` walks accounts, not
-        // outboxes, and an undefined slot is a function pointer into nowhere.
         self.lazy_outbox[index] = .{
             .context = &self.accounts[index],
             .open_fn = LiveAccount.openOutbox,
@@ -691,7 +655,6 @@ const Live = struct {
 /// answer -- 0 when the server took it, 1 when it did not -- so a script can
 /// tell the difference between "sent" and "silently did nothing".
 pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
-    // A CLI that pipes nowhere still talks to an SMTP server that can go away.
     ignore_sigpipe();
     var stderr_buffer: [1024]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
@@ -737,8 +700,6 @@ pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
         return 1;
     }
 
-    // One account, built where it lives: the struct carries an IMAP client and
-    // buffers as large as the body limit.
     const live = gpa.create(Live) catch return 1;
     defer gpa.destroy(live);
     live.* = .{};
@@ -870,16 +831,11 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         else => return .{ .message = "Could not read the config file" },
     }
 
-    // A broken config must not lock the user out: open the client with no
-    // accounts and say what is wrong, so the file can be fixed in another
-    // window and the client restarted.
     const file = core.config.parse(config_text) catch |err| {
         return run_session(gpa, io, system, &.{}, &.{}, null, null, null, null, true, config_message(err));
     };
     if (file.len == 0) return .{ .message = "The config has no accounts" };
 
-    // Four accounts' clients live in here, each with the IMAP framer and the
-    // message being read: it does not belong on the stack.
     const live_ptr = gpa.create(Live) catch return .{ .message = "Not enough memory to start" };
     defer gpa.destroy(live_ptr);
     live_ptr.* = .{};
@@ -898,7 +854,6 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
             }
         }
 
-        // Built in place: the struct carries the client and its buffers.
         const account = live.reserve(gpa, io) orelse
             return .{ .message = "Too many accounts in one config file" };
         wire_account(account, gpa, io, core.id.AccountId.from_int(index + 1), &entry);
@@ -908,7 +863,6 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         if (read_token(io, path, entry.label.slice())) |stored| {
             var token = stored;
             if (!token.is_fresh(os.now_unix())) {
-                // Expired: exchange the refresh token, and keep the new one.
                 const provider = provider_for(entry.account.imap.host.slice());
                 const client_id = entry.oauth_client_id.slice();
                 if (net.oauth_flow.refresh(gpa, io, provider, client_id, &token)) {
@@ -917,7 +871,6 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
             }
             if (token.is_fresh(os.now_unix())) account.token = token;
         } else |_| {}
-        // An OAuth account lives on its token: a missing password is expected.
         if (!account.password_ready and account.token.access.is_empty() and missing_password == null) {
             missing_password = "No password for an account: set ZMAIL_PASSWORD or run the add-account command";
         }
@@ -925,10 +878,6 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         live.add(account);
     }
 
-    // On-disk cache: startup and mailbox switches read from here, so the first
-    // frame never waits for the network. `R` refreshes from the server.
-    // Owned copies: a slice into the loop variable is stack memory the next
-    // iteration overwrites, and every cache would read the last account's.
     var label_text: [max_accounts]core.text.Text(core.limits.label_max) = @splat(.{});
     var labels: [max_accounts]net.cache_file.Label = undefined;
     for (file.items(), 0..) |entry, index| {
@@ -942,8 +891,6 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
     var cache_buffer: [512]u8 = undefined;
     const cache_dir = cli.default_cache_dir(&cache_buffer, os.env("XDG_CACHE_HOME"), os.env("HOME"));
 
-    // These two hold buffers as large as the message limit: they belong on the
-    // heap, or the first big limit increase becomes a stack overflow.
     const file_cache = gpa.create(net.cache_file.FileCache) catch
         return .{ .message = "Not enough memory to start" };
     defer gpa.destroy(file_cache);
@@ -977,7 +924,6 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         missing_password,
     );
     if (outcome != null) return outcome;
-    // A connection that never worked left nothing on screen: say why.
     if (live.firstFailure()) |reason| return .{ .message = reason };
     return null;
 }
@@ -996,13 +942,8 @@ fn read_password(
 
     const path = cli.credential_path(config_path, label, &path_buffer);
 
-    // An account that names a command has said where its password lives: ask
-    // it first, and never write the answer to disk. The command stays the one
-    // source of truth (`pass` can rotate a password behind our back).
     if (password_command.len > 0 and run_password_command(gpa, io, password_command, out)) return;
 
-    // The environment wins: it is how a password is set or repaired without
-    // trusting whatever is on disk, and it re-seals itself for next time.
     if (allow_env) {
         if (os.env("ZMAIL_PASSWORD")) |value| {
             if (value.len > 0) {
@@ -1022,7 +963,6 @@ fn read_password(
     if (allow_env) {
         if (os.env("ZMAIL_PASSWORD")) |value| {
             try core.secret.Secret.init(value, out);
-            // Re-seal it: a lost or replaced key heals on the next start.
             if (path.len > 0) seal_in_place(io, config_path, path, value) catch {};
             return;
         }
@@ -1032,12 +972,9 @@ fn read_password(
     const legacy = cli.legacy_credential_path(config_path, &legacy_buffer);
     if (legacy.len > 0) {
         if (read_file(io, legacy, &buffer)) |text| {
-            // Sealed first; then a real plaintext file from an older install.
             if (try open_credential(io, text, out, config_path)) return;
 
             const trimmed = std.mem.trimEnd(u8, text, "\r\n");
-            // Only accept it as a password if it *looks* like one: a sealed
-            // blob that cannot be opened must not become a garbage password.
             if (!looks_like_password(trimmed)) return error.NoPassword;
             try core.secret.Secret.init(trimmed, out);
             seal_in_place(io, config_path, legacy, trimmed) catch {};
@@ -1084,8 +1021,6 @@ fn key_dir(io: std.Io, config_path: []const u8, buffer: []u8) ?[]const u8 {
     const dir = cli.parent_dir(config_path);
     if (dir.len == 0) return null;
 
-    // Migration: an older build kept the key in the cache directory. Copy it
-    // over the first time so sealed credentials keep opening.
     var target_buffer: [512]u8 = undefined;
     const target = std.fmt.bufPrint(&target_buffer, "{s}/key", .{dir}) catch return null;
     if (std.Io.Dir.cwd().openFile(io, target, .{})) |file| {
@@ -1213,7 +1148,6 @@ fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Se
         (os.env("ZMAIL_OAUTH_CLIENT_ID") orelse "")
     else
         entry.oauth_client_id.slice();
-    // Optional: without one we can still print the URL the user must build.
     if (client_id.len == 0) {
         return .{ .message = "Add oauth_client_id to the config (or set ZMAIL_OAUTH_CLIENT_ID)" };
     }
@@ -1330,7 +1264,6 @@ fn read_token(io: std.Io, config_path: []const u8, label: []const u8) !core.oaut
     var plain: [core.oauth.token_max * 2 + 64]u8 = undefined;
     const text = try core.sealed.open(key, sealed_text, &plain);
 
-    // access, refresh, expires: one per line.
     var lines = std.mem.splitScalar(u8, text, '\n');
     var token: core.oauth.Token = .{};
     token.access.set(lines.next() orelse return error.InvalidData);
@@ -1378,12 +1311,10 @@ const FileAccounts = struct {
     path: []const u8,
     system: SessionSystem,
     gpa: std.mem.Allocator = undefined,
-    // One runtime connection (the TUI adds one account at a time).
     transport: net.tls.TlsTransport = undefined,
     imap: core.imap_mail.ImapMail = undefined,
     open_account: ?core.id.AccountId = null,
     connected: core.accounts_port.Accounts.Connected = .{},
-    // Owned copies: the config text they came from is a local buffer.
     owned_label: core.text.Text(core.limits.label_max) = .{},
     owned_host: core.text.Text(core.limits.host_max) = .{},
     owned_user: core.text.Text(core.limits.username_max) = .{},
@@ -1426,7 +1357,6 @@ const FileAccounts = struct {
     ) core.accounts_port.Error!void {
         const self: *FileAccounts = @ptrCast(@alignCast(context));
 
-        // Only one at a time: close whatever was open.
         disconnectThunk(context, account) catch {};
 
         var buffer: [8193]u8 = undefined;
@@ -1531,11 +1461,8 @@ const FileAccounts = struct {
             problem.set("OAuth needs a Client ID: set it under Advanced in the account form");
             return error.Unavailable;
         }
-        // Microsoft needs the tenant that matches the app registration:
-        // `common`, `consumers`, `organizations`, or the tenant id.
         const tenant = if (entry.oauth_tenant.len > 0) entry.oauth_tenant.slice() else "common";
 
-        // A terminal writer, so the URL and the QR land on screen.
         const WriteContext = struct {
             system: SessionSystem,
             fn write(self_context: *anyopaque, bytes: []const u8) void {
@@ -1589,7 +1516,6 @@ const FileAccounts = struct {
         if (renamed.len == 0) return error.Unavailable;
         write_file(self.io, self.path, renamed) catch return error.Unavailable;
 
-        // The credential file follows the label.
         var old_buffer: [512]u8 = undefined;
         var new_buffer: [512]u8 = undefined;
         const from = cli.credential_path(self.path, old, &old_buffer);
@@ -1616,7 +1542,6 @@ const FileAccounts = struct {
         };
 
         if (draft.replaces) |account| {
-            // Replace in place: drop the old section, then append the new one.
             const index: usize = @intCast(account.to_int() - 1);
             if (index >= existing.len) {
                 refuse(draft, "That account is no longer in the config file");
@@ -1630,7 +1555,6 @@ const FileAccounts = struct {
             };
         }
 
-        // A taken label is not a dead end: pick the next free one and say so.
         var label_buffer: [core.limits.label_max]u8 = undefined;
         var final_label = draft.label;
         var text_to_append = draft.text;
@@ -1657,7 +1581,6 @@ const FileAccounts = struct {
                 "Could not write the config file");
             return error.Unavailable;
         };
-        // No password in the draft means "keep the one on disk".
         if (draft.password) |password| {
             write_credential_bytes(self.io, self.path, final_label, password) catch {
                 refuse(draft, "Could not write the sealed credential file");
@@ -1665,7 +1588,6 @@ const FileAccounts = struct {
             };
         }
 
-        // The new account's id is its position in the file.
         if (draft.replaces) |account| return account;
         return core.id.AccountId.from_int(@intCast(existing.len + 1));
     }
@@ -1717,8 +1639,6 @@ fn run_add_account(io: std.Io, options: cli.Launch, system: SessionSystem) ?Fail
 }
 
 fn append_file(io: std.Io, path: []const u8, text: []const u8) !void {
-    // The very first save creates the directory too: without this a fresh
-    // install failed with a message that named no cause.
     const dir = cli.parent_dir(path);
     if (dir.len > 0) {
         _ = std.Io.Dir.cwd().createDirPathStatus(io, dir, directory_mode) catch .existing;
@@ -1859,13 +1779,9 @@ fn theme_for_environment() theme_mod.Theme {
 }
 
 test "Live keeps one label per account, not the last one parsed" {
-    // The real one lives on the heap (four clients' buffers); a test can afford
-    // the stack, and it says what it needs.
     var live: Live = .{};
     defer live.close();
 
-    // Exactly what run_live does: build in place from a temporary label, add,
-    // then let the temporary go.
     for ([_][]const u8{ "work", "home" }, 0..) |wanted, index| {
         var entry_label: core.text.Text(core.limits.label_max) = .{};
         entry_label.set(wanted);
@@ -1893,9 +1809,7 @@ test "the config path: what was asked for, then the environment" {
         "/home/me/.config/zmail/config",
         config_path_from(&buffer, null, null, "/home/me"),
     );
-    // Nothing to go on: the caller says so, rather than looking in the dark.
     try testing.expectEqualStrings("", config_path_from(&buffer, null, null, null));
-    // And the wrapper is only the environment, read once.
     try testing.expectEqualStrings("/given/config", config_path_in(&buffer, "/given/config"));
 }
 
@@ -1920,7 +1834,6 @@ test "an account is wired from its config entry, SMTP only when there is one" {
     try testing.expectEqual(@as(u16, 465), account.smtp_port);
     try testing.expect(account.smtp_enabled);
 
-    // No SMTP server: the account reads, and does not claim it can send.
     const read_only = try core.config.parse(
         \\[account home]
         \\address = me@home.example

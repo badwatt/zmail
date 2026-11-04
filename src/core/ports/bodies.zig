@@ -88,10 +88,6 @@ pub const Memory = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "Memory body cache: save then load round-trips and records the key" {

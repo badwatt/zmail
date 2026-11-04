@@ -101,11 +101,6 @@ pub const Posix = struct {
     /// Puts the terminal back the way it was found, from anywhere: the sequence
     /// a signal handler has to be able to run.
     pub fn restoreNow(self: *Posix) void {
-        // The bar first: it belongs to the window, not to the screen we are
-        // leaving, so it has to come down before the screen does -- and only if
-        // there is one, so a terminal that never spoke this gets no stray escape.
-        // A signal handler cannot join a thread, so the bar is written down here
-        // and the thread, if any, dies with the process a line later.
         progress_mod.abandon(self.system());
         writeThunk(self, leave_screen) catch {};
         leaveRawThunk(self) catch {};
@@ -139,9 +134,6 @@ pub const Posix = struct {
         raw.cflag.PARENB = false;
         raw.lflag.ICANON = false;
         raw.lflag.ECHO = false;
-        // Signals stay on: Ctrl+C has to be able to reach the process while it
-        // is blocked on a socket, and a signal is the only thing that can. The
-        // handler (launch.zig) puts the terminal back and leaves.
         raw.lflag.ISIG = true;
         raw.lflag.IEXTEN = false;
         raw.cc[@backingInt(std.posix.V.MIN)] = 0;
@@ -169,8 +161,6 @@ pub fn env(name: [:0]const u8) ?[]const u8 {
 /// `CLOCK_MONOTONIC` is 1 on Linux; 0 means "unknown".
 pub fn monotonic_ms() i64 {
     var ts: std.posix.timespec = .{ .sec = 0, .nsec = 0 };
-    // CLOCK_MONOTONIC is 1 on Linux and 6 on macOS. A hardcoded 1 returns 0 there,
-    // which is a spinner that never moves and a bar that never advances.
     const monotonic: c_int = switch (builtin.os.tag) {
         .macos, .ios, .tvos, .watchos, .visionos => 6,
         else => 1,
@@ -209,8 +199,6 @@ pub fn edit_text(io: std.Io, initial: []const u8, out: []u8) ?[]const u8 {
     core.argv.split(command, &argv) catch return null;
     if (argv.len == 0) return null;
 
-    // One random name per edit: a file left behind by a crash must never be the
-    // file the next edit opens.
     var random_suffix: u64 = undefined;
     io.random(std.mem.asBytes(&random_suffix));
     var path_buffer: [256]u8 = undefined;
@@ -233,13 +221,11 @@ pub fn edit_text(io: std.Io, initial: []const u8, out: []u8) ?[]const u8 {
     closed = true;
 
     var words = argv.items;
-    if (argv.len == words.len) return null; // no room left for the path
+    if (argv.len == words.len) return null;
     words[argv.len] = path;
 
     var child = std.process.spawn(io, .{
         .argv = words[0 .. argv.len + 1],
-        // The editor is the program the user is talking to: it gets the
-        // terminal, not a pipe.
         .stdin = .inherit,
         .stdout = .inherit,
         .stderr = .inherit,
@@ -265,9 +251,6 @@ pub fn query_background(system: system_mod.System) ?core.oklch.Rgb {
     var buffer: [128]u8 = undefined;
     var received: usize = 0;
     var attempts: u8 = 0;
-    // Two tries of 40ms: the answer comes in microseconds or not at all, and this
-    // happens before the first frame, where a wait is a startup delay the user
-    // reads as "it is slow".
     while (attempts < 1) : (attempts += 1) {
         const read = system.read(buffer[received..], 30) catch return null;
         if (read == 0) continue;
@@ -286,10 +269,6 @@ pub fn now_unix() i64 {
     return @intCast(ts.sec);
 }
 
-// ---------------------------------------------------------------------------
-// Tests: a real pseudo-terminal, so the adapter is exercised for real.
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 const Pty = struct {
@@ -304,8 +283,6 @@ const Pty = struct {
             extern "c" fn ptsname(fd: c_int) ?[*:0]const u8;
         };
 
-        // macOS needs `openpty`: it grants and unlocks the pair as one call, and a
-        // slave created any other way is not a terminal the child can use.
         if (builtin.os.tag == .macos) {
             var master: c_int = -1;
             var slave: c_int = -1;
@@ -331,8 +308,6 @@ const Pty = struct {
 
     fn resize(self: Pty, columns: u16, rows: u16) void {
         var window: Winsize = .{ .row = rows, .col = columns, .xpixel = 0, .ypixel = 0 };
-        // On the master: Linux accepts either end, macOS propagates the size from
-        // the side the terminal is attached to.
         assert(ioctl(self.master, TIOCSWINSZ, &window) == 0);
     }
 
@@ -355,13 +330,8 @@ test "size reports the terminal dimensions from the driver" {
     var posix = Posix.init(pty.slave, pty.slave);
     const system = posix.system();
 
-    // A fresh pseudo-terminal has no size yet.
     try testing.expectError(error.NotATerminal, system.size());
 
-    // macOS only propagates a window size through a pty that has a session leader
-    // on it, and this one is two bare descriptors: the size stays zero whatever is
-    // written. The real terminal path is covered by the pty end-to-end test, which
-    // runs the binary the way a shell does.
     if (builtin.os.tag == .macos) return error.SkipZigTest;
 
     pty.resize(40, 12);
@@ -382,8 +352,6 @@ test "read returns bytes typed into the terminal" {
     defer pty.close();
     var posix = Posix.init(pty.slave, pty.slave);
 
-    // Canonical mode would hold input until a newline; raw mode is what the
-    // session uses in practice.
     try posix.system().enter_raw();
     pty.writeMaster("hi");
     var buffer: [8]u8 = undefined;
@@ -453,7 +421,6 @@ test "raw mode disables echo and canonical input, and restores them" {
     try testing.expect(!during.lflag.ICANON);
     try testing.expect(!during.lflag.ECHO);
     try testing.expect(!during.oflag.OPOST);
-    // Signals stay on: Ctrl+C has to reach the process while it is blocked.
     try testing.expect(during.lflag.ISIG);
 
     try system.leave_raw();
@@ -476,9 +443,6 @@ test "restoreNow gives the terminal back in one call, from anywhere" {
     try testing.expect(after.lflag.ICANON);
     try testing.expect(after.lflag.ECHO);
 
-    // And the alternate screen is left, so the shell comes back to its own. Read
-    // until it arrives: the terminal may also be carrying the progress bar's clear,
-    // which is a sequence of its own and may land in the same read or before it.
     var buffer: [512]u8 = undefined;
     var filled: usize = 0;
     var attempts: u8 = 0;
@@ -521,10 +485,6 @@ test "now_unix returns a plausible current time" {
     try testing.expect(now > 1_600_000_000);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 test "monotonic_ms advances, and sleep_ms waits at least one tick" {
     const before = monotonic_ms();
     try testing.expect(before > 0);
@@ -532,7 +492,6 @@ test "monotonic_ms advances, and sleep_ms waits at least one tick" {
     const after = monotonic_ms();
     try testing.expect(after >= before);
 
-    // Zero means "no wait", and must not spin.
     sleep_ms(0);
 }
 
@@ -541,8 +500,6 @@ test "edit_text runs the editor on a temporary file and reads it back" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    // A real program, not a shell: it writes over the file it is given, which
-    // is what an editor does.
     const script_path = "/tmp/zmail-editor-test.sh";
     const script = "#!/bin/sh\nprintf 'edited by the editor\\nsecond line' > \"$1\"\n";
     const script_file = try std.Io.Dir.cwd().createFile(io, script_path, .{
@@ -581,8 +538,6 @@ test "edit_text reports nothing when the editor cannot run" {
 
 test "query_background asks once and reads the terminal's answer" {
     var fake = system_mod.Fake{};
-    // What xterm and its friends send back, behind a graphics reply that had to
-    // be read first.
     fake.push_input("\x1b_Gi=31;OK\x1b\\\x1b]11;rgb:1a1a/1b1b/2525\x1b\\");
 
     const colour = query_background(fake.system()).?;
@@ -596,20 +551,15 @@ test "query_background gives up quietly when the terminal says nothing" {
     var fake = system_mod.Fake{};
     try testing.expect(query_background(fake.system()) == null);
 
-    // A failure to write is not an error either: the theme falls back.
     var broken = system_mod.Fake{ .write_failure = error.IoError };
     try testing.expect(query_background(broken.system()) == null);
 
-    // Garbage that never becomes a reply is drained and dropped.
     var noisy = system_mod.Fake{};
     noisy.push_input("not a reply at all");
     try testing.expect(query_background(noisy.system()) == null);
 }
 
 test "suspending and resuming write the escapes and never fail" {
-    // /dev/null is not a terminal: the raw-mode calls cannot work, and the
-    // escapes have nowhere to go. Neither may fail the caller -- it is on its way
-    // to a browser.
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();

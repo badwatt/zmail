@@ -119,8 +119,6 @@ pub const Compose = struct {
         var lines = std.mem.splitScalar(u8, text, '\n');
         const first = std.mem.trimEnd(u8, lines.next() orelse return, "\r");
 
-        // The attribution is written only when at least one quoted line fits:
-        // a body that ends on "wrote:" promises a quote that is not there.
         const room = (if (self.body_len != 0) @as(usize, 1) else 0) +
             attribution.len + 1 + 2 + first.len + 1;
         if (@as(usize, self.body_len) + room > self.body.len) return;
@@ -170,10 +168,6 @@ fn pop_body_codepoint(self: *Compose) void {
     self.body_len = index;
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "append_quote puts the attribution and a quoted line per line" {
@@ -206,8 +200,6 @@ test "a quote with no room at all is not started" {
     compose.body_len = limits.body_max - 4;
     compose.append_quote("hi", "On 1 Jan 2024, Bob wrote:");
 
-    // Four bytes left: no room for the attribution plus a line, so nothing is
-    // written and the body still ends where the user left it.
     try testing.expectEqual(limits.body_max - 4, compose.body_len);
 }
 
@@ -231,7 +223,6 @@ test "set_body replaces the body, sanitized as if it came from the wire" {
     compose.set_body("hello\x1bthere\n");
     try testing.expectEqualStrings("hello there\n", compose.body_slice());
 
-    // A file on disk is sized by nobody: the body stops at its capacity instead.
     const huge = try testing.allocator.alloc(u8, limits.body_max + 8);
     defer testing.allocator.free(huge);
     @memset(huge, 'y');

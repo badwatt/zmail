@@ -79,8 +79,6 @@ pub fn settings(
     out.clear();
 
     const card_width: u16 = @min(66, out.columns -| 4);
-    // Only the rows that make sense right now: no password with OAuth, no
-    // client id unless Advanced is open.
     var visible: [10]u8 = undefined;
     var visible_count: u8 = 0;
     for (0..10) |candidate| {
@@ -90,7 +88,7 @@ pub fn settings(
         visible_count += 1;
     }
     const rows: u16 = visible_count;
-    const card_height: u16 = rows + 6; // title, blanks, fields, problem
+    const card_height: u16 = rows + 6;
     const rect = Rect{
         .x = (out.columns -| card_width) / 2,
         .y = (out.rows -| card_height) / 2,
@@ -174,9 +172,6 @@ fn field_value(setup: *const core.setup.Setup, index: u8) []const u8 {
 
 pub fn frame(inputs: Inputs, out: *Screen) void {
     out.resize(inputs.columns, inputs.rows);
-    // Renderers draw what they need; anything else must not survive from the
-    // previous view. The flush still compares rows, so this costs nothing on
-    // the wire.
     out.clear();
     const lay = layout_mod.Layout.compute(out.columns, out.rows, inputs.state.accounts.max_label());
     if (lay.too_small) {
@@ -230,8 +225,6 @@ fn render_tabs(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     _ = out.put_text(1, lay.header_y, name, 6, inputs.theme.accent.with_bold());
 
     if (!lay.show_tabs) {
-        // Narrow terminal: the active mailbox and its count, right next to each
-        // other. Tab/Shift+Tab still switch.
         const x: u16 = 1 + screen.text_columns(name) + 2;
         _ = out.put_text(x, lay.header_y, inputs.state.mailbox.title(), 16, inputs.theme.accent.with_bold());
         render_unread_count(
@@ -442,7 +435,6 @@ fn render_compose_field(
             .body => "",
         };
         if (active) {
-            // The cursor cell stays free, so the hint reads after it.
             out.put(10, y, ' ', inputs.theme.text.with_reverse());
             if (placeholder.len > 0) {
                 _ = out.put_text(11, y, placeholder, lay.columns -| 13, inputs.theme.dim);
@@ -468,12 +460,10 @@ fn render_compose_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) voi
     wrap.wrap(body, width, &wrapped);
 
     if (body.len == 0) {
-        // Leave the cursor cell free so the hint is not overwritten.
         const hint_x: u16 = if (inputs.state.compose.field == .body) 2 else 1;
         _ = out.put_text(hint_x, compose_rows, "Write your message.", width -| (hint_x - 1), inputs.theme.dim);
     }
 
-    // Keep the end of the draft visible: typing happens at the end.
     const first = if (wrapped.len > rows) wrapped.len - rows else 0;
     var row: u16 = 0;
     while (row < rows) : (row += 1) {
@@ -492,9 +482,6 @@ fn render_compose_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) voi
 }
 
 fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
-    // The store is the live copy, but a refresh can drop a message while it is
-    // on screen: what the reader shows comes from the snapshot taken when it was
-    // opened, so the page never blanks under the cursor.
     const stored = if (inputs.state.opened_account.is_known())
         inputs.store.get_const(inputs.state.opened_account, inputs.state.opened)
     else
@@ -541,8 +528,6 @@ fn render_reader_meta(inputs: Inputs, lay: layout_mod.Layout, header: Header, ou
     var size_buffer: [16]u8 = undefined;
     const size = size_text(&size_buffer, header.size_bytes);
 
-    // The name somebody chose and the address they actually wrote from: mail
-    // clients show both, and so does this one.
     var address_buffer: [core.limits.address_max]u8 = undefined;
     const address = header.from.addr_spec(&address_buffer);
     const named = header.from.name.len > 0 and address.len > 0;
@@ -577,7 +562,6 @@ fn render_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         const line = wrapped.at(line_index, inputs.body);
         var line_inputs = inputs;
         line_inputs.line_index = line_index;
-        // "[IMG:…]" is a place to paint, not words to read.
         const visible = if (std.mem.indexOf(u8, line, "[IMG:")) |marker| line[0..marker] else line;
         draw_line_with_links(line_inputs, out, visible, lay.reader_body_y + row, lay.columns - 2);
     }
@@ -617,7 +601,6 @@ pub fn mark_shift(inputs: Inputs, line_start: usize, line_end: usize, before: us
     const width: u16 = @intCast(screen.text_columns(link_mark));
     for (inputs.links) |link| {
         if (link.end <= line_start or link.start >= line_end) continue;
-        // Only the line a link starts on carries its mark.
         if (link.start < line_start) continue;
         if (link.start < before) shift += width;
     }
@@ -632,7 +615,6 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
         return;
     }
 
-    // The links are ranges in the whole body; the line is a window onto it.
     const line_start = @intFromPtr(line.ptr) - @intFromPtr(inputs.body.ptr);
     const line_end = line_start + line.len;
 
@@ -647,7 +629,6 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
             cursor = start;
         }
         if (end > cursor) {
-            // The mark in front of every link, on the line the link starts.
             const starts_here = link.start >= line_start;
             if (starts_here) {
                 const at = screen.text_columns(line[0 .. start - line_start]) + mark_shift(inputs, line_start, line_end, start);
@@ -725,13 +706,10 @@ fn draw_segment_kind(
     marked: bool,
 ) void {
     if (end <= start) return;
-    // Columns are counted from the line, which starts after the gutter, plus the marks
-    // drawn before this segment on the same line.
     const line_start = @intFromPtr(line.ptr) - @intFromPtr(inputs.body.ptr);
     const line_end = line_start + line.len;
     var offset = screen.text_columns(line[0..start]);
     offset += mark_shift(inputs, line_start, line_end, line_start + start);
-    // A segment that carries the link's own mark starts after it.
     if (marked) offset += screen.text_columns(link_mark);
     const segment = line[@min(start, line.len)..@min(end, line.len)];
     _ = out.put_text(1 + offset, y, segment, width -| offset, segment_style(inputs, kind));
@@ -740,10 +718,6 @@ fn draw_segment_kind(
 fn segment_style(inputs: Inputs, kind: Segment) Style {
     return switch (kind) {
         .text => line_style(inputs),
-        // Underlining every link turns the body into a sea of lines; the one
-        // under the pointer is the one that has to stand out.
-        // Underlined as well as coloured: a link has to be a link on a terminal that
-        // ignored the colour, and the underline is the one cue every terminal has.
         .link => inputs.theme.accent.with_underline(),
         .hovered => inputs.theme.accent.with_bold().with_underline(),
     };
@@ -836,8 +810,6 @@ fn render_footer(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const y = lay.footer_y;
     var right_buffer: [16]u8 = undefined;
     const position = position_text(inputs.state, &right_buffer);
-    // A refresh in progress turns the position into "⠹ 3/24": no new row, no
-    // transient message, just the spinner next to where you are.
     var spinner_buffer: [32]u8 = undefined;
     const right = if (inputs.state.busy()) blk: {
         const glyph = spinner_frames[inputs.state.spinner % spinner_frames.len];
@@ -982,7 +954,7 @@ const account_rows_max = 8;
 fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const rows = @min(inputs.state.accounts.len + 1, account_rows_max);
     const card_width: u16 = @min(52, lay.columns - 4);
-    const card_height: u16 = rows + 4; // title, rows, hints
+    const card_height: u16 = rows + 4;
     const rect = Rect{
         .x = (lay.columns - card_width) / 2,
         .y = (lay.rows - card_height) / 2,
@@ -1015,7 +987,6 @@ fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         };
         _ = out.put_text(rect.x + 2, y, text, rect.width -| 4, style);
 
-        // The scope in use gets a marker.
         const active = if (index == 0)
             inputs.state.account_filter == null
         else if (inputs.state.accounts.at(index - 1)) |account|
@@ -1036,7 +1007,6 @@ fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 
 fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const card_width: u16 = @min(64, lay.columns - 4);
-    // Title, filter line, the rows, and the footer.
     const card_height: u16 = @min(@as(u16, help_rows.len + 5), lay.rows - 2);
     const rect = Rect{
         .x = (lay.columns - card_width) / 2,
@@ -1051,8 +1021,6 @@ fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 
     const filter = inputs.state.help_filter.slice();
 
-    // Only the rows that match the filter are counted, so scrolling is measured
-    // in what the eye sees, not in the table.
     var matching: u16 = 0;
     for (help_rows) |entry| {
         if (help_matches(filter, entry)) matching += 1;
@@ -1074,7 +1042,6 @@ fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         const y = rect.y + 2 + shown;
         if (y >= rect.bottom() - 1) break;
         if (entry.keys.len == 0) {
-            // A heading: the card groups the keys by where they work.
             _ = out.put_text(rect.x + 2, y, entry.action, card_width -| 4, inputs.theme.accent.with_bold());
             shown += 1;
             continue;
@@ -1117,8 +1084,6 @@ fn render_help_filter(inputs: Inputs, rect: Rect, out: *Screen) void {
 
     const written = out.put_text(rect.x + 4, y, filter, rect.width -| 6, inputs.theme.text);
     if (inputs.state.mode == .help_search) {
-        // The caret follows the text: `put_text` returns cells written, not an
-        // absolute column, so it must be added to where the text started.
         out.put(rect.x + 4 + written, y, ' ', inputs.theme.text.with_reverse());
     }
 }
@@ -1165,10 +1130,6 @@ pub fn size_text(buffer: []u8, bytes: u32) []const u8 {
     const mib_tenths = (kib % 1024) * 10 / 1024;
     return std.fmt.bufPrint(buffer, "{d}.{d} MiB", .{ mib, mib_tenths }) catch "";
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const Text = core.text.Text;
@@ -1282,10 +1243,8 @@ test "with several accounts, each row carries its account tag" {
 
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
-    // The whole label, not just its initial, in its account's hue.
     try row_contains(&out, 2, "home");
     try row_contains(&out, 3, "work");
-    // account_x now leaves a space after the unread dot.
     try testing.expectEqual(
         screen.Color{ .ansi256 = 74 },
         out.cells[2][3].style.fg,
@@ -1400,7 +1359,6 @@ test "frame says so when the body is not loaded yet or empty" {
     frame(f.inputs(100, 24), &out);
     try row_contains(&out, 3, "Loading...");
 
-    // Still empty: the reader says so instead of showing a blank body.
     f.wrapped = .{};
     f.wrapped_ready = true;
     frame(f.inputs(100, 24), &out);
@@ -1411,7 +1369,6 @@ test "frame reports an unavailable message instead of crashing" {
     var f = try fixture();
     defer f.deinit();
     f.state.view = .reader;
-    // Nothing was ever opened: there is no message to describe.
     f.state.opened = .unknown;
 
     var out = Screen.init(100, 24);
@@ -1424,8 +1381,6 @@ test "a message dropped from the store still reads on screen" {
     defer f.deinit();
     _ = core.update.apply(&f.state, &f.store, .open_selected);
 
-    // What a refresh does: the mailbox is swapped for a newer list, and the
-    // message being read is not in it.
     const opened = f.state.opened;
     _ = f.store.remove_in(f.state.opened_account, f.state.mailbox);
     f.state.rebuild(&f.store);
@@ -1439,7 +1394,6 @@ test "a message dropped from the store still reads on screen" {
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
 
-    // The header comes from the snapshot, and the body is still drawn.
     try testing.expectEqual(opened, f.state.opened);
     var found = false;
     var row: u16 = 0;
@@ -1466,7 +1420,6 @@ test "frame draws the help overlay over the current view" {
     frame(f.inputs(100, 24), &out);
 
     try row_contains(&out, 1, "Keys");
-    // The card groups the keys by where they work, and scrolls to the rest.
     try row_contains(&out, 3, "-- anywhere");
     try row_contains(&out, 21, "closes");
 }
@@ -1481,7 +1434,6 @@ test "frame keeps the reader under the help overlay" {
 
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
-    // The reader header is still drawn to the left of the card.
     try row_contains(&out, 0, "Re: design");
     try row_contains(&out, 1, "Keys");
 }
@@ -1498,7 +1450,6 @@ test "the composer shows placeholders for empty fields" {
     try row_contains(&out, 2, "(no subject)");
     try row_contains(&out, 4, "Write your message.");
 
-    // In the body, the cursor takes the first cell and the hint moves right.
     f.state.compose.field = .body;
     frame(f.inputs(100, 24), &out);
     try testing.expect(out.cells[4][1].style.attrs.reverse);
@@ -1562,7 +1513,6 @@ test "the compose body scrolls to keep the end visible and puts the cursor there
     var out = Screen.init(100, 24);
     frame(f.inputs(100, 24), &out);
 
-    // 41 lines: the last visible body row holds the "z" line.
     try row_contains(&out, 20, "z");
     try testing.expect(out.cells[20][2].style.attrs.reverse);
 }
@@ -1591,11 +1541,9 @@ test "the help overlay advertises its filter and filters rows" {
     frame(f.inputs(100, 24), &out);
     try row_contains(&out, 2, "/ filter keys");
     try row_contains(&out, 3, "-- anywhere");
-    // The filter line lives inside the card, borders included.
     try testing.expectEqual(@as(u21, '│'), out.cells[2][18].ch);
     try testing.expectEqual(@as(u21, '│'), out.cells[2][81].ch);
 
-    // Type a filter that keeps only the star binding.
     _ = core.update.apply(&f.state, &f.store, .begin_help_search);
     _ = core.update.apply(&f.state, &f.store, .{ .help_search_char = 's' });
     _ = core.update.apply(&f.state, &f.store, .{ .help_search_char = 't' });
@@ -1662,7 +1610,6 @@ test "frame shows reader hints and a scroll percentage" {
 }
 
 test "the reader's percentage is where you are, not how much you have seen" {
-    // Top of the mail: nothing has scrolled. Bottom: everything that can scroll has.
     var state: State = .{ .list_rows = 20 };
     state.view = .reader;
     state.reader_rows = 10;
@@ -1677,14 +1624,10 @@ test "the reader's percentage is where you are, not how much you have seen" {
     state.reader_scroll = 10;
     try testing.expectEqualStrings("100%", position_text(&state, &buffer));
 
-    // A message shorter than the window is all of it: there is nothing to scroll, so
-    // there is no position to report, and the footer says nothing rather than "100%"
-    // for the whole time the reader is open.
     state.body_rows = 4;
     state.reader_scroll = 0;
     try testing.expectEqualStrings("", position_text(&state, &buffer));
 
-    // Nothing loaded yet is not a position either.
     state.body_rows = 0;
     try testing.expectEqualStrings("", position_text(&state, &buffer));
 }
@@ -1697,12 +1640,10 @@ test "the boot splash is a wordmark, the account, and a footer" {
 
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
-    // middle = 12: the big mark on 5..14, status on 17, address on 18, footer 23.
     try row_contains(&out, 5, "█████████████   ███      ████   █████████████   █████   █████");
     try row_contains(&out, 14, "█████████████   ███      ████   █████   █████   █████   ███████████");
     try row_contains(&out, 23, "connecting to work");
     try row_contains(&out, 17, "alice@example.com");
-    // The version, from the manifest, right under the mark.
     var version_buffer: [64]u8 = undefined;
     let_version: {
         const line = std.fmt.bufPrint(&version_buffer, "version: {s}", .{core.meta.version}) catch break :let_version;
@@ -1710,13 +1651,10 @@ test "the boot splash is a wordmark, the account, and a footer" {
     }
     var footer_buffer: [512]u8 = undefined;
     const footer = std.mem.trim(u8, out.row_text(23, &footer_buffer), " ");
-    // The footer is the sentence on the left and the way out on the right, with the
-    // middle kept clear.
     try testing.expect(startsWith(footer, "connecting to work"));
     try testing.expect(std.mem.endsWith(u8, footer, "Ctrl+C quits"));
     try testing.expect(std.mem.indexOf(u8, footer, "cached mail") == null);
 
-    // The list is not drawn behind it.
     var row_buffer: [512]u8 = undefined;
     try testing.expect(std.mem.indexOf(u8, out.row_text(2, &row_buffer), "Inbox") == null);
 }
@@ -1730,15 +1668,12 @@ test "the light moves across the splash.wordmark while its shape stays put" {
     f.elapsed_ms = 0;
     frame(f.inputs(80, 24), &before);
     var after = Screen.init(80, 24);
-    // Three ticks in: past the peak, still on screen -- the far side of the breath
-    // (the trough) is a different test, and there the glyphs are gone on purpose.
     f.elapsed_ms = 540;
     frame(f.inputs(80, 24), &after);
 
     var moved = false;
     for (5..15) |y| {
         for (0..80) |x| {
-            // The letters never change, only how lit they are.
             try testing.expectEqual(before.cells[y][x].ch, after.cells[y][x].ch);
             if (!before.cells[y][x].style.eql(after.cells[y][x].style)) moved = true;
         }
@@ -1776,12 +1711,10 @@ test "a cramped splash drops the address before it reaches the footer" {
 
     var out = Screen.init(40, 10);
     frame(f.inputs(40, 10), &out);
-    // Ten rows: middle is 5, so the splash.wordmark starts at 1 and the footer is 9.
     try row_contains(&out, 1, "█████");
     var footer_buffer: [512]u8 = undefined;
     const footer = out.row_text(9, &footer_buffer);
     try testing.expect(std.mem.indexOf(u8, footer, "Ctrl+C quits") != null);
-    // Two things fit on a forty-column row, and these are the two.
     try testing.expect(startsWith(std.mem.trim(u8, footer, " "), "connecting to work"));
     try testing.expect(std.mem.indexOf(u8, footer, "alice@example.com") == null);
 }
@@ -1816,8 +1749,6 @@ test "the splash.wordmark is lit by the derived theme, not by a fixed palette" {
         for (0..80) |x| {
             switch (out.cells[y][x].style.fg) {
                 .rgb => lit += 1,
-                // A 256-colour index here would mean the first screen kept its
-                // own palette while the rest of the app followed the terminal.
                 .ansi256 => ansi += 1,
                 .default => {},
             }
@@ -1844,10 +1775,7 @@ test "the splash breathes without color when color is off" {
         }
     }
 
-    // And the breath is still there: weight carries it when hue cannot.
     var other = Screen.init(80, 24);
-    // Far enough into the breath for the two-step monochrome ramp to change: bold at
-    // the top, dim once it is past half.
     f.elapsed_ms = 2_400;
     frame(f.inputs(80, 24), &other);
     var moved = false;
@@ -1918,7 +1846,6 @@ test "size_text covers bytes, kibibytes, and mebibytes" {
 test "a link that wraps is drawn without gaps or doubled spaces" {
     const body = "https://unsubscribe.example.com/?token=abcdefghijklmnopqrstuvwxyz0123456789";
     var wrapped: wrap.Wrapped = .{};
-    // As wide as the row, less the mark: the link's chain takes its columns first.
     const mark_columns: u16 = @intCast(screen.text_columns(link_mark));
     wrap.wrap(body, 20 - mark_columns, &wrapped);
     try testing.expect(wrapped.len > 2);
@@ -1944,17 +1871,11 @@ test "a link that wraps is drawn without gaps or doubled spaces" {
         draw_line_with_links(inputs, &canvas, wrapped.at(row, body), row, 20);
     }
 
-    // The body starts in column 1, so the row carries a leading cell and then the
-    // wrapped line: no gaps, no doubled spaces. The link's mark sits before it, once.
     var text_buffer: [64]u8 = undefined;
     const first = std.mem.trimEnd(u8, canvas.row_text(0, &text_buffer), " ");
-    // The row starts with the gutter, the link's chain (and the cells it continues into),
-    // and then the line itself.
     var expected: [128]u8 = undefined;
     var writer = std.Io.Writer.fixed(&expected);
     writer.writeAll(link_mark) catch unreachable;
-    // The cells the chain continues into are the wide glyph's second half: the screen
-    // keeps them as zero, and skips them when it writes the row.
     var pad: u16 = 0;
     while (pad + 1 < mark_columns) : (pad += 1) writer.writeByte(0) catch unreachable;
     writer.writeAll(wrapped.at(0, body)) catch unreachable;
@@ -2060,7 +1981,6 @@ test "the help card names every key that works" {
 }
 
 test "the help card scrolls to its last row" {
-    // More keys than a 24-row terminal can show, so the card must scroll.
     try testing.expect(help_rows.len > 20);
 
     var f = try fixture();
@@ -2068,7 +1988,6 @@ test "the help card scrolls to its last row" {
     f.state.view = .help;
     f.state.help_return = .list;
 
-    // Scrolling past the end stops at the end, and never goes below the top.
     _ = core.update.apply(&f.state, &f.store, .{ .help_scroll = 400 });
     const bottom = f.state.help_scroll;
     try testing.expect(bottom > 0);
@@ -2077,20 +1996,17 @@ test "the help card scrolls to its last row" {
     _ = core.update.apply(&f.state, &f.store, .{ .help_scroll = -1000 });
     try testing.expectEqual(@as(u16, 0), f.state.help_scroll);
 
-    // Scrolled to the end, the card still draws inside a 24-row terminal.
     f.state.help_scroll = 400;
     var out: Screen = .{};
     out.resize(80, 24);
     frame(f.inputs(80, 24), &out);
     var buffer: [256]u8 = undefined;
-    // The footer is the last row of the card, not the last row of the screen.
     try testing.expect(std.mem.indexOf(u8, out.row_text(23, &buffer), "filters") == null);
 }
 
 test "the address of the hovered link shows in a popup" {
     var f = try fixture();
     defer f.deinit();
-    // A real message, so the reader has something to draw over.
     f.state.view = .reader;
     const opened = f.state.selected(&f.store).?;
     f.state.opened_account = opened.account;
@@ -2107,7 +2023,6 @@ test "the address of the hovered link shows in a popup" {
     inputs.hover_url = "https://example.com/a";
     frame(inputs, &out);
 
-    // The popup sits over the body, with the whole address in it.
     var found = false;
     var row: u16 = 0;
     while (row < 24) : (row += 1) {
@@ -2116,7 +2031,6 @@ test "the address of the hovered link shows in a popup" {
     }
     try testing.expect(found);
 
-    // With nothing hovered there is no popup.
     var plain = Screen.init(100, 24);
     inputs.hover_url = null;
     inputs.hovered = null;
@@ -2172,7 +2086,6 @@ test "the account form shows the OAuth client id and the username when advanced 
     try testing.expect(std.mem.indexOf(u8, drawn, "abc-123") != null);
     try testing.expect(std.mem.indexOf(u8, drawn, "Username") != null);
 
-    // The username row reads as the address when none was typed.
     setup.username.clear();
     settings(&setup, FormField.username, false, theme, &out);
     try testing.expect(std.mem.indexOf(u8, screen_text(&out, &text), "me@example.com") != null);
@@ -2188,8 +2101,6 @@ test "the account form says what went wrong, and what Enter does on the last row
     settings(&setup, FormField.password, false, theme, &out);
     try testing.expect(std.mem.indexOf(u8, screen_text(&out, &text), "the server refused the password") != null);
 
-    // With no OAuth and nothing unfolded, Advanced is the last row of the form,
-    // and there Enter saves instead of moving on.
     setup.problem.clear();
     settings(&setup, FormField.advanced, false, theme, &out);
     try testing.expect(std.mem.indexOf(u8, screen_text(&out, &text), "Enter saves") != null);
@@ -2214,7 +2125,6 @@ test "a quote is drawn dimmer than the words around it" {
         .line_index = 1,
         .kinds = &kinds,
     };
-    // line_style is what decides: the quote row is dim, the body row is not.
     draw_line_with_links(inputs, &out, lines[1], 0, 40);
     try testing.expectEqual(theme.dim, out.cells[0][1].style);
     const body_row = Inputs{
@@ -2245,8 +2155,6 @@ test "a drag over the body paints only what the drag covers" {
         .cursor = .{ .line = 1, .column = 5 },
     };
 
-    // The drag starts on the first line at column 6 and ends on the second at
-    // column 5, so "line" on the first and "second" on the second are painted.
     for (lines, 0..) |line, y| {
         const inputs = Inputs{
             .state = undefined,
@@ -2262,13 +2170,11 @@ test "a drag over the body paints only what the drag covers" {
         };
         try testing.expect(draw_line_selection(inputs, &out, line, @intCast(y), 20));
     }
-    // Nothing is drawn left of column 1.
     try testing.expectEqual(theme.text, out.cells[0][1].style);
     try testing.expectEqual(theme.selection, out.cells[0][7].style);
     try testing.expectEqual(theme.selection, out.cells[1][1].style);
     try testing.expectEqual(theme.text, out.cells[1][7].style);
 
-    // A line the drag does not reach is not painted by it.
     const outside = Inputs{
         .state = undefined,
         .store = undefined,
@@ -2300,8 +2206,6 @@ test "the band keeps its width and travels along the line" {
     const theme = theme_mod.Theme.dark();
     var buffer: [64]u16 = undefined;
 
-    // Two moments where the band is fully over the text: it does not grow, it
-    // moves, which is what a pulse is and a fill is not.
     var early = Screen.init(60, 1);
     _ = splash.draw_shimmer(&early, 0, 0, "connecting to home", 400, &theme);
     const before = shimmer_columns(&early, 0, &theme, &buffer);
@@ -2315,7 +2219,6 @@ test "the band keeps its width and travels along the line" {
     try testing.expect(before_len > 0);
     try testing.expectEqual(before_len, after.len);
     try testing.expect(before_start < after[0]);
-    // A band, never the whole line.
     try testing.expect(@as(u16, @intCast(before_len)) <= splash.shimmer_width);
 }
 
@@ -2329,8 +2232,6 @@ test "the band crosses one way only" {
     var rising_seen = false;
     var backward = false;
 
-    // Five seconds of watching: several crossings, and never a step to the left
-    // while the band is on the line.
     var moment: i64 = 0;
     while (moment < 5_000) : (moment += 20) {
         var out = Screen.init(60, 1);
@@ -2345,7 +2246,6 @@ test "the band crosses one way only" {
     }
     _ = width;
     try testing.expect(rising_seen);
-    // Left to right, then it starts again: it never travels back.
     try testing.expect(!backward);
 }
 
@@ -2367,7 +2267,6 @@ test "the band leaves the line at both ends and comes round" {
         if (columns.len == 0) seen_off = true;
         if (columns.len == splash.shimmer_width) seen_on = true;
     }
-    // It enters, it crosses, it leaves, it starts again.
     try testing.expect(seen_off);
     try testing.expect(seen_on);
 }
@@ -2389,8 +2288,6 @@ test "the splash.wordmark breathes: it dims and comes back, and never leaves" {
         lowest = @min(lowest, level);
         highest = @max(highest, level);
     }
-    // Solid at the peak, quieter at the trough -- and never transparent enough to be
-    // gone: the mark stays readable while it breathes.
     try testing.expect(highest >= 0.99);
     try testing.expect(lowest >= splash.breath_floor - 0.01);
     try testing.expect(lowest < 0.6);
@@ -2406,7 +2303,6 @@ test "at the trough the mark is dimmer, and at the peak it is whole" {
     frame(f.inputs(80, 24), &shown);
 
     var hidden = Screen.init(80, 24);
-    // Half a breath in -- the trough of the cosine: nothing is painted at all.
     f.elapsed_ms = splash.breath_ms / 2;
     frame(f.inputs(80, 24), &hidden);
 
@@ -2421,7 +2317,6 @@ test "at the trough the mark is dimmer, and at the peak it is whole" {
         }
     }
     try testing.expect(drawn_shown);
-    // Still drawn at the trough: quieter, not gone.
     try testing.expect(drawn_hidden);
     var dimmer = false;
     for (0..24) |y| {
@@ -2432,12 +2327,10 @@ test "at the trough the mark is dimmer, and at the peak it is whole" {
         }
     }
     try testing.expect(dimmer);
-    // Nothing else moved: the words under it are still there while it is gone.
     try testing.expect(screen_contains(&hidden, "connecting to"));
 }
 
 test "a faded letter is mixed towards the terminal's own ground" {
-    // A light terminal fades towards its paper; a dark one towards its own dark.
     const paper = theme_mod.Theme.from_background(.{ .r = 253, .g = 246, .b = 227 });
     const night = theme_mod.Theme.from_background(.{ .r = 20, .g = 20, .b = 24 });
 
@@ -2449,7 +2342,6 @@ test "a faded letter is mixed towards the terminal's own ground" {
     const paper_level = core.oklch.luminance(.{ .r = faint_on_paper.fg.rgb.r, .g = faint_on_paper.fg.rgb.g, .b = faint_on_paper.fg.rgb.b });
     const night_level = core.oklch.luminance(.{ .r = faint_at_night.fg.rgb.r, .g = faint_at_night.fg.rgb.g, .b = faint_at_night.fg.rgb.b });
     try testing.expect(paper_level > night_level);
-    // Faded is dimmer than solid, on the same ground.
     const solid = splash.breath_style(&night, 1.0);
     const solid_level = core.oklch.luminance(.{ .r = solid.fg.rgb.r, .g = solid.fg.rgb.g, .b = solid.fg.rgb.b });
     try testing.expect(solid_level > night_level);
@@ -2460,7 +2352,6 @@ test "without a derivation the breath is carried by weight and the palette's ste
     try testing.expect(splash.breath_style(&mono, 0.2).attrs.dim);
     try testing.expect(splash.breath_style(&mono, 0.9).attrs.bold);
 
-    // The built-in palette has no ground to mix towards: it walks its own ramp.
     const dark = theme_mod.Theme.dark();
     var lowest: u8 = 255;
     var highest: u8 = 0;
@@ -2474,16 +2365,11 @@ test "without a derivation the breath is carried by weight and the palette's ste
 }
 
 test "the breath moves from the first tick, at a speed the eye can see" {
-    // A cosine would spend its first quarter within two per cent of the peak: a mark
-    // that looks frozen. The level has to be a visible step away by the second tick.
     const first = splash.breath_level_at(0);
     const second = splash.breath_level_at(90);
     try testing.expectEqual(@as(f32, 1.0), first);
     try testing.expect(first - second > 0.05);
-    // And the way back is the same movement in reverse: empty at the trough, and up
-    // again four ticks later.
     try testing.expectEqual(splash.breath_floor, splash.breath_level_at(splash.breath_ms / 2));
-    // And it climbs again on the way back, without a plateau at the bottom.
     try testing.expect(splash.breath_level_at(splash.breath_ms / 2 + 540) > splash.breath_level_at(splash.breath_ms / 2 + 180));
     try testing.expect(splash.breath_level_at(splash.breath_ms / 2 + 540) > splash.breath_floor);
 }
@@ -2498,11 +2384,9 @@ test "the footer: two corners, and nothing between them" {
     try testing.expectEqualStrings("Ctrl+C quits", right.text);
     try testing.expectEqual(left.row, right.row);
     try testing.expectEqual(@as(u16, 1), left.left);
-    // Two columns in from the right edge, and clear of the left sentence.
     try testing.expectEqual(@as(u16, 80 - 2 - 12), right.left);
     try testing.expect(left.left + screen.text_columns(left.text) < right.left);
 
-    // A buffer too small truncates instead of writing past it.
     var small: [4]u8 = undefined;
     try testing.expectEqualStrings("Ctrl", splash.splash_right(80, 24, &small).text);
 }
@@ -2510,7 +2394,6 @@ test "the footer: two corners, and nothing between them" {
 test "both sizes of the mark answer their own cells" {
     const huge = splash.splash_mark(120, 24);
     try testing.expectEqual(@as(u8, 3), huge.scale);
-    // As big as the screen allows, up to four cells a stroke.
     const widest = splash.splash_mark(170, 45);
     try testing.expectEqual(@as(u8, 4), widest.scale);
     const large = splash.splash_mark(90, 24);
@@ -2520,7 +2403,6 @@ test "both sizes of the mark answer their own cells" {
     const small = splash.splash_mark(36, 24);
     try testing.expectEqual(@as(u8, 1), small.scale);
     try testing.expect(splash.mark_cell(1, 0, 0) != 0);
-    // The masthead is the same word at twice the size, in both directions.
     try testing.expectEqual(small.width * 2, large.width);
     try testing.expectEqual(small.width * 3, huge.width);
     try testing.expectEqual(small.height * 2, large.height);
@@ -2558,7 +2440,6 @@ test "every link gets a mark, and only one each" {
     while (line < canvas.rows) : (line += 1) {
         marks += std.mem.count(u8, canvas.row_text(line, &row_buffer), link_mark);
     }
-    // One per link, even the one that wraps: three links, three marks.
     try testing.expectEqual(@as(usize, 3), marks);
     try testing.expectEqual(@as(usize, 3), count);
 }

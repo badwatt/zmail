@@ -389,11 +389,7 @@ pub const Session = struct {
         self.now_unix = deps.now();
         self.size = deps.system.size() catch system_mod.Size{};
         self.screen.resize(self.size.columns, self.size.rows);
-        // Cache only: the first frame must not wait for a socket. Anything the
-        // cache cannot serve is fetched by `boot`, after that frame is painted.
         self.load_cached(self.state.mailbox, true);
-        // The first screen is work to a terminal: the bar goes up with the frame
-        // and comes down when boot() has something to show.
         self.sync_progress();
     }
 
@@ -417,7 +413,6 @@ pub const Session = struct {
             self.state.rebuild(&self.store);
             return;
         }
-        // The account was removed or renamed: forget it, and start on all.
         scope.save("") catch {};
     }
 
@@ -493,22 +488,13 @@ pub const Session = struct {
     pub fn boot(self: *Session) void {
         if (!self.needs_boot) return;
         self.needs_boot = false;
-        // Nothing to connect to (a broken config, no accounts): the welcome screen
-        // still shows, and the notice under it is what the user needs to read.
         if (self.source_count == 0) return;
 
-        // The first connection must be made on this thread: the transport's
-        // Io belongs to the event loop, and opening it from the worker leaves
-        // both waiting forever (no mail, spinner forever). Later refreshes
-        // reuse the open connection, so those can run in the background.
         if (!self.deps.splash) {
             self.reload(self.state.mailbox);
             return;
         }
 
-        // With a splash on screen the fetching happens in `boot_step`, one account
-        // per tick, so the first screen keeps breathing for as long as the network
-        // takes.
         self.boot_pending = true;
         self.boot_cursor = 0;
     }
@@ -532,15 +518,8 @@ pub const Session = struct {
         if (!self.booting_now) return;
         self.boot_ticks +|= 1;
 
-        // A few ticks before the first connection: the first fetch blocks the
-        // event loop for as long as the server takes, and nothing paints inside it.
-        // Breathing has to start before that, or the splash is a still frame with a
-        // fade attached to the wrong end.
         if (self.boot_ticks < boot_warmup) return;
 
-        // One account per tick: between two of them the loop paints, so a start
-        // with several accounts breathes between fetches instead of freezing
-        // through all of them.
         const sources = self.live_sources();
         while (self.boot_pending and self.boot_cursor < sources.len) {
             const index = self.boot_cursor;
@@ -555,9 +534,6 @@ pub const Session = struct {
         if (self.boot_pending and self.boot_cursor < sources.len) return;
         self.boot_pending = false;
 
-        // The mail is here. If the connection was quick, the mark still gets one
-        // breath -- a fade nobody sees is not a fade -- and if it was slow, this is
-        // already behind us and the splash goes now.
         if (self.boot_ticks < boot_min_ticks) return;
 
         self.booting_now = false;
@@ -568,12 +544,10 @@ pub const Session = struct {
 
     pub fn deinit(self: *Session) void {
         progress_mod.end();
-        // A running worker touches `refresh_scratch`; wait for it before freeing.
         if (self.refreshing) {
             while (!self.refresh_job.finished()) std.atomic.spinLoopHint();
             self.refresh_job.join();
         }
-        // A body in the air holds `self.raw`: wait before the session goes away.
         if (self.body_in_flight) {
             while (!self.body_job.finished()) std.atomic.spinLoopHint();
             self.body_job.join();
@@ -594,7 +568,6 @@ pub const Session = struct {
         self.boot_step();
         if (self.state.booting) self.needs_render = true;
         self.sync_progress();
-        // While a refresh runs the spinner must move, so every tick redraws.
         if (self.refreshing) self.needs_render = true;
 
         var read_buffer: [256]u8 = undefined;
@@ -613,8 +586,6 @@ pub const Session = struct {
             self.repaint();
         }
 
-        // A body asked for by the key that just came in starts now, not a tick later:
-        // the worker is a spawn, and the loop is not waiting for it either way.
         self.poll_body();
         self.sync_size();
         self.state.spinner +%= 1;
@@ -636,25 +607,14 @@ pub const Session = struct {
     pub fn loop(self: *Session) void {
         const needs_network = self.needs_boot;
         if (self.deps.splash) {
-            // Every start has its first screen, and it breathes while the connection
-            // is made: `splash_on` puts it up, `boot` decides what to fetch, and
-            // `step` advances that one account per tick.
             self.splash_on();
-            // Painted before the first read: the loop's read waits up to a tick for
-            // input, and a first screen that waits for the keyboard to be idle is a
-            // first screen that arrives late.
             self.render();
             self.boot();
         } else {
-            // Nothing here can block: no empty frame, no splash.
             self.boot();
             self.render();
         }
 
-        // Starting from cache means no connection is open. Opening a message
-        // would then pay TCP + TLS + LOGIN before the first byte of mail, so
-        // warm it in the background (this is the worker thread: no freeze)
-        // while the user reads what is already on screen.
         if (!needs_network and self.source_count > 0) self.start_refresh();
 
         while (self.step()) {}
@@ -663,9 +623,6 @@ pub const Session = struct {
     fn start_refresh(self: *Session) void {
         if (self.refreshing) return;
 
-        // A connection nobody has opened yet must be opened here, on the thread
-        // that owns the transport. The worker cannot: it would create the TLS
-        // stream from another thread and both wait forever.
         for (self.live_sources()) |source| {
             if (!self.in_scope(source.id)) continue;
             if (source.mail.connected()) continue;
@@ -673,8 +630,6 @@ pub const Session = struct {
             return;
         }
 
-        // The worker takes exactly the accounts in scope: refreshing never wakes
-        // an account the reader is not looking at.
         var count: u8 = 0;
         for (self.live_sources(), 0..) |source, index| {
             if (!self.in_scope(source.id)) continue;
@@ -685,7 +640,6 @@ pub const Session = struct {
         if (count == 0) return;
         self.refresh_count = count;
 
-        // Paint what the cache has first: switching mailboxes stays instant.
         self.load_cached(self.state.mailbox, false);
 
         self.refresh_mailbox = self.state.mailbox;
@@ -708,7 +662,6 @@ pub const Session = struct {
         while (slot < self.refresh_count) : (slot += 1) {
             const index = self.refresh_index[slot];
             const source = self.live_sources()[index];
-            // A failed account keeps whatever the cache already showed.
             if (!self.refresh_job.ok[slot]) continue;
 
             const offset = self.refresh_job.offsets[slot];
@@ -733,17 +686,12 @@ pub const Session = struct {
             self.state.set_alert("Could not refresh {s}", .{self.refresh_mailbox.title()});
         }
 
-        // A body asked for while the worker was busy gets its turn now; the reader
-        // keeps showing its placeholder until it lands.
         self.poll_body();
     }
 
     /// Waits for an in-flight refresh, then applies its results. Used when a
     /// command needs the connection the worker is holding.
     pub fn wait_refresh(self: *Session) void {
-        // Nothing reads keys here: a command loop re-entered from inside an
-        // effect can start a second worker while the first is still writing.
-        // Ctrl+C does not need the loop -- it is a signal.
         while (self.refreshing) {
             self.poll_refresh();
             std.atomic.spinLoopHint();
@@ -792,8 +740,6 @@ pub const Session = struct {
     }
 
     fn handle_bytes(self: *Session, bytes: []const u8) void {
-        // Decoding in bounded chunks keeps the key buffer fixed and lets the
-        // parser keep its state across chunk boundaries.
         var index: usize = 0;
         while (index < bytes.len) {
             const end = @min(bytes.len, index + input.keys_max);
@@ -805,16 +751,10 @@ pub const Session = struct {
     }
 
     fn handle_key(self: *Session, key: input.Key) bool {
-        // The first screen is not the interface yet. Until the mail is here, the only
-        // key with something to act on is the one that leaves: everything else would
-        // act on a list that is not there -- a search field opening behind the splash,
-        // a mailbox switched before it was ever loaded, a reply to a message nobody
-        // has seen.
         if (self.state.booting) return self.leaving_key(key);
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
-        // Views are not commands: the core has no opinion about them.
         if (key == .char and self.state.view == .reader) {
             switch (key.char) {
                 'H' => return self.toggle_html(),
@@ -824,8 +764,6 @@ pub const Session = struct {
             }
         }
         const command = keymap.translate(key, .{ .mode = self.state.mode, .view = self.state.view }) orelse return false;
-        // Ctrl+S starts a countdown, and the clock is the session's, so the core
-        // keeps its promise of never reading one.
         if (command == .compose_send) {
             return self.apply(.{ .compose_send_held = .{ .now_unix = self.now_unix } });
         }
@@ -868,9 +806,6 @@ pub const Session = struct {
                 return self.click_row(lay, mouse.y);
             }
         }
-        // Ctrl turns the pointer into a link opener; without it a press in the
-        // body starts a selection, and the release decides whether it was a
-        // click (nothing) or a drag (copy).
         if (mouse.ctrl) return self.click_link(lay, mouse);
         if (self.start_selection(lay, mouse)) return true;
         return false;
@@ -883,13 +818,8 @@ pub const Session = struct {
         const open = self.deps.open_external orelse {
             return self.say("No way to open it from here", .{});
         };
-        // A browser is the user's turn, not ours: a bar that says "working" while
-        // they read the mail would be a lie.
         progress_mod.pause();
         if (self.html_part_len > 0) {
-            // The part itself, with the pictures it came with written into it: a
-            // browser opening a file cannot resolve `cid:` -- that id only exists
-            // inside the message -- so without this the page opens with holes in it.
             const page = core.mime.html_with_images(
                 self.raw[0..self.raw_len],
                 self.html_part[0..self.html_part_len],
@@ -914,16 +844,10 @@ pub const Session = struct {
     /// effect of opening it.
     fn toggle_images(self: *Session) bool {
         self.show_images = !self.show_images;
-        // Whatever was decoded belongs to the frame that asked for it.
         self.image_slot_count = 0;
         self.image_painted = 0;
-        // A picture drawn in half blocks is not in the screen buffer, so the diff has
-        // nothing to compare against: without this the blocks stay where they were, and
-        // turning pictures off leaves them on.
         self.screen.pristine = true;
         if (self.show_images and self.deps.draw_image == null) {
-            // Turning them on in a terminal that cannot paint them is worth saying
-            // once, instead of leaving a key that seems to do nothing.
             self.state.set_status("This terminal cannot show pictures; o opens the mail", .{});
         } else if (self.show_images) {
             self.state.set_status("Showing pictures", .{});
@@ -958,12 +882,9 @@ pub const Session = struct {
             return;
         }
         if (!self.show_images or self.state.view != .reader) return;
-        // One worker in the network at a time: the body and the picture share an
-        // allocator and an IO handle, and they are not both reentrant.
         if (self.body_in_flight or self.body_request != null or self.refreshing) return;
         const fetch = self.deps.fetch_image orelse return;
 
-        // The wrapped lines are ranges into the gapped text, not into the raw one.
         const text = self.gapped_text();
         var line: u32 = 0;
         while (line < self.wrapped.len) : (line += 1) {
@@ -987,8 +908,6 @@ pub const Session = struct {
         self.image_in_flight = false;
         const key = self.image_wanted.slice();
         if (self.image_slot_count >= self.image_slots.len) return;
-        // A slot for what came and for what did not: a picture that failed is not
-        // asked for again on every frame.
         const slot = &self.image_slots[self.image_slot_count];
         slot.key.set(key);
         slot.len = 0;
@@ -996,15 +915,9 @@ pub const Session = struct {
             @memcpy(slot.bytes[0..self.image_job.len], self.image_job.buffer[0..self.image_job.len]);
             slot.len = self.image_job.len;
         }
-        // Kept even when it failed: a picture that did not come is not asked for
-        // again on the next frame, and the next, and the next.
         self.image_slot_count += 1;
-        // The picture now hides rows that the last frame filled with text: the screen
-        // buffer knows nothing about it, so the next frame is a whole one.
         self.screen.pristine = true;
         if (slot.len > 0 and media.png_size(slot.bytes[0..slot.len]) == null) {
-            // Downloaded, and unusable: a terminal paints PNG, and what the server
-            // actually sent is the one thing worth saying.
             var kind_buffer: [48]u8 = undefined;
             self.state.set_status("That picture is {s}; o opens the mail", .{
                 picture_kind(slot.bytes[0..slot.len], &kind_buffer),
@@ -1024,9 +937,6 @@ pub const Session = struct {
         if (bytes[0] == '<') return "an SVG or a web page";
         if (std.mem.startsWith(u8, bytes, "BM")) return "a BMP";
         if (std.mem.eql(u8, bytes[0..4], "\x00\x00\x01\x00")) return "an ICO";
-        // Not a format we recognise: what the server sent instead is the difference
-        // between a bug here and a wrong address, so say it in the shape it came --
-        // text when it reads as text, hex when it does not.
         if (printablePrefix(bytes)) |text| {
             return std.fmt.bufPrint(out, "not an image ({s})", .{text}) catch "not an image";
         }
@@ -1080,15 +990,7 @@ pub const Session = struct {
         const text = self.gapped_text();
         const line = self.wrapped.at(index, text);
         const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
-        // Clicking past the end of a line is clicking nothing, not clicking the
-        // text that happens to follow it in the buffer.
         const column = mouse.x - 1;
-        // Each link starts with a mark of its own, and the frame moved everything after
-        // it one column right. Walk back the same way, and a click on the mark itself
-        // is a click on the link.
-        // Each link starts with a mark of its own, and the frame moved everything after
-        // it one column right. Walk back the same way, and a click on the mark itself is
-        // a click on the link.
         const mark: u32 = screen_mod.text_columns(render_mod.link_mark);
         var shift: u32 = 0;
         for (self.reader_links()) |link| {
@@ -1107,8 +1009,6 @@ pub const Session = struct {
     /// a leap of faith.
     fn hover_link(self: *Session, mouse: input.Mouse) bool {
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
-        // Ctrl is the question "what would this do?": without it the pointer
-        // changes nothing, so reading is never disturbed.
         var found: ?core.links.Link = null;
         var target: ?[]const u8 = null;
         if (mouse.ctrl) {
@@ -1117,7 +1017,6 @@ pub const Session = struct {
                 if (found != null) {
                     var buffer: [core.limits.url_max]u8 = undefined;
                     if (self.target_at(offset, &buffer)) |url| {
-                        // Kept for the popup: the address is not in the text.
                         self.hover_url.set(url);
                         target = self.hover_url.slice();
                     }
@@ -1127,8 +1026,6 @@ pub const Session = struct {
         if (found == null and self.hovered == null) return false;
         if (found != null and self.hovered != null and found.?.start == self.hovered.?.start) return false;
         self.hovered = found;
-        // A pointer over a link, the way every other program says "this goes somewhere".
-        // The terminal is told, and the ones that do not know the sequence say nothing.
         self.deps.system.write(core.osc.Pointer.sequence(if (found != null) .pointer else .default)) catch {};
         if (target == null) self.hover_url.clear();
         self.repaint();
@@ -1139,7 +1036,6 @@ pub const Session = struct {
     /// view, or a written-out address. What the pointer lights up and what a
     /// click opens both come from here, so they cannot disagree.
     fn link_span_at(self: *Session, offset: u32) ?core.links.Link {
-        // The ranges the frame draws are already in the coordinates of the offset.
         return core.links.among(self.reader_links(), offset);
     }
 
@@ -1147,7 +1043,6 @@ pub const Session = struct {
     /// address written after those words, or a numbered reference.
     fn target_at(self: *Session, offset: u32, out: *[core.limits.url_max]u8) ?[]const u8 {
         if (self.html_view) {
-            // The anchors are ranges in the message's own text: walk the offset back.
             const original = self.unshift_offset(offset);
             const anchors = self.html_anchors[0..self.html_anchor_count];
             for (anchors) |anchor| {
@@ -1168,8 +1063,6 @@ pub const Session = struct {
         var url_buffer: [core.limits.url_max]u8 = undefined;
         const url = self.target_at(offset, &url_buffer) orelse return false;
 
-        // Say it before the browser starts: opening one takes a moment, and a
-        // click with no answer feels broken. The frame goes out first.
         _ = self.say("Opening {s} in the browser…", .{url});
         self.render();
         if (self.deps.open_url) |open| open(self.deps.open_url_context, url);
@@ -1213,8 +1106,6 @@ pub const Session = struct {
         if (self.body_cell(lay, mouse)) |cell| active.dragTo(cell);
 
         if (!active.isDrag()) {
-            // A click that never moved opens nothing: opening a link takes ctrl,
-            // so a click meant for the text never launches a browser.
             self.repaint();
             return true;
         }
@@ -1235,8 +1126,6 @@ pub const Session = struct {
         if (index >= self.state.visible_len) return false;
 
         if (index == self.state.cursor) {
-            // A second click on the selected row opens it. No double-click
-            // timer: the first click is the confirmation.
             return self.apply(.open_selected);
         }
         self.state.cursor = index;
@@ -1247,16 +1136,12 @@ pub const Session = struct {
 
     fn apply(self: *Session, command: core.command.Command) bool {
         const effects = core.update.apply(&self.state, &self.store, command);
-        // Leaving the reader abandons whatever body was on its way: the bytes are
-        // worth caching when they land, and worth showing to nobody.
         if (self.state.view != .reader) {
             self.body_wanted = null;
         }
         self.run_effects(effects.slice());
         self.quote_original(command);
         self.repaint();
-        // A scope is a preference, however it was changed: the picker or the
-        // `a` key both end up here, and the next start opens where this one is.
         switch (command) {
             .accounts_select, .cycle_account => self.remember_scope(),
             else => {},
@@ -1274,7 +1159,6 @@ pub const Session = struct {
 
         self.deps.system.suspend_ui() catch {};
         const edited = edit(self.deps.edit_text_context, initial, &self.edited);
-        // The alternate screen comes back empty: everything is redrawn.
         self.deps.system.resume_ui() catch {};
         self.needs_render = true;
 
@@ -1335,16 +1219,11 @@ pub const Session = struct {
     fn sync_progress(self: *Session) void {
         if (self.state.loading or self.state.booting or self.refreshing) {
             if (self.progress_since_ms == 0) self.progress_since_ms = os.monotonic_ms();
-            // The bar moves itself: the wait it reports is often one blocking
-            // call that nothing here could tick through.
             progress_mod.begin(self.deps.system, os.monotonic_ms());
             return;
         }
         if (self.progress_since_ms == 0) return;
 
-        // Work that took a blink is still work, and a bar that appears and
-        // vanishes inside one frame is read as a glitch. It stays up long enough
-        // to be seen; every later tick finds the window closed and takes it down.
         if (os.monotonic_ms() - self.progress_since_ms < progress_visible_ms) return;
 
         progress_mod.end();
@@ -1353,8 +1232,6 @@ pub const Session = struct {
 
     /// Test hook: the ticks the loop would run, so the first screen finishes.
     pub fn settle_boot_for_test(self: *Session) void {
-        // A test does not paint the welcome screen, but the fetching happens in the
-        // same place it does: the ticks the loop would run.
         self.booting_now = true;
         var ticks: u16 = 0;
         while (self.booting_now and ticks < boot_min_ticks * 2) : (ticks += 1) {
@@ -1385,7 +1262,6 @@ pub const Session = struct {
     }
 
     fn end_loading(self: *Session, started: ?i64) void {
-        // A quit is not worth keeping the spinner up for.
         if (self.state.quit) {
             self.state.loading = false;
             return;
@@ -1406,21 +1282,11 @@ pub const Session = struct {
             if (self.state.quit) return;
             switch (effect) {
                 .refresh => self.start_refresh(),
-                // The body is never fetched here: the reader is already on screen, and
-                // asking is all this does. `poll_body` starts the worker and the loop
-                // stays free -- Esc works while the bytes are in the air.
                 .fetch_body => |args| {
                     self.begin_body(args.account, args.mailbox, args.id);
-                    // The screen changes now, before the cache is read and before a
-                    // socket is touched: a big message takes long enough to read and
-                    // parse that the old page would still be up, and the reader must
-                    // never show one message under another's subject.
                     self.show_body_loading();
                     self.request_body(args.account, args.mailbox, args.id);
                 },
-                // Everything else needs the one connection a refresh may be using.
-                // It waits by getting in line, not by stopping the loop: a key must
-                // answer while the accounts are being fetched.
                 else => {
                     if (self.refreshing) {
                         self.defer_effect(effect);
@@ -1456,8 +1322,6 @@ pub const Session = struct {
     /// A wait for the connection, held in a line instead of in the loop.
     fn defer_effect(self: *Session, effect: core.effect.Effect) void {
         if (self.pending_len == self.pending_effects.len) {
-            // Full: there is nowhere to put it, and dropping a move or a delete would
-            // be worse than waiting for one. The loop stops only in this corner.
             self.wait_refresh();
             self.run_effect(effect);
             return;
@@ -1569,8 +1433,6 @@ pub const Session = struct {
             return;
         }
         const request = self.body_request orelse return;
-        // One connection per account: a refresh owns it until it finishes, and the
-        // picture worker is another thread using the same IO.
         if (self.refreshing or self.image_in_flight) return;
         self.body_request = null;
         self.body_in_flight = true;
@@ -1593,8 +1455,6 @@ pub const Session = struct {
 
         const raw = self.body_job.bytes();
         if (self.deps.bodies) |bodies| bodies.save(request.account, request.mailbox, request.id, raw) catch {};
-        // The reader moved on while this was in the air: the bytes are kept for next
-        // time and not painted under whatever is on screen now.
         if (!wanted) return;
         self.set_raw(request.account, request.mailbox, request.id, raw);
     }
@@ -1634,16 +1494,12 @@ pub const Session = struct {
 
         const text = core.mime.text_body(message, &self.body, &self.scratch_bytes);
         self.body_len = @intCast(text.len);
-        // A text part generated from HTML carries entities ("&emsp;", "&#8203;").
-        // They are spacing or nothing at all, never words.
         const spaced = core.html.clean_spacing(self.body[0..self.body_len], &self.scratch_bytes);
         const joined = core.links.unwrap_urls(spaced, &self.shown);
         self.shown_len = @intCast(joined.len);
 
         self.text_link_count = core.links.scan(self.shown[0..self.shown_len], &self.text_links);
 
-        // Pictures belong to the message that carried them: "r0" in another mail
-        // is another picture, and keeping the slot hands back the previous bytes.
         self.image_slot_count = 0;
         self.image_painted = 0;
         if (self.hovered != null) {
@@ -1713,7 +1569,6 @@ pub const Session = struct {
 
     /// The links of the text the reader is showing, as ranges in that text.
     fn reader_links(self: *const Session) []const core.links.Link {
-        // When pictures moved the text, the ranges moved with it.
         if (self.gap_count > 0 and self.link_view_len > 0) return self.link_view[0..self.link_view_len];
         if (self.html_view and self.html_len > 0) {
             return self.html_links[0..self.html_link_count];
@@ -1755,8 +1610,6 @@ pub const Session = struct {
     fn oauth_account(self: *Session, account: core.id.AccountId) void {
         const label = self.state.accounts.label_for(account);
 
-        // A client id is only needed to talk to the provider: say so instead of
-        // failing inside the flow.
         const index = self.state.accounts.index_of(account) orelse 0;
         if (self.state.accounts.items[index].oauth_client.is_empty()) {
             self.state.set_alert("OAuth needs a Client ID (Advanced in the account form)", .{});
@@ -1766,8 +1619,6 @@ pub const Session = struct {
             self.state.set_alert("Accounts cannot be changed here", .{});
             return;
         };
-        // The flow talks to a human in a browser: give the terminal back first,
-        // or the URL lands on a screen nobody is looking at.
         progress_mod.pause();
         self.deps.system.suspend_ui() catch {};
         var problem: core.text.Text(256) = .{};
@@ -1775,7 +1626,6 @@ pub const Session = struct {
             self.deps.system.resume_ui() catch {};
             self.invalidate_screen();
             self.invalidate_screen();
-            // The account is saved either way: the sign-in is what failed.
             self.attach_new_account(account, label);
             if (problem.is_empty()) {
                 self.state.set_alert("{s} saved; sign-in failed. Press o to retry", .{label});
@@ -1806,7 +1656,6 @@ pub const Session = struct {
             return;
         };
 
-        // Gone from the config and from the view: its mail goes with it.
         self.state.accounts.remove(account);
         if (self.state.account_filter) |filter| {
             if (filter == account) self.state.account_filter = null;
@@ -1824,8 +1673,6 @@ pub const Session = struct {
         imap_port,
         smtp_host,
         smtp_port,
-        // Sign in comes before the password: the choice decides whether there
-        // is a password at all. Everything below Advanced is rare.
         sign_in,
         password,
         advanced,
@@ -1881,7 +1728,6 @@ pub const Session = struct {
                 form.setup.set_oauth(true);
                 form.setup.oauth_client_id.set(info.oauth_client.slice());
             }
-            // Start on the name so a rename is one keystroke away.
             form.field = .address;
         }
 
@@ -1957,7 +1803,6 @@ pub const Session = struct {
     }
 
     fn settings_key(self: *Session, form: *Settings, key: input.Key) bool {
-        // The model routes by step, so point it at the field being edited.
         form.setup.step = form.field.step();
         self.repaint();
 
@@ -2024,14 +1869,12 @@ pub const Session = struct {
             .smtp = opened.smtp,
         });
         self.state.set_status("{s} added", .{label});
-        // Show its mail straight away.
         self.start_refresh();
     }
 
     fn move_field(self: *Session, form: *Settings, delta: i8) void {
         const count: i16 = Field.count();
         const current: i16 = @backingInt(form.field);
-        // Walk in the direction asked, stepping over hidden rows.
         var next = @mod(current + delta + count, count);
         var guard: u8 = 0;
         while (!form.setup.field_visible(@intCast(next)) and guard < count) : (guard += 1) {
@@ -2050,19 +1893,15 @@ pub const Session = struct {
     }
 
     fn save_settings(self: *Session, form: *Settings) void {
-        // Nothing here closes the form: a refusal must not cost the user the
-        // fields they just typed. The reason goes inside the card.
         const accounts = self.deps.accounts_file orelse {
             form.setup.problem.set("Accounts cannot be changed here");
             self.repaint();
             return;
         };
 
-        // Validate the whole account before writing anything.
         form.setup.step = .review;
         form.setup.next();
         if (!form.setup.done) {
-            // Keep the cursor where it is; the problem line explains what is wrong.
             form.setup.step = form.field.step();
             self.repaint();
             return;
@@ -2073,7 +1912,6 @@ pub const Session = struct {
         var label_buffer: [core.limits.label_max]u8 = undefined;
         const label = form.setup.account_label(&label_buffer);
 
-        // The label can change under us: a taken name is renamed, not refused.
         var final_label: core.text.Text(core.limits.label_max) = .{};
         final_label.set(label);
         var reason: core.text.Text(256) = .{};
@@ -2081,8 +1919,6 @@ pub const Session = struct {
         const saved_id = accounts.save(.{
             .text = text,
             .label = label,
-            // An empty field means "keep the stored password", so editing does
-            // not silently blank the credential.
             .password = if (form.setup.oauth or form.setup.password.len == 0)
                 null
             else
@@ -2091,8 +1927,6 @@ pub const Session = struct {
             .label_out = &final_label,
             .problem = &reason,
         }) catch {
-            // Say what failed. "Fix the reason above" with nothing above was a
-            // dead end.
             if (!reason.is_empty()) {
                 form.setup.problem.set(reason.slice());
             } else {
@@ -2102,7 +1936,6 @@ pub const Session = struct {
             return;
         };
 
-        // The view can follow a rename; the connection cannot follow a new host.
         if (form.editing) |id| {
             if (self.state.accounts.index_of(id)) |index| {
                 var address = core.address.Address{};
@@ -2122,7 +1955,6 @@ pub const Session = struct {
         if (!added) return;
 
         if (oauth) {
-            // A brand-new OAuth account: sign in now, then attach it.
             self.oauth_account(new_id);
             return;
         }
@@ -2166,9 +1998,6 @@ pub const Session = struct {
     /// animated boot step work in, so a mailbox cannot be read one way on a refresh
     /// and another on the first screen.
     fn fetch_source(self: *Session, source: MailSource, index: u8, mailbox: Mailbox) void {
-        // While this call blocks -- seconds, against a real server -- the splash is on
-        // screen and nobody else is painting: the mark keeps breathing from here, and
-        // stops the moment the mail is in, before this thread touches the terminal.
         if (self.state.booting) {
             var labels: [96]u8 = undefined;
             self.splash_painter.start(
@@ -2198,7 +2027,6 @@ pub const Session = struct {
     fn finish_reload(self: *Session, mailbox: Mailbox) void {
         self.state.rebuild(&self.store);
         if (self.reload_failed and !self.reload_loaded) {
-            // A refused login is the most useful thing we know: say it.
             if (self.reload_login_failed) {
                 self.state.set_alert("Login failed: {s}", .{self.login_hint()});
             } else {
@@ -2213,8 +2041,6 @@ pub const Session = struct {
 
     fn reload(self: *Session, mailbox: Mailbox) void {
         for (self.live_sources(), 0..) |source, index| {
-            // A single account in scope means the others are not opened at all:
-            // no socket, no login, nothing to wait for.
             if (!self.in_scope(source.id)) continue;
             self.sync_progress();
             self.fetch_source(source, @intCast(index), mailbox);
@@ -2233,16 +2059,12 @@ pub const Session = struct {
             self.flush();
             return;
         }
-        // Another view means another screen: the rows that held a picture have
-        // nothing in them now, and a diff would leave them as they were.
         if (self.last_view != self.state.view) {
             self.last_view = self.state.view;
             self.screen.pristine = true;
         }
 
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
-        // One text for the whole frame: what the wrap saw, what the lines point into,
-        // and what the picture search reads -- the same bytes, or the offsets lie.
         const body = if (self.body_loaded) self.gapped_text() else "";
         if (self.body_loaded) wrap.wrap(body, lay.reader_text_width, &self.wrapped);
 
@@ -2291,12 +2113,7 @@ pub const Session = struct {
         }
         if (self.image_slot_count >= self.image_slots.len) return null;
 
-        // Pictures are off until asked for, and no frame ever opens a socket: a
-        // picture with an address arrives here already decoded, from the worker.
         if (!self.show_images) return null;
-        // A picture with an address arrives from the worker, and this must not leave
-        // an empty slot behind for it: the queue reads "it has a slot" as "it is
-        // dealt with", and the picture would never be asked for at all.
         if (media.is_remote_marker(key)) return null;
         var decoded: ?[]const u8 = null;
         if (media.is_local_image(key)) {
@@ -2418,14 +2235,11 @@ pub const Session = struct {
     /// left for them. Images from the network are not fetched: the reader says
     /// what they are and o shows the mail in a browser.
     fn paint_images(self: *Session, lay: layout_mod.Layout) void {
-        // Whatever is on screen now, the pictures of the last frame go: a list,
-        // a help page or a compose window must not have a logo over it.
         if (self.deps.clear_images) |clear| clear(self.deps.clear_images_context);
         if (self.state.view != .reader) return;
         const draw = self.deps.draw_image orelse return;
         if (self.html_view == false or self.html_len == 0) return;
 
-        // The same text the wrap used: the wrapped lines are ranges into it.
         const text = self.gapped_text();
         var row: u16 = 0;
         var painted: u8 = 0;
@@ -2446,8 +2260,6 @@ pub const Session = struct {
             const width: u16 = @min(cells.columns, lay.columns -| 1);
             if (height == 0 or width == 0) continue;
 
-            // Where the marker sits is where the picture starts: a logo on the
-            // left stays on the left, one in a column stays in its column.
             const column: u16 = @intCast(@min(marker, lay.columns -| 1));
             _ = draw(
                 self.deps.draw_image_context,
@@ -2471,8 +2283,6 @@ pub const Session = struct {
         while (row < self.screen.rows) : (row += 1) {
             if (!self.screen.row_changed(row)) continue;
 
-            // Absolute placement per row: skipping rows means the terminal
-            // cursor cannot be assumed to be anywhere in particular.
             var cursor: [16]u8 = undefined;
             const at = std.fmt.bufPrint(&cursor, "\x1b[{d};1H", .{row + 1}) catch return;
             system.write(at) catch return;
@@ -2485,10 +2295,6 @@ pub const Session = struct {
         self.screen.commit();
     }
 };
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const MemoryMail = core.memory_mail.MemoryMail;
@@ -2640,9 +2446,6 @@ const Rig = struct {
             .mail = self.fake_mail.mail(),
         };
         try self.arm(.{ .accounts = &self.sources, .loading_ms = 0 });
-        // Tests exercise the steady state: the cache is empty, so boot fetches.
-        // The first screen breathes while it does, one account per tick, so the rig
-        // runs the ticks the real loop would until the inbox is here.
         self.session.needs_boot = true;
         self.session.boot();
         self.session.settle_boot_for_test();
@@ -2695,8 +2498,6 @@ const Rig = struct {
         self.session.settle_refresh_for_test();
         const waiting = self.session.body_in_flight or self.session.body_request != null;
         self.session.settle_body_for_test();
-        // The body lands between two ticks, and the next one paints it: that is the
-        // loop the reader lives in, so the rig runs it.
         if (waiting) _ = self.session.step();
     }
 };
@@ -2722,7 +2523,6 @@ test "session paints the list before it touches the network" {
     try rig.arm(.{ .accounts = &rig.sources });
     defer rig.deinit();
 
-    // Nothing has been fetched yet: an empty cache means "boot later".
     try testing.expectEqual(@as(u32, 0), rig.session.store.len);
     try testing.expect(rig.session.needs_boot);
 
@@ -2754,7 +2554,6 @@ test "escape in the list does nothing, not even after the timeout resolves it" {
     _ = rig.session.step();
 
     rig.send("\x1b");
-    // A lone ESC is ambiguous until the next read times out.
     _ = rig.session.step();
     try testing.expect(!rig.session.state.quit);
     try testing.expectEqual(core.state.View.list, rig.session.state.view);
@@ -2883,7 +2682,7 @@ test "ctrl+e puts the body in the editor and takes it back" {
 
     rig.send("c");
     rig.send("\t\thello");
-    rig.send("\x05"); // Ctrl+E
+    rig.send("\x05");
 
     try testing.expectEqualStrings("hello", editor.seen_text());
     try testing.expectEqualStrings("written\nelsewhere", rig.session.state.compose.body_slice());
@@ -2895,7 +2694,7 @@ test "an editor that answers nothing keeps the draft and says why" {
     try rig.start();
     defer rig.deinit();
 
-    var editor = FakeEditor{}; // no text: the editor failed, or exited empty
+    var editor = FakeEditor{};
     rig.session.deps.edit_text = FakeEditor.edit;
     rig.session.deps.edit_text_context = &editor;
 
@@ -2958,7 +2757,7 @@ test "composing and sending with a working outbox closes the draft" {
     rig.send("\t");
     rig.send("Hi");
     rig.send("\t\thello");
-    rig.send("\x13"); // Ctrl+S
+    rig.send("\x13");
     try testing.expectEqual(@as(u32, 0), outbox.sent);
     rig.settle_send();
 
@@ -3012,12 +2811,10 @@ test "esc stops a held send before it leaves" {
 
     rig.send("c");
     rig.send("alice@example.com");
-    rig.send("\x13"); // Ctrl+S
-    // Still here: the countdown has not run out.
+    rig.send("\x13");
     try testing.expectEqual(core.state.View.compose, rig.session.state.view);
 
-    rig.send("\x1b"); // Esc
-    // A lone ESC is ambiguous until the next read times out.
+    rig.send("\x1b");
     _ = rig.session.step();
     try testing.expectEqualStrings("Send cancelled", rig.session.state.status.slice());
     try testing.expectEqual(core.state.View.compose, rig.session.state.view);
@@ -3112,7 +2909,6 @@ test "two accounts share one unified list, and a cycles the scope" {
     try testing.expectEqual(@as(u32, 1), session.state.visible_len);
     try testing.expectEqualStrings("from personal", session.store.at(session.state.visible[0]).subject.slice());
 
-    // A forced refresh with a filter skips the other account.
     fake_system.push_input("\x12");
     _ = session.step();
     try testing.expectEqual(core.id.AccountId.from_int(1), session.state.account_filter.?);
@@ -3135,8 +2931,6 @@ test "switching to a loaded mailbox does not refetch it" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // Inbox is loaded at startup; switching to Sent and back must not fetch
-    // Inbox again.
     rig.send("\t");
     rig.send("\x1b[Z");
     try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
@@ -3186,7 +2980,6 @@ test "switching to an unloaded mailbox reads the cache, not the network" {
     });
     defer rig.deinit();
 
-    // Warm cache: no boot, and no transient status either.
     try testing.expect(!rig.session.needs_boot);
     try testing.expect(rig.session.state.status.is_empty());
     rig.session.boot();
@@ -3194,7 +2987,6 @@ test "switching to an unloaded mailbox reads the cache, not the network" {
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
     try testing.expectEqualStrings("cached", rig.session.store.at(0).subject.slice());
 
-    // Switching paints the cached copy first (instant), then refreshes.
     rig.send_without_settle("]");
     try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
     try testing.expectEqual(@as(u32, 2), cache.loads);
@@ -3203,7 +2995,6 @@ test "switching to an unloaded mailbox reads the cache, not the network" {
     try testing.expectEqualStrings("cached", rig.session.store.at(row).subject.slice());
     try testing.expectEqual(Mailbox.sent, rig.session.store.at(row).mailbox);
 
-    // The worker then replaces that mailbox with the server's truth.
     rig.session.settle_refresh_for_test();
     try testing.expectEqual(@as(u32, 0), rig.session.state.visible_len);
 }
@@ -3227,7 +3018,6 @@ test "a cache miss falls back to the network and fills the cache" {
     rig.session.settle_refresh_for_test();
     defer rig.deinit();
 
-    // One cache read at init, one save after the fetch.
     try testing.expectEqual(@as(u32, 1), cache.loads);
     try testing.expectEqual(@as(u32, 1), cache.saves);
     try testing.expectEqual(@as(u32, 2), rig.session.state.visible_len);
@@ -3305,9 +3095,6 @@ test "a failed move becomes an alert" {
 }
 
 test "a cached body still shows the frame before it reads the disk" {
-    // The cache is a file: reading and parsing a big message takes long enough that
-    // the old page would still be up if the work came first. The loading frame is
-    // painted before the probe, so the reader changes screen on the keypress.
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
@@ -3322,10 +3109,8 @@ test "a cached body still shows the frame before it reads the disk" {
     rig.fake_system.push_input("\r");
     _ = rig.session.step();
 
-    // The bytes went out with the placeholder in them, before the body was there.
     const output = rig.fake_system.output_text();
     try testing.expect(std.mem.indexOf(u8, output, "Loading...") != null);
-    // And the body arrived in the same tick, from the cache.
     try testing.expectEqualStrings("cached prose", rig.session.body[0..rig.session.body_len]);
     try testing.expectEqual(@as(u32, 0), bodies.saves);
 }
@@ -3370,7 +3155,6 @@ test "a fetched body is saved for next time" {
     try testing.expect(bodies.have);
     try testing.expect(rig.session.body_len > 0);
 
-    // Second open: the cache answers, the network is not asked again.
     rig.session.body_loaded = false;
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
@@ -3394,7 +3178,6 @@ test "an in-memory source boots without a splash" {
     });
     defer rig.deinit();
 
-    // Same order as `loop` for a source that cannot block.
     rig.session.boot();
     rig.session.settle_boot_for_test();
     rig.session.render();
@@ -3409,8 +3192,6 @@ test "a boot with nothing to connect leaves the splash" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // A config that could not be read leaves no sources: the splash must not
-    // stay up forever over the notice that explains it.
     rig.session.source_count = 0;
     rig.session.state.booting = true;
     rig.session.needs_boot = false;
@@ -3433,7 +3214,7 @@ test "loop without a splash paints only the data" {
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    rig.fake_system.push_input("\x03"); // quit on the first step
+    rig.fake_system.push_input("\x03");
     try rig.arm(.{
         .accounts = &rig.sources,
         .splash = false,
@@ -3506,7 +3287,6 @@ test "a cold boot that cannot connect says so, and shows an empty list" {
     try testing.expectEqualStrings("Could not load Inbox", rig.session.state.status.slice());
     try testing.expectEqual(@as(u32, 0), rig.session.store.len);
 
-    // And the failure does not leave the session stuck in boot mode.
     try testing.expect(!rig.session.state.booting);
     try testing.expect(!rig.session.needs_boot);
     try testing.expect(!rig.session.refreshing);
@@ -3532,7 +3312,6 @@ test "delete and empty reach the account's server" {
     } }});
     try testing.expectEqualStrings("Trash emptied", rig.session.state.status.slice());
 
-    // All accounts (null filter) is the same path with no filter.
     rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
         .account = null,
         .mailbox = .sent,
@@ -3553,24 +3332,20 @@ test "the account form opens empty, validates, and saves through the port" {
     const form = &rig.session.settings.?;
     try testing.expectEqual(core.setup.Step.address, form.setup.step);
 
-    // Typing goes into the form.
     rig.fake_system.push_input("x");
     _ = rig.session.step();
     try testing.expectEqualStrings("x", form.setup.address.slice());
 
-    // Tab moves between fields on the same screen.
     _ = rig.session.settings_key(form, .tab);
     try testing.expectEqual(Session.Field.imap_host, form.field);
     _ = rig.session.settings_key(form, .back_tab);
     try testing.expectEqual(Session.Field.address, form.field);
 
-    // An invalid address is refused instead of saved.
     form.setup.address.set("not-an-address");
     _ = rig.session.settings_key(form, .{ .ctrl = 's' });
     try testing.expect(!form.setup.problem.is_empty());
     try testing.expectEqual(@as(u32, 0), port.saved);
 
-    // A valid one, then Ctrl+S saves.
     form.setup.address.set("me@example.com");
     _ = rig.session.settings_key(form, .enter);
     form.setup.imap_host.set("imap.example.com");
@@ -3583,7 +3358,6 @@ test "the account form opens empty, validates, and saves through the port" {
     try testing.expectEqualStrings("me", port.last_label[0..port.last_label_len]);
     try testing.expect(port.last_replaces == null);
     try testing.expect(rig.session.settings == null);
-    // Memory.connect reports no Mail, so the account is saved but not attached.
     try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "did not connect") != null);
 }
 
@@ -3611,7 +3385,6 @@ test "the form shows the servers the source reported" {
 
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = core.id.AccountId.from_int(1) } }});
     const form = &rig.session.settings.?;
-    // No '?' and no blanks: the values survive into the form.
     try testing.expectEqualStrings("imap.example.com", form.setup.imap_host.slice());
     try testing.expectEqualStrings("smtp.example.com", form.setup.smtp_host.slice());
     try testing.expectEqualStrings("alvaro", form.setup.username.slice());
@@ -3625,7 +3398,6 @@ test "a save failure says what failed, not 'fix the reason above'" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // A port that refuses without a reason: the form still names the stage.
     var port: core.accounts_port.Memory = .{ .fail = true };
     rig.session.deps.accounts_file = port.accounts();
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
@@ -3650,7 +3422,6 @@ test "the form reads sign in, then password, then the fold" {
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     const form = &rig.session.settings.?;
 
-    // Walking down: hosts, Sign in, Password, Advanced, and then nothing rare.
     form.field = .smtp_port;
     _ = rig.session.settings_key(form, .tab);
     try testing.expectEqual(Session.Field.sign_in, form.field);
@@ -3659,10 +3430,8 @@ test "the form reads sign in, then password, then the fold" {
     _ = rig.session.settings_key(form, .tab);
     try testing.expectEqual(Session.Field.advanced, form.field);
     _ = rig.session.settings_key(form, .tab);
-    // Username and the client id sit below the fold: folded, we wrap around.
     try testing.expectEqual(Session.Field.address, form.field);
 
-    // Opened, they appear after it, never above.
     form.field = .advanced;
     _ = rig.session.settings_key(form, .enter);
     _ = rig.session.settings_key(form, .tab);
@@ -3680,19 +3449,16 @@ test "with OAuth the password row is skipped" {
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     const form = &rig.session.settings.?;
 
-    // Sign in sits right before Password: Tab walks from one to the other.
     form.field = .sign_in;
     _ = rig.session.settings_key(form, .tab);
     try testing.expectEqual(Session.Field.password, form.field);
 
-    // With OAuth there is no password to type, so that row disappears.
     form.field = .sign_in;
     _ = rig.session.settings_key(form, .{ .char = ' ' });
     try testing.expect(form.setup.oauth);
     _ = rig.session.settings_key(form, .tab);
     try testing.expectEqual(Session.Field.advanced, form.field);
 
-    // ...and back up lands on Sign in, not on the hidden row.
     _ = rig.session.settings_key(form, .back_tab);
     try testing.expectEqual(Session.Field.sign_in, form.field);
 }
@@ -3714,19 +3480,15 @@ test "a new OAuth account saves without a password and signs in" {
     form.setup.username.set("new@example.com");
     form.setup.set_oauth(true);
 
-    // The account saves without a client id (it is optional); the sign-in is
-    // what needs one, and the session says so.
     rig.session.save_settings(form);
     try testing.expectEqual(@as(u32, 1), port.saved);
     try testing.expectEqual(core.id.AccountId.unknown, port.oauth);
     try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Client ID") != null);
 
-    // With one, it signs in and attaches.
     form.setup.oauth_client_id.set("client-123");
     rig.session.state.accounts.items[0].oauth_client.set("client-123");
     rig.session.oauth_account(core.id.AccountId.from_int(1));
     try testing.expectEqual(core.id.AccountId.from_int(1), port.oauth);
-    // Signed in and attached: its mail is fetched from now on.
     try testing.expectEqual(@as(u8, 2), rig.session.source_count);
 }
 
@@ -3749,7 +3511,6 @@ test "a new account is connected and listed without a restart" {
     form.setup.password.append_codepoint('s');
     rig.session.save_settings(form);
 
-    // It is in the list, and its mail is on its way.
     try testing.expectEqual(before + 1, rig.session.source_count);
     try testing.expect(rig.session.state.accounts.len > 0);
     try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "added") != null);
@@ -3771,7 +3532,6 @@ test "a refused save keeps the form and its contents" {
     form.setup.password.append_codepoint('s');
     form.field = .username;
 
-    // No port (the demo): the form must not close nor forget anything.
     rig.session.save_settings(form);
     try testing.expect(rig.session.settings != null);
     try testing.expectEqual(Session.Field.username, rig.session.settings.?.field);
@@ -3779,7 +3539,6 @@ test "a refused save keeps the form and its contents" {
     try testing.expectEqualStrings("me@example.com", rig.session.settings.?.setup.address.slice());
     try testing.expect(rig.session.settings.?.setup.problem.len > 0);
 
-    // Fixing it and saving works, and only then does the form close.
     var port: core.accounts_port.Memory = .{};
     rig.session.deps.accounts_file = port.accounts();
     rig.session.save_settings(&rig.session.settings.?);
@@ -3833,7 +3592,6 @@ test "the rename prompt is painted while it is open" {
 
     rig.session.open_rename(core.id.AccountId.from_int(1));
     try testing.expect(rig.session.renaming != null);
-    // Render straight through: the prompt row and its caret.
     rig.session.render();
     try testing.expect(rig.fake_system.output_len > 0);
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Account name") != null);
@@ -3852,7 +3610,6 @@ test "renaming an account touches only its label" {
     try testing.expect(rig.session.renaming != null);
     try testing.expectEqualStrings("account", rig.session.renaming.?.text.slice());
 
-    // Typing replaces nothing: the old name is the starting point.
     _ = rig.session.rename_key(&rig.session.renaming.?, .{ .ctrl = 'u' });
     _ = rig.session.rename_key(&rig.session.renaming.?, .{ .char = 'w' });
     _ = rig.session.rename_key(&rig.session.renaming.?, .backspace);
@@ -3867,7 +3624,6 @@ test "renaming an account touches only its label" {
     try testing.expect(rig.session.renaming == null);
     try testing.expectEqualStrings("w", rig.session.state.accounts.items[0].label.slice());
 
-    // An empty name is refused, and so is a failing port.
     rig.session.run_effects_for_test(&.{.{ .rename_account = .{ .account = core.id.AccountId.from_int(1) } }});
     _ = rig.session.rename_key(&rig.session.renaming.?, .{ .ctrl = 'u' });
     _ = rig.session.rename_key(&rig.session.renaming.?, .enter);
@@ -3878,10 +3634,9 @@ test "renaming an account touches only its label" {
     _ = rig.session.rename_key(&rig.session.renaming.?, .enter);
     try testing.expectEqualStrings("Could not rename the account", rig.session.state.status.slice());
 
-    // Other keys are ignored, and an account that is not in the list is a no-op.
     rig.session.open_rename(core.id.AccountId.from_int(1));
     rig.session.needs_render = true;
-    _ = rig.session.step(); // paints the prompt row
+    _ = rig.session.step();
     _ = rig.session.rename_key(&rig.session.renaming.?, .{ .char = 0x1f600 });
     _ = rig.session.rename_key(&rig.session.renaming.?, .{ .ctrl = 'c' });
     try testing.expect(rig.session.state.quit);
@@ -3889,7 +3644,6 @@ test "renaming an account touches only its label" {
     rig.session.open_rename(core.id.AccountId.from_int(9));
     try testing.expect(rig.session.renaming != null);
 
-    // Escape cancels; without a port it refuses.
     rig.session.open_rename(core.id.AccountId.from_int(1));
     _ = rig.session.rename_key(&rig.session.renaming.?, .escape);
     try testing.expect(rig.session.renaming == null);
@@ -3908,7 +3662,7 @@ test "the form's keys edit, submit, back out, and quit" {
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     var form = &rig.session.settings.?;
 
-    rig.session.render(); // the form row
+    rig.session.render();
     _ = rig.session.settings_key(form, .{ .char = 'a' });
     _ = rig.session.settings_key(form, .backspace);
     try testing.expect(form.setup.address.is_empty());
@@ -3917,7 +3671,6 @@ test "the form's keys edit, submit, back out, and quit" {
     _ = rig.session.settings_key(form, .{ .mouse = .{ .x = 0, .y = 0, .kind = .press, .button = .left } });
     try testing.expect(!rig.session.state.quit);
 
-    // Ctrl+C quits from the form, like everywhere else.
     _ = rig.session.settings_key(&rig.session.settings.?, .{ .ctrl = 'q' });
     try testing.expect(rig.session.state.quit);
 
@@ -3932,17 +3685,14 @@ test "closing the form twice, and after a failed save, is safe" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // No port at all: the save path closes the form and reports it.
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     const form = &rig.session.settings.?;
     form.setup.address.set("me@example.com");
-    // Escape on the address step closes it too.
     _ = rig.session.settings_key(form, .escape);
     try testing.expect(rig.session.settings == null);
 
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     rig.session.save_settings(&rig.session.settings.?);
-    // The form stays open with the reason inside it, so nothing typed is lost.
     try testing.expect(rig.session.settings != null);
     try testing.expectEqualStrings(
         "Accounts cannot be changed here",
@@ -3961,7 +3711,6 @@ test "Enter moves between fields and saves on the last one" {
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     const form = &rig.session.settings.?;
 
-    // Enter is "next field", not "save", until the last row.
     _ = rig.session.settings_key(form, .enter);
     try testing.expectEqual(Session.Field.imap_host, form.field);
     try testing.expectEqual(@as(u32, 0), port.saved);
@@ -3972,7 +3721,6 @@ test "Enter moves between fields and saves on the last one" {
     form.setup.username.set("me");
     form.setup.password.append_codepoint('s');
 
-    // On Password, Enter saves the form.
     form.field = .password;
     _ = rig.session.settings_key(form, .enter);
     try testing.expectEqual(@as(u32, 1), port.saved);
@@ -3994,7 +3742,6 @@ test "Ctrl+U clears the current field, and Esc cancels the form" {
     _ = rig.session.settings_key(form, .{ .ctrl = 'u' });
     try testing.expect(form.setup.address.is_empty());
 
-    // The last field saves on Enter; a fresh form is closed by Esc.
     form.setup.address.set("me@example.com");
     form.setup.imap_host.set("imap.example.com");
     form.setup.imap_port.set("993");
@@ -4027,7 +3774,6 @@ test "removing an account rewrites the config and drops its mail" {
     rig.session.settle_boot_for_test();
     rig.session.render();
 
-    // No port: refuse and say so.
     rig.session.run_effects_for_test(&.{.{ .remove_account = .{ .account = core.id.AccountId.from_int(1) } }});
     try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
 
@@ -4044,8 +3790,6 @@ test "removing an account rewrites the config and drops its mail" {
     try testing.expect(before > 0);
     try testing.expect(std.mem.endsWith(u8, rig.session.state.status.slice(), "removed · restart to apply"));
 
-    // A failing port leaves everything alone. Adding is deferred, so it runs
-    // on the next step.
     port.fail = true;
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     const failing = &rig.session.settings.?;
@@ -4056,7 +3800,6 @@ test "removing an account rewrites the config and drops its mail" {
     failing.setup.password.append_codepoint('s');
     rig.session.save_settings(failing);
     try testing.expect(rig.session.settings != null);
-    // The reason now names the stage instead of saying "fix the reason above".
     try testing.expect(std.mem.indexOf(u8, rig.session.settings.?.setup.problem.slice(), "Could not write") != null);
     rig.session.close_settings();
     rig.session.run_effects_for_test(&.{.{ .remove_account = .{ .account = core.id.AccountId.from_int(2) } }});
@@ -4099,7 +3842,7 @@ test "delete and empty report server errors and unknown accounts" {
     try testing.expectEqualStrings("Could not empty Trash on the server", rig.session.state.status.slice());
     rig.fake_mail.fail_flags = false;
 
-    rig.session.source_count = 0; // no accounts connected
+    rig.session.source_count = 0;
     rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
         .account = null,
         .mailbox = .trash,
@@ -4139,16 +3882,12 @@ test "an effect paints the spinner, even when it is instant" {
     rig.session.render();
     rig.fake_system.output_len = 0;
 
-    // A body is not one of these any more: it is fetched off the loop, with the
-    // reader's own placeholder doing the work. Everything that still waits on the
-    // connection gets the spinner.
     rig.session.run_effects_for_test(&.{.{ .sync_flags = .{
         .account = core.id.AccountId.from_int(1),
         .id = MessageId.from_int(1),
         .flags = .{ .unread = false },
     } }});
 
-    // A spinner frame was written before the work, and the flag is cleared.
     try testing.expect(rig.fake_system.output_len > 0);
     try testing.expect(!rig.session.state.loading);
 }
@@ -4159,7 +3898,6 @@ test "a refresh does not stop the loop: keys answer while the accounts load" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // The server takes its time with the refresh.
     var gate: FakeMail.Gate = .{};
     rig.fake_mail.gate = &gate;
     defer gate.release();
@@ -4168,7 +3906,6 @@ test "a refresh does not stop the loop: keys answer while the accounts load" {
     _ = rig.session.step();
     try testing.expect(rig.session.refreshing);
 
-    // Movement, and opening a mail, answer now -- not when the server does.
     rig.fake_system.push_input("j");
     _ = rig.session.step();
     try testing.expectEqual(@as(u32, 1), rig.session.state.cursor);
@@ -4176,12 +3913,10 @@ test "a refresh does not stop the loop: keys answer while the accounts load" {
     _ = rig.session.step();
     try testing.expectEqual(@as(u32, 0), rig.session.state.cursor);
 
-    // The first message is unread, so opening it wants to sync a flag.
     rig.fake_system.push_input("\r");
     _ = rig.session.step();
     try testing.expectEqual(core.state.View.reader, rig.session.state.view);
 
-    // And marking it read waits its turn instead of taking the loop hostage.
     try testing.expect(rig.session.pending_len > 0);
     gate.release();
     rig.session.settle_refresh_for_test();
@@ -4212,8 +3947,6 @@ test "the line of waiting effects is bounded" {
     }
     try testing.expectEqual(pending_effects_max, rig.session.pending_len);
 
-    // The one that does not fit stops and takes its turn instead of being dropped:
-    // losing a move is worse than a slow tick. The refresh ends first.
     gate.release();
     rig.session.defer_effect(.{ .sync_flags = .{
         .account = core.id.AccountId.from_int(1),
@@ -4222,8 +3955,6 @@ test "the line of waiting effects is bounded" {
     } });
     try testing.expect(!rig.session.refreshing);
 
-    // A body and a refresh can be in the line too, and they still do their work
-    // when their turn comes.
     rig.session.defer_effect(.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
         .mailbox = .inbox,
@@ -4231,7 +3962,6 @@ test "the line of waiting effects is bounded" {
     } });
     rig.session.defer_effect(.{ .refresh = .{ .account = null, .mailbox = .inbox } });
 
-    // And the line drains, one effect per tick.
     rig.session.settle_pending_for_test();
     try testing.expectEqual(@as(u8, 0), rig.session.pending_len);
     rig.session.settle_body_for_test();
@@ -4247,28 +3977,20 @@ test "while a body loads, the footer turns and the terminal's bar runs" {
     var gate: FakeMail.Gate = .{};
     rig.fake_mail.gate = &gate;
     defer gate.release();
-    // The process boundary enables the bar; a terminal that cannot take the escape
-    // never sees a byte of it.
     progress_mod.enable(true);
     defer progress_mod.enable(false);
 
     rig.fake_system.push_input("\r");
     _ = rig.session.step();
-    // The reader is on screen with its placeholder, the footer has a spinner next to
-    // the position, and the progress bar is up: three ways of saying "working" that
-    // do not stop anyone from leaving.
     try testing.expectEqual(core.state.View.reader, rig.session.state.view);
     try testing.expect(rig.session.state.loading);
     try testing.expect(rig.session.state.busy());
     rig.fake_system.output_len = 0;
-    // A full frame, not the diff of an unchanged one.
     rig.session.invalidate_screen();
     rig.session.render();
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Loading...") != null);
-    // The spinner is next to the position, in the footer's right corner.
     var footer_buffer: [512]u8 = undefined;
     const last = rig.session.screen.row_text(rig.session.screen.rows - 1, &footer_buffer);
-    // Any frame of the spinner: which one depends on the tick.
     const frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
     var spun = false;
     for (frames) |glyph| {
@@ -4279,7 +4001,6 @@ test "while a body loads, the footer turns and the terminal's bar runs" {
 
     gate.release();
     rig.session.settle_body_for_test();
-    // `loading_ms` is 90 by default: the spinner stays for its minimum, then goes.
     os.sleep_ms(120);
     rig.session.settle_body_for_test();
     try testing.expect(!rig.session.state.loading);
@@ -4292,12 +4013,9 @@ test "leaving a message while its body is still loading is instant" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // The server takes its time: the worker blocks until this test opens the gate.
     var gate: FakeMail.Gate = .{};
     rig.fake_mail.gate = &gate;
     defer gate.release();
-    // The process boundary enables the bar; a terminal that cannot take the escape
-    // never sees a byte of it.
     progress_mod.enable(true);
     defer progress_mod.enable(false);
 
@@ -4306,17 +4024,13 @@ test "leaving a message while its body is still loading is instant" {
     try testing.expectEqual(core.state.View.reader, rig.session.state.view);
     try testing.expect(rig.session.body_in_flight);
     try testing.expect(!rig.session.body_loaded);
-    // The reader says so, instead of showing an empty page.
     try testing.expect(rig.session.wrapped.len == 0);
 
-    // The way out works while the bytes are in the air: no waiting, no join. A lone
-    // ESC is ambiguous until the read after it times out, which is one more tick.
     rig.fake_system.push_input("\x1b");
     _ = rig.session.step();
     _ = rig.session.step();
     try testing.expectEqual(core.state.View.list, rig.session.state.view);
 
-    // When it lands it is not painted over the list, and the session is still whole.
     gate.release();
     rig.session.settle_body_for_test();
     try testing.expectEqual(core.state.View.list, rig.session.state.view);
@@ -4330,8 +4044,6 @@ test "opening another message blanks the page instead of keeping the last one" {
     try rig.open_reader("Content-Type: text/plain\r\n\r\nthe first message");
     try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "the first message") != null);
 
-    // A refresh holds the connection, so the next body waits -- and the frame
-    // in the meantime must not carry the previous message's words.
     rig.fake_system.push_input("\x12");
     _ = rig.session.step();
     try testing.expect(rig.session.refreshing);
@@ -4345,8 +4057,6 @@ test "opening another message blanks the page instead of keeping the last one" {
     try testing.expectEqual(@as(u32, 0), rig.session.shown_len);
     try testing.expect(!rig.session.body_loaded);
 
-    // What the screen says now: the placeholder, not the last message. The frame was
-    // written before the cache was read, which is why it is already there.
     var frame: [8192]u8 = undefined;
     var written: usize = 0;
     var row: u16 = 0;
@@ -4362,11 +4072,9 @@ test "opening another message blanks the page instead of keeping the last one" {
     try testing.expect(std.mem.indexOf(u8, painted, "Loading...") != null);
     try testing.expect(std.mem.indexOf(u8, painted, "the first message") == null);
 
-    // And when it lands, it is the second message that is on screen.
     rig.session.settle_refresh_for_test();
     rig.session.settle_body_for_test();
     try testing.expect(rig.session.body_loaded);
-    // The second message's own words, from the fake's template for id 2.
     try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "Heads up: the build is green again") != null);
 }
 
@@ -4376,8 +4084,6 @@ test "asking again for the message already on screen keeps it: no flash" {
     defer rig.deinit();
     try rig.open_reader("Content-Type: text/plain\r\n\r\nthe first message");
 
-    // A refresh holds the connection, so the fetch below waits: whatever the
-    // reader shows at that moment is what the user sees.
     rig.fake_system.push_input("\x12");
     _ = rig.session.step();
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
@@ -4397,7 +4103,6 @@ test "a body asked for during a refresh is delivered when it finishes" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // Start the refresh but do not wait for it.
     rig.fake_system.push_input("\x12");
     _ = rig.session.step();
     try testing.expect(rig.session.refreshing);
@@ -4408,15 +4113,12 @@ test "a body asked for during a refresh is delivered when it finishes" {
         .id = MessageId.from_int(1),
     } }});
 
-    // Queued, not refused and not blocking: the reader is on screen with its
-    // placeholder while the refresh owns the connection.
     try testing.expect(rig.session.refreshing);
     try testing.expect(rig.session.body_request != null);
     try testing.expect(rig.session.body_len == 0);
 
     rig.session.settle_refresh_for_test();
     try testing.expect(!rig.session.refreshing);
-    // The refresh finishing hands the connection over, and the next tick takes it.
     try testing.expect(rig.session.body_request == null or rig.session.body_job.finished() == false);
     rig.session.settle_body_for_test();
     try testing.expect(rig.session.body_len > 0);
@@ -4448,7 +4150,6 @@ test "deinit waits for a running refresh" {
     rig.fake_system.push_input("\x12");
     _ = rig.session.step();
     try testing.expect(rig.session.refreshing);
-    // No settle: deinit must join the worker itself.
     rig.deinit();
 }
 
@@ -4470,7 +4171,6 @@ test "a successful refresh refreshes the mailbox" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // The server gains a message; refresh picks it up.
     const extra = Message{ .id = MessageId.from_int(9), .account = core.id.AccountId.from_int(1), .mailbox = .inbox, .timestamp_unix = 1_699_999_950 };
     try rig.fake_mail.inner.seed(&extra);
 
@@ -4519,7 +4219,6 @@ test "clicking a row selects it; clicking it again opens it" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // Row y=3 is the second message; the body starts at y=2.
     rig.send("\x1b[<0;40;4M");
     try testing.expectEqual(@as(u32, 1), rig.session.state.cursor);
     try testing.expectEqual(core.state.View.list, rig.session.state.view);
@@ -4555,7 +4254,6 @@ test "clicking a mailbox tab switches mailbox" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // Sent tab starts at x = 8 + 11 = 19.
     rig.send("\x1b[<0;20;1M");
     try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
 }
@@ -4583,8 +4281,6 @@ test "the wheel scrolls the list and the reader" {
     try rig.start();
     defer rig.deinit();
 
-    // A short terminal makes the body taller than the viewport, so scrolling
-    // has somewhere to go.
     rig.fake_system.size_value = .{ .columns = 100, .rows = 12 };
     _ = rig.session.step();
 
@@ -4613,7 +4309,6 @@ test "a click in the footer or in the reader is ignored" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // Footer row: not a message row.
     rig.send("\x1b[<0;40;24M");
     try testing.expectEqual(@as(u32, 0), rig.session.state.cursor);
 
@@ -4641,7 +4336,6 @@ test "a long paste is decoded in bounded chunks" {
     const paste: [200]u8 = @splat('j');
     rig.fake_system.push_input(&paste);
     _ = rig.session.step();
-    // Two messages: the cursor saturates at the last row instead of overflowing.
     try testing.expectEqual(@as(u32, 1), rig.session.state.cursor);
 }
 
@@ -4721,18 +4415,15 @@ test "clicking a link in the body opens it" {
     try rig.start_with_links(&sink);
 
     const body = "See https://example.com/a for details";
-    // A plain message with no HTML: the text view is what the reader shows.
     try rig.open_reader(body);
     try testing.expect(rig.session.wrapped.len > 0);
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
-    // Column 4 is the 'h' of "https": inside the link.
     _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .press, .button = .left, .ctrl = true });
     _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .release, .button = .left, .ctrl = true });
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/a", sink.last[0..sink.last_len]);
 
-    // A click on the words around it opens nothing, with or without ctrl.
     _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .press, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = 2, .y = lay.reader_body_y, .kind = .release, .button = .left });
     try testing.expectEqual(@as(u8, 1), sink.opened);
@@ -4762,20 +4453,17 @@ test "mail with an HTML part opens as HTML, and H goes back to the text" {
     rig.session.state.opened = MessageId.from_int(1);
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
 
-    // What a mail client shows: the HTML part, laid out.
     try testing.expect(rig.session.html_view);
     try testing.expectEqualStrings(
         "Read the docs",
         rig.session.reader_text(),
     );
 
-    // H shows the text/plain alternative.
     rig.send("H");
     try testing.expect(!rig.session.html_view);
     try testing.expectEqualStrings("plain version", rig.session.reader_text());
     try testing.expectEqualStrings("Plain text", rig.session.state.status.slice());
 
-    // And back.
     rig.send("H");
     try testing.expect(rig.session.html_view);
 }
@@ -4831,7 +4519,6 @@ test "a message with an HTML part renders both views from one fetch" {
     rig.session.state.view = .reader;
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
 
-    // Both views come from the same fetch, and HTML is the one shown first.
     try testing.expectEqualStrings(
         "Read the docs",
         rig.session.reader_text(),
@@ -4854,13 +4541,10 @@ test "a link split by the wrap is still one link, and clicks anywhere on it" {
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), body);
     rig.session.state.view = .reader;
     rig.session.state.opened = MessageId.from_int(1);
-    // A narrow width is what breaks the address across lines.
     wrap.wrap(rig.session.reader_text(), 18, &rig.session.wrapped);
     try testing.expect(rig.session.wrapped.len >= 3);
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
-    // Find the line that holds the middle of the address (no scheme in sight):
-    // that is the half the old per-line scan could not see.
     var continuation: ?u16 = null;
     for (0..rig.session.wrapped.len) |row| {
         const line = rig.session.wrapped.at(@intCast(row), rig.session.reader_text());
@@ -4897,7 +4581,6 @@ test "a drag in the reader copies the text to the clipboard" {
     const lay = layout_mod.Layout.compute(100, 24, 0);
     rig.fake_system.output_len = 0;
 
-    // Press at the start of the first line, drag over the first word, release.
     _ = rig.session.handle_mouse(.{ .x = 1, .y = lay.reader_body_y, .kind = .press, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .motion, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = 5, .y = lay.reader_body_y, .kind = .release, .button = .left });
@@ -4905,7 +4588,6 @@ test "a drag in the reader copies the text to the clipboard" {
     const written = rig.fake_system.output_text();
     try testing.expect(std.mem.indexOf(u8, written, "\x1b]52;c;") != null);
     try testing.expect(std.mem.indexOf(u8, written, "\x1b]52;p;") != null);
-    // "alpha" is "YWxwaGE=".
     try testing.expect(std.mem.indexOf(u8, written, "YWxwaGE=") != null);
     try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Copied 5 characters") != null);
     try testing.expect(rig.session.selection == null);
@@ -4922,13 +4604,11 @@ test "a click on a link opens it exactly once" {
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     const y = lay.reader_body_y;
-    // Column 6 is inside the address: ctrl, press and release on one cell.
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .press, .button = .left, .ctrl = true });
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .release, .button = .left, .ctrl = true });
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("Opened https://example.com/a", rig.session.state.status.slice());
 
-    // The same click without ctrl opens nothing: ctrl is the key to the browser.
     sink.opened = 0;
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .press, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = 7, .y = y, .kind = .release, .button = .left });
@@ -4938,7 +4618,6 @@ test "a click on a link opens it exactly once" {
 test "the account picked last time is the one the reader opens on" {
     var rig: Rig = .{};
     var scope: core.scope_port.Memory = .{};
-    // Two accounts, so the scope has something to choose between.
     try scope.scope().save("home");
 
     const second_source = MailSource{
@@ -4963,7 +4642,6 @@ test "the account picked last time is the one the reader opens on" {
     });
     defer rig.session.deinit();
 
-    // Opened on "home", not on every account.
     try testing.expectEqual(core.id.AccountId.from_int(2), rig.session.state.account_filter.?);
 }
 
@@ -4976,7 +4654,6 @@ test "picking all accounts is remembered too" {
     var scope: core.scope_port.Memory = .{};
     rig.session.deps.scope = scope.scope();
 
-    // Choose the account (row 1), then all of them (row 0).
     rig.send("A");
     rig.send("j");
     _ = rig.session.apply(.accounts_select);
@@ -5007,11 +4684,9 @@ test "a message whose sender wrapped the address shows one whole link" {
     rig.session.needs_render = true;
     _ = rig.session.step();
 
-    // The address is one link, and the reader shows it unbroken.
     try testing.expectEqual(@as(usize, 1), rig.session.reader_links().len);
     try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "&emsl=1055472") != null);
 
-    // A click on the second line of it opens the whole address.
     const lay = layout_mod.Layout.compute(100, 24, 0);
     _ = rig.session.handle_mouse(.{
         .x = 6,
@@ -5037,7 +4712,6 @@ test "an account out of scope is never connected" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // Two sources, the second one out of scope.
     var second = FakeMail{};
     _ = try rig.seed();
     rig.session.sources[1] = .{
@@ -5079,7 +4753,6 @@ test "a PNG knows how big it is, and how many cells that is" {
     try testing.expectEqual(@as(u16, 10), cells.columns);
     try testing.expectEqual(@as(u16, 2), cells.rows);
 
-    // Not a PNG: refused rather than painted as garbage.
     try testing.expect(media.png_size("GIF89a") == null);
     const tiny: [4]u8 = @splat(0);
     try testing.expect(media.png_size(&tiny) == null);
@@ -5132,7 +4805,6 @@ const ImageSink = struct {
 };
 
 test "an image that came with the message is painted where its marker landed" {
-    // A 90x36 PNG, one pixel per byte of IHDR plus a body.
     const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     const raw = "Content-Type: multipart/related; boundary=\"b\"\n" ++
         "\n" ++
@@ -5164,7 +4836,6 @@ test "an image that came with the message is painted where its marker landed" {
     rig.session.state.opened = MessageId.from_int(1);
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
 
-    // The marker is in the laid-out text, so the reader has somewhere to paint.
     try testing.expect(std.mem.indexOf(u8, rig.session.html_text[0..rig.session.html_len], "[IMG:logo@x]") != null);
 
     rig.session.needs_render = true;
@@ -5192,9 +4863,6 @@ test "an image with an address is not fetched, so it is not painted" {
     rig.session.state.opened = MessageId.from_int(1);
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/x.png\" alt=\"Foto\"></p>");
 
-    // A socket inside a frame is a reader that stops answering keys, which is what a
-    // receipt full of tracking pixels was: the marker stays in the text and `o` opens
-    // the mail in a browser, where the pictures belong.
     rig.session.needs_render = true;
     _ = rig.session.step();
     try testing.expectEqual(@as(u8, 0), sink.calls);
@@ -5218,7 +4886,6 @@ test "clicking a reference number opens the address it points at" {
     rig.session.needs_render = true;
     _ = rig.session.step();
 
-    // Find the "[1]" in the body and click on its digit.
     const text = rig.session.reader_text();
     const row = std.mem.indexOf(u8, text, "[1]").?;
     const lay = layout_mod.Layout.compute(100, 24, 0);
@@ -5249,7 +4916,6 @@ test "the same marker in another message gets another picture id" {
     const first = media.image_id(account, MessageId.from_int(10), "r0");
     const second = media.image_id(account, MessageId.from_int(11), "r0");
 
-    // A terminal keeps one picture per id: two messages cannot share one.
     try testing.expect(first != second);
     try testing.expect(first != 0);
     try testing.expect(media.image_id(account, MessageId.from_int(10), "r0") == first);
@@ -5262,16 +4928,13 @@ test "a marker with the same name in another message is another picture" {
     try rig.start();
     defer rig.deinit();
 
-    // Two parts, both called "logo", with different bytes.
     rig.session.show_images = true;
     const first = "From: a@b\r\nContent-Type: text/plain\r\n\r\nhi";
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), first);
     try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
 
-    // The cache remembers what the message carried…
     _ = rig.session.image_png("logo");
     try testing.expectEqual(@as(u8, 1), rig.session.image_slot_count);
-    // …and forgets it as soon as another message is opened.
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), first);
     try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
 }
@@ -5285,21 +4948,16 @@ test "the pointer lights a link up, and the light goes when it leaves" {
     try rig.open_reader("go to https://example.com/a now");
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
-    // Column 6 sits inside the address.
-    // Without ctrl the pointer changes nothing: reading is never disturbed.
     try testing.expect(!rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none }));
     try testing.expect(rig.session.hovered == null);
     try testing.expect(rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
     try testing.expect(rig.session.hovered != null);
-    // And the popup knows where it goes.
     try testing.expectEqualStrings("https://example.com/a", rig.session.hover_url.slice());
 
-    // Leaving the link, or hovering plain text, puts the light out.
     try testing.expect(rig.session.hover_link(.{ .x = 1, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
     try testing.expect(rig.session.hovered == null);
     try testing.expect(rig.session.hover_url.is_empty());
 
-    // Moving between cells of the same link does not repaint.
     _ = rig.session.hover_link(.{ .x = 7, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true });
     try testing.expect(!rig.session.hover_link(.{ .x = 9, .y = lay.reader_body_y, .kind = .motion, .button = .none, .ctrl = true }));
 }
@@ -5312,7 +4970,6 @@ test "a ctrl click reported by the terminal reaches the link" {
 
     try rig.open_reader("see https://example.com/a here");
 
-    // The bytes a terminal sends for ctrl+left press: 16 is ctrl, 1-based cells.
     const lay = layout_mod.Layout.compute(100, 24, 0);
     var report: [32]u8 = undefined;
     const bytes = std.fmt.bufPrint(&report, "\x1b[<16;7;{d}M", .{lay.reader_body_y + 1}) catch unreachable;
@@ -5332,12 +4989,10 @@ test "in the HTML view, clicking the words of a link opens its address" {
     try testing.expect(rig.session.html_view);
     try testing.expectEqual(@as(usize, 1), rig.session.html_anchor_count);
 
-    // The click lands on the words, not on the address in parentheses.
     const lay = layout_mod.Layout.compute(100, 24, 0);
     const text = rig.session.reader_text();
     const anchor = rig.session.html_anchors[0];
 
-    // Find the wrapped line the anchor starts on.
     var row: u16 = 0;
     var column: u16 = 0;
     while (row < rig.session.wrapped.len) : (row += 1) {
@@ -5353,7 +5008,6 @@ test "in the HTML view, clicking the words of a link opens its address" {
     try testing.expectEqual(@as(u8, 1), sink.opened);
     try testing.expectEqualStrings("https://example.com/x", sink.last[0..sink.last_len]);
 
-    // Without ctrl the same click on the same words opens nothing.
     sink.opened = 0;
     _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .press, .button = .left });
     _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .release, .button = .left });
@@ -5386,7 +5040,6 @@ test "in the HTML view the pointer lights up the words of a link" {
 
     const hover = input.Mouse{ .x = column + 2, .y = lay.reader_body_y + row, .kind = .motion, .button = .none, .ctrl = true };
     try testing.expect(rig.session.hover_link(hover));
-    // The lit span is the words of the anchor, not the address in parentheses.
     const lit = rig.session.hovered.?;
     try testing.expectEqual(anchor.span.start, lit.start);
     try testing.expectEqual(anchor.span.end, lit.end);
@@ -5399,7 +5052,6 @@ test "a text body with HTML spacing entities is readable" {
     _ = rig.session.step();
 
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\r\n\r\n&emsp;&#8203;Hola&nbsp;mundo");
-    // "&emsp;" is a space, "&#8203;" is nothing, "&nbsp;" is a space.
     try testing.expectEqualStrings(" Hola mundo", rig.session.reader_text());
 }
 
@@ -5409,28 +5061,20 @@ test "signing in from the account list: no config, then the flow fails" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // A client id, or the session refuses before trying.
     rig.session.state.accounts.items[0].oauth_client.set("abc-123");
     const account = core.id.AccountId.from_int(1);
 
-    // Without a config file there is nothing to sign into, and the form is not
-    // the only way to find that out.
     rig.session.deps.accounts_file = null;
     rig.session.run_effects_for_test(&.{.{ .oauth_account = .{ .account = account } }});
     try testing.expectEqualStrings("Accounts cannot be changed here", rig.session.state.status.slice());
 
-    // The flow fails: the terminal comes back, the account is still saved, and
-    // the reason is on screen.
     var port: core.accounts_port.Memory = .{ .fail = true, .oauth_problem = "the browser was closed" };
     rig.session.deps.accounts_file = port.accounts();
     rig.session.run_effects_for_test(&.{.{ .oauth_account = .{ .account = account } }});
     try testing.expectEqual(account, port.oauth);
-    // `label_for` finds nothing here, so the account is named by the id.
     try testing.expectEqualStrings("account saved; the browser was closed", rig.session.state.status.slice());
     try testing.expect(rig.session.state.status_alert);
 
-    // A flow that fails without a word still says the sign-in failed, and that
-    // "o" retries it.
     port.oauth_problem = "";
     rig.session.run_effects_for_test(&.{.{ .oauth_account = .{ .account = account } }});
     try testing.expectEqualStrings("account saved; sign-in failed. Press o to retry", rig.session.state.status.slice());
@@ -5460,7 +5104,6 @@ test "a terminal that cannot paint says so instead of doing nothing" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // No way to draw: the key still answers, with the truth.
     try rig.open_reader("<p><img src=\"https://example.com/x.png\"></p>");
     rig.fake_system.push_input("i");
     _ = rig.session.step();
@@ -5517,14 +5160,10 @@ test "turning pictures off repaints the rows they were drawn over" {
     _ = rig.session.step();
     try testing.expect(rig.session.show_images);
 
-    // A block drawing never entered the screen buffer, so the next frame must not be a
-    // diff: that is why the pictures used to stay after being turned off.
     const before = rig.fake_system.output_len;
     rig.fake_system.push_input("i");
     _ = rig.session.step();
     try testing.expect(!rig.session.show_images);
-    // The frame that follows is a whole one: the body text is written again, over the
-    // blocks that the diff did not know were there.
     const written = rig.fake_system.output_text()[before..];
     try testing.expect(std.mem.indexOf(u8, written, "hello") != null);
 }
@@ -5535,8 +5174,6 @@ test "a picture makes the body longer instead of hiding the words after it" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // A picture the message carries, decoded from its own bytes: 90x36 at this cell
-    // size is ten columns by two rows.
     rig.session.show_images = true;
     rig.session.deps.draw_image = ImageSink.draw;
     const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -5546,21 +5183,17 @@ test "a picture makes the body longer instead of hiding the words after it" {
         png_base64 ++ "\n--b--\n";
     try rig.open_reader(raw);
 
-    // The marker's line is followed by a blank one for every row the picture has
-    // beyond its own: the paragraph starts below the picture, not under it.
     const text = rig.session.gapped_text();
     const marker = std.mem.indexOf(u8, text, "[IMG:logo@x]").?;
     const after = text[marker..];
     const newlines = std.mem.indexOf(u8, after, "the paragraph").?;
     try testing.expect(std.mem.count(u8, after[0..newlines], "\n") >= 2);
-    // And nothing is lost: the words are all still there.
     try testing.expect(std.mem.indexOf(u8, text, "the paragraph after the picture") != null);
 }
 
 test "the ground a picture is drawn over is the terminal's own background" {
     var theme = theme_mod.Theme.from_background(.{ .r = 0x14, .g = 0x14, .b = 0x18 });
     try testing.expectEqual(@as(u32, 0x141418), Session.ground_colour(&theme));
-    // A theme with no background of its own: black, which is what the terminal paints.
     theme.ground = null;
     try testing.expectEqual(@as(u32, 0x000000), Session.ground_colour(&theme));
 }
@@ -5573,8 +5206,6 @@ test "pictures moving the text do not move the link off its words" {
     rig.session.show_images = true;
     rig.session.deps.draw_image = ImageSink.draw;
 
-    // A picture the message carries, then a link: the gap it needs pushes the link's
-    // line down, and the underline has to go with it.
     const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     const raw = "Content-Type: multipart/related; boundary=\"b\"\n\n--b\nContent-Type: text/html\n\n" ++
         "<p><img src=\"cid:logo@x\"></p><p>need help! <a href=\"https://example.com/s\">Contact our team</a></p>\n" ++
@@ -5586,13 +5217,10 @@ test "pictures moving the text do not move the link off its words" {
     const links = rig.session.reader_links();
     var url_buffer: [core.limits.url_max]u8 = undefined;
     try testing.expect(links.len == 1);
-    // The range the frame is given lands exactly on the words in the text it draws.
     try testing.expectEqualStrings(
         "Contact our team",
         text[links[0].start..links[0].end],
     );
-    // And walking it back finds the words in the message's own text, which is where
-    // the anchor's target lives.
     const original = rig.session.unshift_offset(links[0].start);
     try testing.expectEqualStrings(
         "Contact our team",
@@ -5612,20 +5240,15 @@ test "the pointer becomes a chain over a link and an arrow when it leaves" {
 
     const lay = layout_mod.Layout.compute(100, 24, 0);
     const row = lay.reader_body_y;
-    // Ctrl over the address: the terminal is told to show the chain. No button held:
-    // a motion with the left button down is a selection, not a hover.
     _ = rig.session.handle_mouse(.{ .x = 1 + 6, .y = row, .kind = .motion, .button = .none, .ctrl = true });
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "]22;pointer") != null);
 
-    // Away from it: back to the arrow.
     rig.fake_system.output_len = 0;
     _ = rig.session.handle_mouse(.{ .x = 1, .y = row, .kind = .motion, .button = .none, .ctrl = true });
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "]22;default") != null);
 }
 
 test "pictures are off until asked for, and then they arrive off the loop" {
-    // A 90x36 PNG, one pixel per byte of IHDR plus a body.
-    // IHDR enough for the reader to place it: 90x36.
     const png = [_]u8{
         0x89, 'P', 'N', 'G',  0x0d, 0x0a, 0x1a, 0x0a,
         0,    0,   0,   0,    0,    0,    0,    0,
@@ -5648,21 +5271,17 @@ test "pictures are off until asked for, and then they arrive off the loop" {
     rig.session.state.opened = MessageId.from_int(1);
     rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/logo.png\" alt=\"Logo\"></p>");
 
-    // Off: the frame draws, the marker stays, and nobody is asked for anything.
     rig.session.needs_render = true;
     _ = rig.session.step();
     try testing.expectEqual(@as(u8, 0), sink.fetches);
     try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "[IMG:r0]") != null);
 
-    // `i` turns them on: the worker brings the picture, and the next frame has it.
     rig.fake_system.push_input("i");
     _ = rig.session.step();
     try testing.expect(rig.session.show_images);
-    // A frame drawn before the picture arrives must not count as "dealt with".
     rig.session.render();
     try testing.expect(rig.session.image_slot_count == 0);
 
-    // The next tick starts the worker; the one after takes its answer.
     var guard: u32 = 0;
     while (sink.fetches == 0 and guard < 500) : (guard += 1) {
         _ = rig.session.step();
@@ -5676,7 +5295,6 @@ test "pictures are off until asked for, and then they arrive off the loop" {
     try testing.expectEqual(@as(u8, 1), sink.fetches);
     try testing.expect(rig.session.image_png("r0") != null);
 
-    // And off again: the status says so and the next frame paints no picture.
     rig.fake_system.push_input("i");
     _ = rig.session.step();
     try testing.expect(!rig.session.show_images);
@@ -5690,11 +5308,7 @@ test "a picture that is not a PNG is downloaded once and named as such" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // A GIF: the terminal cannot paint it, and the reader says so instead of showing
-    // a marker that never becomes anything.
     const gif = [_]u8{ 'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0, 0, 0 };
-    // With headers in front, the way the real client answers: the picture is a slice
-    // further into the buffer, and it used to be read from the front.
     var sink: RemoteFetch = .{ .png = &gif, .lead = 20 };
     rig.session.deps.fetch_image = RemoteFetch.fetch;
     rig.session.deps.fetch_image_context = &sink;
@@ -5707,8 +5321,6 @@ test "a picture that is not a PNG is downloaded once and named as such" {
 
     rig.fake_system.push_input("i");
     _ = rig.session.step();
-    // Wait for the picture to be dealt with, not for the status: turning them on is
-    // itself a status line.
     var guard: u32 = 0;
     while (rig.session.image_slot_count == 0 and guard < 300) : (guard += 1) {
         _ = rig.session.step();
@@ -5719,7 +5331,6 @@ test "a picture that is not a PNG is downloaded once and named as such" {
 }
 
 test "a picture is named by what its bytes are" {
-    // The message is the diagnosis: "not a PNG" is not enough to know what to do.
     var out: [64]u8 = undefined;
     try testing.expectEqualStrings("a JPEG", Session.picture_kind(&[_]u8{ 0xff, 0xd8, 0, 0 }, &out));
     try testing.expectEqualStrings("a WebP", Session.picture_kind("RIFF0000WEBP", &out));
@@ -5729,7 +5340,6 @@ test "a picture is named by what its bytes are" {
     try testing.expectEqualStrings("not an image (00 01 02)", Session.picture_kind("\x00\x01\x02\x03", &out));
     try testing.expectEqualStrings("empty", Session.picture_kind("", &out));
     try testing.expectEqualStrings("a PNG the terminal refused", Session.picture_kind("\x89PNG0000", &out));
-    // Text is quoted as text: a status line says far more than "48 54 54".
     try testing.expectEqualStrings(
         "not an image (HTTP/1.1 301 Moved)",
         Session.picture_kind("HTTP/1.1 301 Moved\r\n\r\n", &out),
@@ -5783,12 +5393,10 @@ test "the page sent to the browser carries the pictures the message came with" {
 
     try testing.expect(rig.session.open_external_message());
     try testing.expectEqual(@as(u8, 1), sink.calls);
-    // A file on disk cannot resolve a content id; the picture travels inside the page.
     const page = sink.html[0..sink.stored];
     try testing.expect(std.mem.indexOf(u8, page, "src=\"data:image/png;base64,") != null);
     try testing.expect(std.mem.indexOf(u8, page, "cid:logo@x") == null);
 
-    // And the key is the way in: `o` in the reader, with the page built the same way.
     sink.calls = 0;
     rig.fake_system.push_input("o");
     _ = rig.session.step();
@@ -5807,11 +5415,9 @@ test "opening the message elsewhere needs a body, a way, and something to open" 
     rig.session.deps.open_external = OpenSink.open;
     rig.session.deps.open_external_context = &sink;
 
-    // Nothing fetched yet: there is nothing to open.
     try testing.expect(!rig.session.open_external_message());
     try testing.expectEqual(@as(u8, 0), sink.calls);
 
-    // A body, but no program to hand it to.
     rig.session.body_loaded = true;
     const hander = rig.session.deps.open_external;
     rig.session.deps.open_external = null;
@@ -5819,14 +5425,12 @@ test "opening the message elsewhere needs a body, a way, and something to open" 
     try testing.expectEqualStrings("No way to open it from here", rig.session.state.status.slice());
     rig.session.deps.open_external = hander;
 
-    // An HTML part goes to the browser as itself, not as our text rendering.
     try rig.open_reader(html);
     try testing.expect(rig.session.open_external_message());
     try testing.expectEqual(@as(u8, 1), sink.calls);
     try testing.expect(sink.html_len > 0);
     try testing.expectEqualStrings("Opened in the browser", rig.session.state.status.slice());
 
-    // Otherwise the first link is the thing worth opening.
     sink.calls = 0;
     try rig.open_reader(plain);
     try testing.expect(rig.session.text_link_count > 0);
@@ -5857,7 +5461,6 @@ test "a saved account that cannot be opened says so, and keeps the form" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    // The port writes the config and then cannot open the connection.
     var port: core.accounts_port.Memory = .{ .fail = true, .save_problem = "the key file is not readable" };
     rig.session.deps.accounts_file = port.accounts();
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
@@ -5870,8 +5473,6 @@ test "a saved account that cannot be opened says so, and keeps the form" {
     form.setup.password.append_codepoint('s');
     rig.session.save_settings(form);
 
-    // The reason the port gave is the one on the card: "fix the reason above"
-    // with nothing above was a dead end.
     try testing.expectEqualStrings("the key file is not readable", form.setup.problem.slice());
     try testing.expect(rig.session.settings != null);
 }
@@ -5896,7 +5497,6 @@ test "an account signed in with OAuth opens its form already on that path" {
 test "the scope remembers a label no account has any more, as all accounts" {
     var rig: Rig = .{};
     var scope: core.scope_port.Memory = .{};
-    // A label from a config that has changed since: the account is gone.
     try scope.scope().save("gone");
 
     var sources = [_]MailSource{undefined};
@@ -5914,7 +5514,6 @@ test "the scope remembers a label no account has any more, as all accounts" {
     });
     defer rig.session.deinit();
 
-    // Every account, and the stale label forgotten.
     try testing.expect(rig.session.state.account_filter == null);
     try testing.expectEqual(@as(u32, 2), scope.save_calls);
     try testing.expect(scope.remembered.is_empty());
@@ -5935,7 +5534,6 @@ test "the form's rare rows are typed into, toggled, cleared, and saved from" {
     form.setup.imap_port.set("993");
     form.setup.username.set("me");
 
-    // Space opens the advanced rows; the client id is below them.
     form.field = .advanced;
     rig.send(" ");
     try testing.expect(form.setup.show_advanced);
@@ -5945,18 +5543,15 @@ test "the form's rare rows are typed into, toggled, cleared, and saved from" {
     rig.send("b");
     try testing.expectEqualStrings("ab", form.setup.oauth_client_id.slice());
 
-    // Backspace takes the last one back, and Ctrl+U clears the row.
     rig.send("\x7f");
     try testing.expectEqualStrings("a", form.setup.oauth_client_id.slice());
     rig.send("\x15");
     try testing.expect(form.setup.oauth_client_id.is_empty());
 
-    // Enter on the client id saves, which is what the row is for.
     for ("client-1") |byte| rig.send(&.{byte});
     rig.send("\r");
     try testing.expectEqual(@as(u32, 1), port.saved);
 
-    // Space on the sign-in row switches to OAuth, and Enter switches back.
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = null } }});
     const again = &rig.session.settings.?;
     again.field = .sign_in;
@@ -5972,13 +5567,11 @@ test "a click on text that is not a link opens nothing" {
     var sink: LinkSink = .{};
     try rig.start_with_links(&sink);
 
-    // Words, no address in them.
     try rig.open_reader("Content-Type: text/plain\n\njust words here");
 
     var out: [core.limits.url_max]u8 = undefined;
     try testing.expect(rig.session.target_at(2, &out) == null);
 
-    // And the same for the HTML view, where the anchors live.
     try rig.open_reader("Content-Type: text/html\n\n<p>just words here</p>");
     try testing.expect(rig.session.target_at(2, &out) == null);
 }
@@ -5992,12 +5585,8 @@ test "a refresh that would have to open the connection does it here, not in a wo
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
-    // Whatever boot started.
     rig.session.settle_refresh_for_test();
 
-    // The port says the connection was never opened. A worker that opened it
-    // would build the TLS stream on a thread that does not own the transport, and
-    // the process dies there.
     var vtable = rig.fake_mail.mail().vtable.*;
     vtable.connected = neverConnected;
     rig.session.sources[0].mail = .{ .context = &rig.fake_mail, .vtable = &vtable };
@@ -6005,8 +5594,6 @@ test "a refresh that would have to open the connection does it here, not in a wo
     const before = rig.fake_mail.fetch_calls;
     rig.session.start_refresh();
 
-    // The fetch happened on this thread: nothing is running, and the messages are
-    // here.
     try testing.expect(!rig.session.refreshing);
     try testing.expectEqual(before + 1, rig.fake_mail.fetch_calls);
     try testing.expect(rig.session.state.row_count() > 0);
@@ -6020,8 +5607,6 @@ test "the terminal's bar goes up while loading, stays, and comes down after" {
     rig.session.settle_refresh_for_test();
     rig.session.state.booting = false;
 
-    // The process boundary enables this; a terminal that cannot take the escape
-    // never sees a byte of it (the test above in progress.zig holds that end).
     progress_mod.enable(true);
     defer progress_mod.enable(false);
 
@@ -6031,21 +5616,17 @@ test "the terminal's bar goes up while loading, stays, and comes down after" {
     _ = rig.session.step();
     try testing.expectEqualStrings("\x1b]9;4;3;0\x1b\\", rig.fake_system.output_text());
 
-    // Sixty ticks a second: the bar is not re-sent on every one of them.
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
     try testing.expectEqualStrings("", rig.fake_system.output_text());
 
-    // The work ended, but a bar that lived for a blink is a glitch: inside the
-    // window it stays up.
     rig.session.state.loading = false;
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
     try testing.expectEqualStrings("", rig.fake_system.output_text());
 
-    // Once the window has passed, the next tick takes it down.
     rig.session.progress_since_ms = os.monotonic_ms() - Session.progress_visible_ms - 1;
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
@@ -6068,15 +5649,12 @@ test "the splash counts as loading, and so does a refresh" {
     _ = rig.session.step();
     rig.session.settle_refresh_for_test();
 
-    // The first screen: the terminal shows the same "working" the wordmark does.
     rig.session.state.booting = true;
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;3;0") != null);
 
-    // A refresh in the background is work too, even with nothing booting: the bar
-    // is already up, so it stays up and is not re-sent.
     rig.session.state.booting = false;
     rig.fake_system.output_len = 0;
     rig.session.start_refresh();
@@ -6084,14 +5662,11 @@ test "the splash counts as loading, and so does a refresh" {
     _ = rig.session.step();
     try testing.expectEqual(core.progress.State.indeterminate, progress_mod.state());
 
-    // And it comes down when the refresh does, once it has been up long enough
-    // to be seen.
     rig.session.settle_refresh_for_test();
     rig.session.progress_since_ms = os.monotonic_ms() - Session.progress_visible_ms - 1;
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
-    // The frame and the clear come out of the same tick.
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;0;0\x1b\\") != null);
     try testing.expectEqual(core.progress.State.clear, progress_mod.state());
 }
@@ -6111,11 +5686,9 @@ test "a wait raises the bar, keeps it for a moment, and takes it down" {
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
-    // Up, and already moving: the number comes from the module's own thread.
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;3;0") != null);
     try testing.expectEqual(core.progress.State.indeterminate, progress_mod.state());
 
-    // Work that took a blink still shows for the window, then goes.
     rig.session.state.loading = false;
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
@@ -6140,8 +5713,6 @@ test "during the splash the only key that does anything is the one that leaves" 
     _ = rig.session.step();
     try testing.expect(rig.session.state.booting);
 
-    // Nothing the interface offers is available yet: no search, no movement, no
-    // compose, no mailbox switch, no mouse. The list is not there to act on.
     rig.send("/");
     try testing.expectEqual(core.state.Mode.normal, rig.session.state.mode);
     rig.send("j");
@@ -6173,7 +5744,6 @@ test "during the splash Ctrl+C still quits, and it is the only way out" {
 test "the splash breathes until the inbox is here, and then it is gone" {
     var rig: Rig = .{};
     try rig.seed();
-    // Two accounts, so the boot takes two ticks and the splash has to survive one.
     var sources = [_]MailSource{
         .{ .id = core.id.AccountId.from_int(1), .label = "one", .mail = rig.fake_mail.mail() },
         .{ .id = core.id.AccountId.from_int(2), .label = "two", .mail = rig.fake_mail.mail() },
@@ -6182,8 +5752,6 @@ test "the splash breathes until the inbox is here, and then it is gone" {
     defer rig.deinit();
 
     try testing.expectEqual(@as(u8, 2), rig.session.source_count);
-    // The first screen is up and the network has not been touched: nothing loads
-    // inside `boot` any more, so the mark can breathe while it does.
     rig.session.needs_boot = true;
     rig.session.boot();
     rig.session.splash_on();
@@ -6192,27 +5760,20 @@ test "the splash breathes until the inbox is here, and then it is gone" {
     const mark_before = rig.session.state.spinner;
     const mail_before = rig.session.store.len;
 
-    // The first ticks are for the breathing: nothing is read yet, or the mark would
-    // sit still for as long as the server takes.
     var warm: u16 = 0;
     while (warm < Session.boot_warmup) : (warm += 1) {
         _ = rig.session.step();
-        // Up, and moving: the mark is animating before the server has been asked
-        // for anything.
         try testing.expect(rig.session.state.booting);
         try testing.expect(rig.session.state.spinner > mark_before + warm);
     }
     _ = mail_before;
     try testing.expect(rig.session.state.spinner > mark_before);
 
-    // Then one account per tick.
     _ = rig.session.step();
     try testing.expect(rig.session.state.booting);
     _ = rig.session.step();
     try testing.expect(rig.session.state.booting);
 
-    // The inbox is here, and the mark still finishes its breath: a fade nobody
-    // sees is not a fade. Then the splash goes, on the tick the minimum is met.
     try testing.expect(rig.session.store.len > 0);
     var ticks: u16 = Session.boot_warmup + 2;
     while (rig.session.state.booting and ticks < 64) : (ticks += 1) {
@@ -6237,8 +5798,6 @@ test "the picture worker and the body worker never run at once" {
     rig.session.deps.fetch_image_context = &fetch_sink;
     rig.session.deps.draw_image = ImageSink.draw;
 
-    // A body is in the air: the picture worker waits its turn instead of opening a
-    // second connection with the same IO handle underneath it.
     rig.fake_system.push_input("\r");
     _ = rig.session.step();
     try testing.expect(rig.session.body_in_flight);
@@ -6262,7 +5821,6 @@ test "clicking a link works with the mark in front of it" {
     const start: u16 = @intCast(std.mem.indexOf(u8, line, "https://").?);
     const mark: u16 = @intCast(screen_mod.text_columns(render_mod.link_mark));
 
-    // The first letter of the link: gutter, the text before it, the mark.
     const on_words = rig.session.cell_offset(lay, .{
         .x = 1 + start + mark,
         .y = row,
@@ -6274,7 +5832,6 @@ test "clicking a link works with the mark in front of it" {
         on_words,
     );
 
-    // And the mark itself opens the link too.
     const on_mark = rig.session.cell_offset(lay, .{
         .x = 1 + start,
         .y = row,

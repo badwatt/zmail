@@ -65,10 +65,6 @@ fn first_line(body: []const u8) []const u8 {
     return std.mem.trimEnd(u8, body[0..end], " \r");
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 fn fixture() MemoryMail {

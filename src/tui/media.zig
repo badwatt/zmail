@@ -52,16 +52,11 @@ pub fn png_size(bytes: []const u8) ?ImageSize {
     const width = std.mem.readInt(u32, bytes[16..20], .big);
     const height = std.mem.readInt(u32, bytes[20..24], .big);
     if (width == 0 or height == 0) return null;
-    // A terminal cell is eighteen pixels tall and nine wide: a picture that claims to be
-    // a hundred thousand pixels across is a header that lies, and the arithmetic that
-    // lays it out is not obliged to survive it.
     if (width > max_dimension or height > max_dimension) return null;
     return .{ .width = width, .height = height };
 }
 
 pub fn image_cells(size: ImageSize) ImageCells {
-    // Saturating: a PNG header is attacker-controlled bytes, and "four billion rows" is
-    // a header that lies. It must not take the reader down on its way to being ignored.
     const wanted_rows = (size.height +| (cell_height - 1)) / cell_height;
     const scale = if (wanted_rows > max_image_rows)
         @as(f64, @floatFromInt(max_image_rows)) / @as(f64, @floatFromInt(wanted_rows))
@@ -87,8 +82,6 @@ test "a PNG says how big it is, and nothing else answers" {
     try testing.expectEqual(@as(u32, 640), size.width);
     try testing.expectEqual(@as(u32, 480), size.height);
 
-    // A JPEG, a truncated header, a zero side: a terminal paints PNG, so all three
-    // are refused rather than guessed at.
     var jpeg = bytes;
     jpeg[1] = 'J';
     try testing.expect(png_size(&jpeg) == null);
@@ -103,7 +96,6 @@ test "a picture is drawn in cells, and tall ones are scaled down to fit" {
     try testing.expectEqual(@as(u16, 10), small.columns);
     try testing.expectEqual(@as(u16, 2), small.rows);
 
-    // Taller than the screen allows: it keeps its shape and loses height.
     const tall = image_cells(.{ .width = 900, .height = 3_600 });
     try testing.expect(tall.rows <= max_image_rows);
     try testing.expect(tall.columns >= 1);
@@ -113,15 +105,12 @@ test "two markers in two messages never share an id" {
     const first = image_id(core.id.AccountId.from_int(1), core.id.MessageId.from_int(7), "r0");
     const second = image_id(core.id.AccountId.from_int(1), core.id.MessageId.from_int(8), "r0");
     try testing.expect(first != second);
-    // Odd, so a terminal never reads it as an animation frame.
     try testing.expectEqual(@as(u32, 1), first & 1);
     try testing.expect(first != 0);
 }
 
 test "a marker is a local file name, not an address" {
     try testing.expect(is_local_image("logo"));
-    // "r0" is a bare name too: the caller asks `is_remote_marker` first, which is
-    // what makes the two kinds of key different.
     try testing.expect(is_remote_marker("r0"));
     try testing.expect(is_local_image("r0"));
     try testing.expect(!is_local_image("https://example.com/a.png"));
@@ -135,8 +124,6 @@ test "a marker is a local file name, not an address" {
 }
 
 test "a picture with absurd dimensions is not a picture" {
-    // A header that says four billion pixels tall is bytes that were not a picture,
-    // and the arithmetic that lays it out must not overflow on the way to saying so.
     const huge = ImageSize{ .width = 4096, .height = 0xFFFF_FFFF };
     const cells = image_cells(huge);
     try testing.expect(cells.rows <= max_image_rows);

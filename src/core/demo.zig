@@ -170,10 +170,6 @@ pub fn seed_for(mail: *MemoryMail, now_unix: i64, account_number: u8) !void {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "seed fills every demo mailbox" {

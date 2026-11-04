@@ -169,11 +169,8 @@ fn parseList(text: []const u8, scratch: []u8, scratch_len: *usize) Error!ListEnt
         }
     }
 
-    // Delimiter: NIL, a quoted string, or an atom. Unused.
     _ = try next(&tokens);
 
-    // Unescape into the caller's scratch: the response buffer is reused, so a
-    // borrowed slice would not survive the next read.
     const name = try next(&tokens);
     entry.name = switch (name) {
         .literal => |payload| payload,
@@ -199,8 +196,6 @@ fn specialUse(flag: []const u8) ?Mailbox {
 fn parseFetch(sequence: u32, text: []const u8, scratch: []u8) Error!Fetch {
     var result = Fetch{ .sequence = sequence };
     var tokens = tokenizer.Tokenizer.init(text);
-    // Unescaped envelope strings live in the caller's scratch, which outlives
-    // the response (a local buffer here would dangle once this returns).
     var string_len: usize = 0;
 
     const open = try next(&tokens);
@@ -348,7 +343,7 @@ const AddressParts = struct {
 
 fn parseAddress(tokens: *tokenizer.Tokenizer, scratch: []u8, scratch_len: *usize) Error!AddressParts {
     const name = try readNString(tokens, scratch, scratch_len);
-    _ = try readNString(tokens, scratch, scratch_len); // at-domain-list, unused
+    _ = try readNString(tokens, scratch, scratch_len);
     const mailbox = try readNString(tokens, scratch, scratch_len);
     const host = try readNString(tokens, scratch, scratch_len);
     if (try next(tokens) != .close_paren) return error.Malformed;
@@ -402,14 +397,13 @@ fn parseEnvelope(tokens: *tokenizer.Tokenizer, scratch: []u8, scratch_len: *usiz
         envelope.from_host = from.host;
     }
 
-    // sender, reply-to, to, cc, bcc.
     var index: u32 = 0;
     while (index < 5) : (index += 1) {
         _ = try parseAddressList(tokens, scratch, scratch_len);
     }
 
-    _ = try readNString(tokens, scratch, scratch_len); // in-reply-to
-    _ = try readNString(tokens, scratch, scratch_len); // message-id
+    _ = try readNString(tokens, scratch, scratch_len);
+    _ = try readNString(tokens, scratch, scratch_len);
 
     if (try next(tokens) != .close_paren) return error.Malformed;
     return envelope;
@@ -475,10 +469,6 @@ fn parseZone(text: []const u8) ?i32 {
     if (hours > 23 or minutes > 59) return null;
     return sign * (hours * 3600 + minutes * 60);
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 

@@ -87,19 +87,11 @@ pub const breath_ms: i64 = @as(i64, breath_ticks) * 90;
 /// counter each of them incremented was two clocks, which showed up as the mark
 /// jumping a quarter of a breath whenever one handed over to the other.
 pub fn breath_level_at(elapsed_ms: i64) f32 {
-    // Full on the first frame, then a long, slow breath.
-    //
-    // A plain triangle this long would move by under two per cent a frame, which is
-    // the "it looks frozen" problem again. The travel is eased instead: steep at the
-    // ends of the breath and slow through the middle, so the first step after the
-    // first frame is already visible and the whole cycle still takes its four.
     const half = breath_ms / 2;
     const phase = @mod(elapsed_ms, breath_ms);
     const travelled = if (phase <= half) phase else breath_ms - phase;
     const fraction = @as(f32, @floatFromInt(travelled)) / @as(f32, half);
     const shape = 1.0 - std.math.pow(f32, fraction, breath_ease);
-    // Never fully transparent: the breath is the mark getting quieter, not the mark
-    // leaving. Below this it is a shape that appears and disappears.
     return breath_floor + (1.0 - breath_floor) * shape;
 }
 
@@ -125,7 +117,6 @@ pub fn breath_style(theme: *const Theme, level: f32) Style {
     }
 
     switch (theme.accent.fg) {
-        // A derived theme fades towards the ground it was made for.
         .rgb => |rgb| {
             const accent = core.oklch.from_rgb(.{ .r = rgb.r, .g = rgb.g, .b = rgb.b });
             const ground_rgb: core.oklch.Rgb = theme.ground orelse core.oklch.Rgb{ .r = 0, .g = 0, .b = 0 };
@@ -138,7 +129,6 @@ pub fn breath_style(theme: *const Theme, level: f32) Style {
             const out = core.oklch.to_rgb(mixed);
             return (Style{}).with_fg(.{ .rgb = .{ .r = out.r, .g = out.g, .b = out.b } });
         },
-        // The built-in palette has no derivation: four steps of its own ramp.
         else => {
             const fixed = [_]u8{ 64, 68, 74, 80 };
             const step: usize = @intFromFloat(clamped * @as(f32, fixed.len - 1) + 0.5);
@@ -183,8 +173,6 @@ pub const MarkPlacement = struct {
 pub const mark_max_scale: u16 = 4;
 
 pub fn splash_mark(columns: u16, rows: u16) MarkPlacement {
-    // The biggest drawing that fits with air around it: the name is the first thing
-    // on screen and it should use the screen.
     const scale: u8 = if (fits(mark_max_scale, columns, rows))
         4
     else if (fits(3, columns, rows))
@@ -217,15 +205,9 @@ fn fits(scale: u8, columns: u16, rows: u16) bool {
 pub fn mark_cell(scale: u8, row: u16, column: u16) u21 {
     const source = wordmark.small[row / scale][column / scale];
     if (source == ' ') return ' ';
-    // The drawing's spine is a half block: one cell wide, the left half of it. Enlarged,
-    // half a cell is half of the cells it became -- a whole one would double the weight
-    // of every stroke and close the counters, which is how the M turns into a blob.
     if (source == spine_block) {
         if (scale == 1) return spine_block;
         const half: u16 = (@as(u16, scale) + 1) / 2;
-        // The spine's ink sits against the stroke that follows it, not against the air
-        // that precedes it: half a cell of ink butting up to the body of the letter,
-        // which is how the drawing reads at its own size.
         return if (column % scale < half) ' ' else solid_block;
     }
     return if (scale == 1) source else solid_block;
@@ -248,21 +230,14 @@ pub fn draw(
     out.clear();
     const elapsed: i64 = if (reduced_motion) 0 else elapsed_ms;
 
-    // The mark and the two lines under it are one block: place the block on the
-    // middle of the screen, not the mark alone, or the big size drags it up.
     const placement = splash_mark(out.columns, out.rows);
     const mark_rows = placement.height;
     const mark_top = placement.top;
     draw_wordmark(out, placement, elapsed, theme);
 
-    // The version, quiet, right under the mark: the one thing a first screen can
-    // honestly say about itself, and it comes from the manifest -- the release is
-    // that file, so nothing here spells a number.
     var version_buffer: [64]u8 = undefined;
     if (std.fmt.bufPrint(&version_buffer, "version: {s}", .{core.meta.version})) |text| {
         const width = screen.text_columns(text);
-        // Under the mark and against its right edge: signed under the wordmark, the
-        // way a maker's mark sits under the name and not in the middle of the page.
         const right_edge = placement.left +| placement.width;
         const x = right_edge -| width;
         _ = out.put_text(x, mark_top +| mark_rows +| 1, text, out.columns -| x, theme.border);
@@ -280,23 +255,16 @@ pub fn draw(
         var address_buffer: [core.limits.address_max]u8 = undefined;
         const address = state.accounts.items[0].address.addr_spec(&address_buffer);
         if (address.len > 0) {
-            // Under the words it belongs to, so the block has one left edge --
-            // unless it would run off the screen, where centred is the fallback.
             const width = screen.text_columns(address);
             const x = if (status.left +| width <= out.columns) status.left else (out.columns -| width) / 2;
             _ = out.put_text(x, address_row, address, out.columns -| x, theme.dim);
         }
     }
 
-    // The two corners of the last row: what is happening on the left, the way out on
-    // the right, and the middle kept clear so the row reads as a footer and not as a
-    // sentence with something appended to it.
     var right_buffer: [32]u8 = undefined;
     const corner = splash_right(out.columns, out.rows, &right_buffer);
     _ = draw_shimmer(out, corner.left, corner.row, corner.text, elapsed, theme);
 
-    // The left sentence only when it stops before the right one: the middle of the
-    // last row stays empty so the row reads as a footer.
     const line_width = screen.text_columns(status.text);
     const before_right: u16 = corner.left -| 1;
     if (status.left +| line_width <= before_right) {
@@ -350,9 +318,6 @@ pub const shimmer_soft = 1;
 pub const shimmer_dim = 0;
 
 pub fn shimmer_level(cell: u16, width: u16, elapsed_ms: i64) u8 {
-    // One way only: the band enters from the left, crosses, and leaves by the right,
-    // then starts again at the left. It spends a moment off the line at each end,
-    // which is what keeps the restart from reading as a jump.
     const span: i64 = @as(i64, width) + shimmer_width;
     const travelled: i64 = @divTrunc(elapsed_ms * @as(i64, shimmer_speed), 1000);
     const offset: i64 = @mod(travelled, span);
@@ -404,9 +369,7 @@ pub fn splash_line(rows: u16, labels: []const u8, buffer: []u8) SplashLine {
     var line: [160]u8 = undefined;
     const full = std.fmt.bufPrint(&line, "connecting to {s}", .{labels}) catch labels;
     return .{
-        // The last row: what is happening on the left, the way out on the right.
         .row = rows -| 1,
-        // One column in from the edge, like every other row of this app.
         .left = 1,
         .text = copy_into(full, buffer),
     };

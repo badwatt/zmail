@@ -78,8 +78,6 @@ pub fn main_with(context: Context, hooks: Hooks, stdout: *std.Io.Writer, stderr:
             return failure.exit;
         },
         .launch => |options| return hooks.launch(context.gpa, context.io, options) catch |err| switch (err) {
-            // A full-screen client on a pipe is a mistake, not a crash: say so
-            // once instead of printing a stack trace.
             error.NotATerminal => {
                 try stderr.print("{s}: this client needs a terminal\n", .{meta.name});
                 return 1;
@@ -92,10 +90,6 @@ pub fn main_with(context: Context, hooks: Hooks, stdout: *std.Io.Writer, stderr:
         },
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -161,7 +155,6 @@ test "main_with reports a missing terminal without a stack trace" {
     try testing.expectEqual(@as(u8, 1), code);
     try testing.expectEqualStrings(meta.name ++ ": this client needs a terminal\n", err.buffered());
 
-    // Anything else keeps propagating: this is not a catch-all.
     out = std.Io.Writer.fixed(&out_buffer);
     err = std.Io.Writer.fixed(&err_buffer);
     try testing.expectError(error.Boom, main_with(.{
@@ -187,7 +180,6 @@ test "main_with routes every outcome, including launch" {
     var out_buffer: [1024]u8 = undefined;
     var err_buffer: [256]u8 = undefined;
 
-    // No arguments means live, which is the default.
     const live_args = [_][*:0]const u8{meta.name ++ "\x00"};
     var out = std.Io.Writer.fixed(&out_buffer);
     var err = std.Io.Writer.fixed(&err_buffer);

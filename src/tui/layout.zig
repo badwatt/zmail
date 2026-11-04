@@ -71,13 +71,10 @@ pub const Layout = struct {
         layout.show_tabs = columns >= tab_start + tabs_width() + 1;
 
         layout.account_tags = account_tags;
-        // The full account label ("work", "personal") when it fits, at least
-        // two characters so accounts stay distinguishable.
         layout.account_width = if (account_tags)
             @min(@max(@as(u16, label_width), 2), @min(10, columns / 6))
         else
             0;
-        // A space after the unread dot and another after the label.
         layout.account_x = layout.dot_x + 2;
         layout.sender_x = if (account_tags) layout.account_x + layout.account_width + 1 else 3;
         layout.sender_width = @max(8, @min(24, columns / 4) - @as(u16, if (account_tags) 2 else 0));
@@ -135,10 +132,6 @@ pub fn tabs_width() u16 {
     for (Mailbox.all) |mailbox| total += tab_span(mailbox);
     return total;
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -212,7 +205,6 @@ test "account tags shift the sender column right" {
     try testing.expectEqual(@as(u16, 12), tagged.sender_x);
     try testing.expectEqual(@as(u16, 22), tagged.sender_width);
 
-    // Narrow: the label column shrinks but never disappears.
     const narrow = Layout.compute(60, 30, 8);
     try testing.expectEqual(@as(u16, 8), narrow.account_width);
     try testing.expectEqual(@as(u16, 12), narrow.sender_x);

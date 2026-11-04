@@ -65,8 +65,6 @@ pub const Theme = struct {
 
     pub fn detect(no_color: bool, background: ?oklch.Rgb) Theme {
         if (no_color) return mono();
-        // The terminal told us what it paints on: derive everything from that
-        // instead of asking a human to pick a palette that matches it.
         if (background) |ground| return from_background(ground);
         return dark();
     }
@@ -103,8 +101,6 @@ pub const Theme = struct {
                 rgb_color(tinted(accent_hue + 60, 0.05, if (on_dark) 0.80 else 0.46)),
             },
             .colored = true,
-            // What the terminal paints behind the text: the splash fades towards
-            // this, and there is nothing else to fade towards.
             .ground = background,
         };
     }
@@ -142,10 +138,6 @@ fn background_of(theme: Theme) ?oklch.Rgb {
     return rgb_of(theme.selection.bg);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "a generated theme goes light on a dark terminal and dark on a light one" {
@@ -157,7 +149,6 @@ test "a generated theme goes light on a dark terminal and dark on a light one" {
     try testing.expect(accent_dark > 0.6);
     try testing.expect(accent_light < 0.6);
 
-    // The text colour is the terminal's own: it is already tuned to its ground.
     try testing.expect(on_dark.text.eql(.{}));
     try testing.expect(on_dark.colored);
 }
@@ -177,10 +168,7 @@ test "generated colors are readable on the ground they were made for" {
         const ratio = oklch.contrast(accent, ground);
         try testing.expect(ratio >= 4.5);
 
-        // Metadata may be quieter, but not invisible.
         try testing.expect(oklch.contrast(rgb_of(theme.dim.fg).?, ground) >= 3.0);
-        // The selection is a ground of its own: the terminal's text must still
-        // read on it, so it stays near the background, not at the far end.
         const selection_ground = background_of(theme).?;
         try testing.expect(oklch.contrast(selection_ground, ground) < 3.0);
     }
@@ -196,7 +184,6 @@ test "the generated hues carry meaning: alert, star, and four accounts" {
     try testing.expect(@abs(flagged_hue - 80) < 12);
     try testing.expect(@abs(accent_hue - 285) < 12);
 
-    // Four account colours, four different hues, all at the accent's lightness.
     var seen: [4]f32 = undefined;
     const accent_lightness = oklch.from_rgb(rgb_of(theme.accent.fg).?).l;
     for (theme.account_colors, 0..) |colour, index| {

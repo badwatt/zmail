@@ -25,13 +25,10 @@ const View = @import("state.zig").View;
 pub fn apply(state: *State, store: *Store, command: Command) Effects {
     var effects: Effects = .{};
     if (command.clears_status()) state.clear_status();
-    // Typing during the countdown stops it: mail that leaves while it is still
-    // being written is not what the writer meant to send.
     if (state.compose.hold_until != 0) switch (command) {
         .compose_char, .compose_newline, .compose_backspace, .compose_clear_field, .compose_edit => state.compose.hold_until = 0,
         else => {},
     };
-    // A confirmation only survives the command that asked for it.
     if (command != .empty_trash) state.pending_empty = false;
 
     switch (command) {
@@ -101,7 +98,6 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .compose_body_set => |set| {
             if (state.view != .compose) return effects;
             state.compose.set_body(set.text);
-            // The editor put the cursor where the writing is.
             state.compose.field = .body;
         },
         .compose_edit_failed => state.set_alert("Could not run the editor; set $EDITOR", .{}),
@@ -117,7 +113,6 @@ fn cycle_account(state: *State, store: *Store) void {
     var next_index: u8 = 0;
     if (current) |filter| {
         const position = state.accounts.index_of(filter) orelse {
-            // The filter points at an account that is gone: back to unified.
             state.account_filter = null;
             state.cursor = 0;
             state.offset = 0;
@@ -225,9 +220,6 @@ fn apply_dismiss(state: *State, store: *Store) void {
             },
             .compose => cancel_compose(state),
             .accounts => state.view = .list,
-            // Nothing closes the program from the list: `q` goes back one
-            // layer, and there is no layer under the list. Ctrl+C is a signal,
-            // not a command, and it is the only way out.
             .list => {},
         },
     }
@@ -303,7 +295,6 @@ fn accounts_select(state: *State, store: *const Store) void {
         state.account_filter = null;
         state.cursor = 0;
         state.offset = 0;
-        // Rebuild: the filter is applied here, so the list changes immediately.
         state.rebuild(store);
         state.set_status("All accounts", .{});
         return;
@@ -422,7 +413,6 @@ fn empty_trash(state: *State, store: *Store, effects: *Effects) void {
     if (state.account_filter) |filter| {
         _ = store.remove_in(filter, .trash);
     } else {
-        // Whatever account a trashed message belongs to, it goes.
         var index: u32 = 0;
         while (index < store.len) {
             const message = store.at(index);
@@ -587,8 +577,6 @@ fn quote_original(state: *State, quote: Quote) void {
     var address_buffer: [limits.address_max]u8 = undefined;
     const address = quote.from.addr_spec(&address_buffer);
 
-    // A sender with no display name is written as its address alone: the
-    // attribution should read like a sentence, not like a template.
     var who_buffer: [limits.name_max + limits.address_max + 4]u8 = undefined;
     const name = quote.from.label();
     const who = if (name.len == 0)
@@ -597,8 +585,6 @@ fn quote_original(state: *State, quote: Quote) void {
         std.fmt.bufPrint(&who_buffer, "{s} <{s}>", .{ name, address }) catch name;
 
     var date_buffer: [16]u8 = undefined;
-    // Zero is what the state carries when the server never said when: an
-    // attribution reading "1 Jan 1970" would be a lie dressed as a date.
     const date = if (quote.at == 0) "" else time.full_date(&date_buffer, quote.at);
 
     var attribution: [200]u8 = undefined;
@@ -613,8 +599,6 @@ fn quote_original(state: *State, quote: Quote) void {
 fn cancel_compose(state: *State) void {
     if (state.view != .compose) return;
 
-    // `Esc` during the countdown is the escape hatch, not a discarded draft:
-    // the send stops and the writing stays where it is.
     if (state.compose.hold_until != 0) {
         state.compose.hold_until = 0;
         state.set_status("Send cancelled", .{});
@@ -693,8 +677,6 @@ fn toggle_help(state: *State) void {
 }
 
 fn apply_refresh(state: *State, effects: *Effects) void {
-    // No status line: the footer's spinner says it, in the same place as the
-    // other hints, without stealing the row.
     effects.add(.{ .refresh = .{ .account = state.account_filter, .mailbox = state.mailbox, .force = true } });
 }
 
@@ -709,14 +691,8 @@ fn apply_viewport(state: *State, viewport: Viewport) void {
 }
 
 comptime {
-    // A command may produce at most two effects today; the bound leaves room
-    // for compose/send later and keeps the list allocation-free.
     assert(limits.actions_max >= 2);
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const Text = @import("../domain/text.zig").Text;
@@ -742,7 +718,6 @@ fn sample_store() !Store {
 }
 
 fn sample_store_with(gpa: std.mem.Allocator) !Store {
-    // Nothing after `init` can allocate, so there is no cleanup path to guard.
     var store = try Store.init(gpa, 8);
 
     const messages = [_]Message{
@@ -775,7 +750,6 @@ test "the accounts overlay opens, moves, selects, and closes" {
     defer fixture.store.deinit(testing.allocator);
     fixture.state.accounts.add(AccountId.from_int(1), "home", .{}, .{});
     fixture.state.accounts.add(AccountId.from_int(2), "work", .{}, .{});
-    // One message from another account, so filtering is observable.
     var other = message_with(9, "from work", .inbox, 100);
     other.account = AccountId.from_int(2);
     try fixture.store.insert(&other);
@@ -789,7 +763,7 @@ test "the accounts overlay opens, moves, selects, and closes" {
     _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .down });
     _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .down });
     _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .down });
-    try testing.expectEqual(@as(u8, 2), fixture.state.accounts_cursor); // clamped at len
+    try testing.expectEqual(@as(u8, 2), fixture.state.accounts_cursor);
     _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .top });
     try testing.expectEqual(@as(u8, 0), fixture.state.accounts_cursor);
     _ = apply(&fixture.state, &fixture.store, .{ .accounts_move = .bottom });
@@ -801,7 +775,6 @@ test "the accounts overlay opens, moves, selects, and closes" {
     try testing.expectEqual(View.list, fixture.state.view);
     try testing.expectEqual(AccountId.from_int(1), fixture.state.account_filter.?);
     try testing.expectEqualStrings("home", fixture.state.status.slice());
-    // The list is filtered right away, without waiting for a refresh.
     try testing.expect(fixture.state.visible_len < fixture.store.len);
 
     _ = apply(&fixture.state, &fixture.store, .open_accounts);
@@ -920,7 +893,6 @@ test "delete_forever removes the message and asks the server, in Trash only" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
 
-    // Outside Trash it just explains itself.
     const refused = apply(&fixture.state, &fixture.store, .delete_forever);
     try testing.expect(refused.is_empty());
     try testing.expectEqualStrings("Only in Trash: d moves a message here first", fixture.state.status.slice());
@@ -973,14 +945,12 @@ test "empty_trash asks once, then empties the scope" {
     fixture.store.at(1).mailbox = .trash;
     fixture.state.rebuild(&fixture.store);
 
-    // First press only arms it.
     const armed = apply(&fixture.state, &fixture.store, .empty_trash);
     try testing.expect(armed.is_empty());
     try testing.expect(fixture.state.pending_empty);
     try testing.expectEqualStrings("Press E again to empty Trash", fixture.state.status.slice());
     try testing.expectEqual(@as(u32, 2), fixture.state.visible_len);
 
-    // Anything else disarms it.
     const other = apply(&fixture.state, &fixture.store, .{ .move = .down });
     try testing.expectEqual(@as(u32, 0), other.len);
     try testing.expect(!fixture.state.pending_empty);
@@ -1037,7 +1007,6 @@ test "empty_trash honours the account filter" {
         .mailbox = .trash,
     } }});
 
-    // Only account 1's trash went away.
     var index: u32 = 0;
     var survivors: u32 = 0;
     while (index < fixture.store.len) : (index += 1) {
@@ -1228,8 +1197,6 @@ test "dismiss: cancel search, close help, leave the reader; the list stays open"
     try testing.expectEqual(View.list, fixture.state.view);
     try testing.expectEqual(@as(u32, 0), fixture.state.reader_scroll);
 
-    // The list is the bottom: nothing under it, and nothing closes it. Ctrl+C
-    // is a signal, not a command, and it is the only way out.
     _ = apply(&fixture.state, &fixture.store, .dismiss);
     try testing.expect(!fixture.state.quit);
     try testing.expectEqual(View.list, fixture.state.view);
@@ -1643,7 +1610,6 @@ test "compose_quote is ignored outside a reply" {
     _ = apply(&fixture.state, &fixture.store, .{ .compose_quote = .{ .text = "hi", .at = 1_700_000_000 } });
     try testing.expectEqualStrings("", fixture.state.compose.body_slice());
 
-    // And when there is no compose window at all.
     _ = apply(&fixture.state, &fixture.store, .compose_cancel);
     _ = apply(&fixture.state, &fixture.store, .{ .compose_quote = .{ .text = "hi", .at = 1_700_000_000 } });
     try testing.expectEqualStrings("", fixture.state.compose.body_slice());
@@ -1664,7 +1630,6 @@ test "compose_edit hands the body to the editor, and takes it back sanitized" {
 
     _ = apply(&fixture.state, &fixture.store, .{ .compose_body_set = .{ .text = "from\x1bthe editor\n" } });
     try testing.expectEqualStrings("from the editor\n", fixture.state.compose.body_slice());
-    // The editor leaves the cursor where the writing went.
     try testing.expectEqual(.body, fixture.state.compose.field);
 }
 
@@ -1675,7 +1640,6 @@ test "compose_edit is refused outside the composer, and a failure says so" {
     const effects = apply(&fixture.state, &fixture.store, .compose_edit);
     try testing.expect(effects.is_empty());
 
-    // The same for the answer: a body arriving with no composer open is dropped.
     _ = apply(&fixture.state, &fixture.store, .{ .compose_body_set = .{ .text = "late" } });
     try testing.expectEqualStrings("", fixture.state.compose.body_slice());
 
@@ -1755,7 +1719,6 @@ test "a held send with a bad recipient is refused before the countdown" {
     try testing.expectEqual(@as(i64, 0), fixture.state.compose.hold_until);
     try testing.expect(fixture.state.status_alert);
 
-    // And with no composer open there is nothing to hold.
     _ = apply(&fixture.state, &fixture.store, .compose_cancel);
     _ = apply(&fixture.state, &fixture.store, .{ .compose_send_held = .{ .now_unix = 1_700_000_000 } });
     try testing.expectEqual(@as(i64, 0), fixture.state.compose.hold_until);
@@ -1778,9 +1741,7 @@ test "compose_reply prefills the recipient and subject" {
     _ = apply(&fixture.state, &fixture.store, .compose_reply);
     try testing.expectEqual(View.compose, fixture.state.view);
     try testing.expectEqual(.body, fixture.state.compose.field);
-    // The fixture's first message has no sender, so the address is just "@".
     try testing.expectEqualStrings("@", fixture.state.compose.to.slice());
-    // The subject still gets the Re: prefix.
     try testing.expectEqualStrings("Re: Invoice for October", fixture.state.compose.subject.slice());
     try testing.expectEqual(MessageId.from_int(1), fixture.state.compose.in_reply_to);
 }

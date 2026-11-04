@@ -88,8 +88,6 @@ pub const Client = struct {
     }
 
     pub fn login(self: *Client, user: []const u8, password: []const u8) Error!void {
-        // The server speaks first. Sending LOGIN before reading the greeting is
-        // a protocol violation, and servers react by ignoring the command.
         try self.await_greeting();
         if (self.greeted == .preauth) return;
 
@@ -194,8 +192,6 @@ pub const Client = struct {
     pub fn fetch_body(self: *Client, uid: u32, out: []u8) Error![]const u8 {
         var tag_buffer: [16]u8 = undefined;
         const tag = self.beginCommand(&tag_buffer);
-        // Ask for exactly what fits: a partial fetch keeps a 4 MiB message from
-        // being a message nobody can open.
         const limit = std.math.cast(u32, out.len) orelse std.math.maxInt(u32);
         const bytes = command.fetch_body(self.command_slice(), tag, uid, limit) catch
             return error.ProtocolError;
@@ -307,7 +303,6 @@ pub const Client = struct {
         tag = self.beginCommand(&tag_buffer);
         try self.send(command.expunge_uid(self.command_slice(), tag, uid) catch return error.ProtocolError);
         self.wait_ok(tag) catch |err| switch (err) {
-            // Servers without UIDPLUS reject the UID form; plain EXPUNGE works.
             error.Rejected => {
                 tag = self.beginCommand(&tag_buffer);
                 try self.send(command.expunge(self.command_slice(), tag) catch return error.ProtocolError);
@@ -392,7 +387,6 @@ pub const Client = struct {
 
     fn beginCommand(self: *Client, tag_buffer: *[16]u8) []const u8 {
         self.tag_counter += 1;
-        // "a" plus the decimal form of any u32 fits with room to spare.
         comptime std.debug.assert(@sizeOf(@TypeOf(self.tag_counter)) * 3 + 1 <= tag_buffer.len);
         return std.fmt.bufPrint(tag_buffer, "a{d}", .{self.tag_counter}) catch unreachable;
     }
@@ -461,8 +455,6 @@ fn message_from(fetch: *const response.Fetch, mailbox: Mailbox) Message {
         .flags = fetch.flags orelse .{},
     };
     if (fetch.envelope) |envelope| {
-        // Subjects and names travel as RFC 2047 encoded words; decode them at
-        // the protocol boundary so nothing above ever sees "=?utf-8?Q?...".
         var name_buffer: [limits.name_max * 4]u8 = undefined;
         var name_display: [limits.name_max * 4]u8 = undefined;
         var subject_buffer: [limits.subject_max * 4]u8 = undefined;
@@ -482,10 +474,6 @@ fn message_from(fetch: *const response.Fetch, mailbox: Mailbox) Message {
     }
     return message;
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const Scripted = transport_mod.Scripted;
@@ -588,10 +576,6 @@ test "fetch_envelopes truncates to the output and skips entries without a UID" {
 }
 
 test "escaped envelope strings survive the message builder" {
-    // The subject is quoted and escaped, so it lives in the parse scratch. The
-    // builder allocates large buffers of its own; before the scratch was
-    // client-owned, those overwrote the dead frame and the subject came out as
-    // garbage.
     var scripted: Scripted = .{ .input = "* OK ready\r\n" ++
         "a1 OK LOGIN completed\r\n" ++
         "* 1 EXISTS\r\n" ++
@@ -656,8 +640,6 @@ test "fetch_body copies the literal into the caller's buffer" {
     var body: [64]u8 = undefined;
     const text = try client.fetch_body(7, &body);
     try testing.expectEqualStrings("hello world", text);
-    // Exactly what the caller can hold: a message with a scanned certificate
-    // is a megabyte, and its text is at the front.
     try testing.expectEqualStrings("a1 UID FETCH 7 (BODY.PEEK[]<0.64>)\r\n", scripted.output_text());
 }
 
@@ -730,7 +712,6 @@ test "responses for another tag are ignored, continuations are skipped" {
 }
 
 test "a response larger than the framer is refused" {
-    // Larger than the framer holds, whatever the limit happens to be.
     const big = try testing.allocator.alloc(u8, @as(usize, framing.max_response) + 64);
     defer testing.allocator.free(big);
     @memset(big, 'x');
@@ -748,7 +729,7 @@ test "login_token sends AUTHENTICATE XOAUTH2 and accepts OK" {
 
     const output = scripted.output_text();
     try testing.expect(std.mem.indexOf(u8, output, "AUTHENTICATE XOAUTH2 ") != null);
-    try testing.expect(std.mem.indexOf(u8, output, "me@example.com") == null); // base64
+    try testing.expect(std.mem.indexOf(u8, output, "me@example.com") == null);
 }
 
 test "a rejected token is LoginFailed" {

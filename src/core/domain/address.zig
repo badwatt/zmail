@@ -145,8 +145,6 @@ fn is_atext(byte: u8) bool {
 
 fn valid_domain(domain: []const u8) bool {
     assert(domain.len > 0);
-    // Require a dot: catches "user@localhost" typos while still allowing any
-    // private server (mail.example.lan, mail.example.org, ...).
     if (std.mem.indexOfScalar(u8, domain, '.') == null) return false;
 
     var labels = std.mem.splitScalar(u8, domain, '.');
@@ -161,14 +159,8 @@ fn valid_domain(domain: []const u8) bool {
             return false;
         }
     }
-    // A trailing dot produces a final empty label, already rejected above, so
-    // reaching here means two or more labels.
     return true;
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -322,8 +314,6 @@ test "Address: rejects parts longer than their RFC limits" {
 }
 
 test "Address: rejects a total address longer than RFC 5321" {
-    // Each part is within its own limit: 64-byte local, 190-byte domain
-    // (63 + 1 + 63 + 1 + 62). Together they exceed the 254-byte addr-spec cap.
     const local: [64]u8 = @splat('a');
     const label: [63]u8 = @splat('b');
     var domain_buffer: [300]u8 = undefined;

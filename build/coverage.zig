@@ -89,7 +89,6 @@ pub fn parse_report(gpa: std.mem.Allocator, json: []const u8) !Report {
         const file_covered = try count_value(entry.get("covered_lines") orelse return error.MalformedReport);
         const file_total = try count_value(entry.get("total_lines") orelse return error.MalformedReport);
         if (file_covered > file_total) return error.MalformedReport;
-        // The JSON tree owns `path`; dupe it so the report outlives the parse.
         files[index] = .{ .path = try gpa.dupe(u8, path), .covered = file_covered, .total = file_total };
         initialized += 1;
         covered += file_covered;

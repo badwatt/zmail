@@ -96,8 +96,6 @@ extern "c" fn openpty(
 ) c_int;
 
 fn open_pty() !struct { master: c_int, slave: c_int } {
-    // macOS: `openpty` grants and unlocks, and gives the terminal a size in the same
-    // call -- a slave created by hand is not a terminal there.
     if (@import("builtin").os.tag == .macos) {
         var master: c_int = -1;
         var slave: c_int = -1;
@@ -111,9 +109,6 @@ fn open_pty() !struct { master: c_int, slave: c_int } {
         return .{ .master = master, .slave = slave };
     }
 
-    // O_RDWR | O_NOCTTY | O_NONBLOCK: the master is read after the child is
-    // gone, and with the slave still open in this process there is no end of
-    // file to wait for -- a blocking read there waits forever.
     const master = pty.posix_openpt(0o2 | 0o400 | 0o4000);
     if (master < 0) return error.SkipZigTest;
     if (pty.grantpt(master) != 0) return error.SkipZigTest;
@@ -144,15 +139,11 @@ const Watchdog = struct {
     }
 
     fn run(self: *Watchdog) void {
-        // Sliced, so disarming joins immediately instead of waiting the whole
-        // grace period out.
         var waited: u32 = 0;
         while (waited < 10_000) : (waited += 50) {
             if (self.done.load(.acquire)) return;
             sleep_ms(50);
         }
-        // SIGKILL, not SIGINT: this is the watchdog, and the point is that the
-        // process ends whether or not it is listening.
         std.posix.kill(self.pid, std.posix.SIG.KILL) catch {};
     }
 
@@ -178,9 +169,6 @@ const Drainer = struct {
         var buffer: [4096]u8 = undefined;
         var fds = [1]std.posix.pollfd{.{ .fd = self.master, .events = std.posix.POLL.IN, .revents = 0 }};
         while (self.running.load(.acquire)) {
-            // The master is blocking (a pty opened by `openpty` has no O_NONBLOCK),
-            // so the read is asked for only when there is something to read -- or the
-            // thread would sleep in `read` and `join` would never return.
             const ready = std.posix.poll(&fds, 20) catch 0;
             if (ready == 0) continue;
             const count = std.posix.read(self.master, &buffer) catch 0;
@@ -218,8 +206,6 @@ fn wait_bounded(
     watchdog.arm(child.id orelse return error.TestUnexpectedResult);
     defer watchdog.disarm();
     const term = try child.wait(io);
-    // What the session was showing when it should have been leaving: a failure
-    // here is about the child, and this is the only way to see inside it.
     switch (term) {
         .exited => |code| if (code == 130) return term,
         else => {},
@@ -245,8 +231,6 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
         .stderr = .{ .file = slave_file },
     });
 
-    // Read until the first frame arrives, instead of sleeping: deterministic
-    // and fast. Writes can be split by the terminal, so accumulate.
     var fds = [1]std.posix.pollfd{
         .{ .fd = terminal.master, .events = std.posix.POLL.IN, .revents = 0 },
     };
@@ -269,8 +253,6 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
     try testing.expect(std.mem.indexOf(u8, frame[0..total], meta.name) != null);
     try testing.expect(std.mem.indexOf(u8, frame[0..total], "Inbox") != null);
 
-    // Ctrl+C is a signal, not a key: it reaches the process even while a socket
-    // is being read, restores the terminal, and leaves with 130.
     try std.posix.kill(child.id.?, std.posix.SIG.INT);
     var drain_buffer: [64 * 1024]u8 = undefined;
     var drained: usize = 0;
@@ -278,7 +260,6 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
         std.process.Child.Term{ .exited = 130 },
         try wait_bounded(io, &child, terminal.master, &drain_buffer, &drained),
     );
-    // The rest of the session, as the terminal saw it.
     var row_buffer: []const u8 = drain_buffer[0..drained];
     try testing.expect(std.mem.indexOf(u8, row_buffer, "\x1b[?1049l") != null or
         std.mem.indexOf(u8, frame[0..total], "\x1b[?1049l") != null);
@@ -290,9 +271,6 @@ test "a live session with a dead server still quits cleanly" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    // A config with one account whose server refuses the connection: the list
-    // comes up with a failure on the status line, and quitting must give the
-    // terminal back instead of aborting somewhere in teardown.
     const config_path = "/tmp/zmail-e2e-live.conf";
     const config_text =
         "address = alice@example.com\n" ++
@@ -325,8 +303,6 @@ test "a live session with a dead server still quits cleanly" {
     var frame: [65536]u8 = undefined;
     var total: usize = 0;
     var attempts: u32 = 0;
-    // The list, after the failed connection: the point at which the old code
-    // read an uninitialised outbox on the way out.
     while (attempts < 60 and total < frame.len) : (attempts += 1) {
         const ready = try std.posix.poll(&fds, 200);
         if (ready == 0) continue;
@@ -340,7 +316,6 @@ test "a live session with a dead server still quits cleanly" {
         return error.TestExpectedFrame;
     }
 
-    // A dead server is reported, and Ctrl+C still gets out of it.
     try std.posix.kill(child.id.?, std.posix.SIG.INT);
     var drain_buffer: [64 * 1024]u8 = undefined;
     var drained: usize = 0;

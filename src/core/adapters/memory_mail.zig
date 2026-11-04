@@ -29,7 +29,6 @@ pub const MemoryMail = struct {
     pub fn seed(self: *MemoryMail, message: *const Message) SeedError!void {
         assert(message.id.is_known());
         if (self.len == capacity) return error.Full;
-        // Keep the fake server ordered newest-first, like a real fetch.
         var position: u32 = self.len;
         while (position > 0) : (position -= 1) {
             if (self.messages[position - 1].timestamp_unix >= message.timestamp_unix) break;
@@ -136,7 +135,6 @@ pub const MemoryMail = struct {
 /// Builds a plausible plain-text body from the envelope. The demo has no real
 /// messages, and this keeps 64 kilobytes times 64 messages out of the binary.
 pub fn render_body(message: *const Message, out: []u8) []const u8 {
-    // The first message is a real MIME message with an HTML part.
     if (message.id.to_int() == 1) {
         const length = @min(html_message.len, out.len);
         @memcpy(out[0..length], html_message[0..length]);
@@ -199,12 +197,8 @@ const html_message =
     "<p>The plain-text part of this message is what the reader shows by default, " ++
     "so pressing H reads the HTML version instead: headings, lists and links, " ++
     "all in the terminal.</p>" ++
-    // A picture the mail points at, for the reader's `i`: nothing is fetched until
-    // the reader asks for pictures, and `o` opens the mail where they always load.
     "<p><img src=\"https://account.brave.com/images/email/brave-white-288x96.png\" " ++
     "alt=\"a logo\"></p>" ++
-    // One more picture the reader cannot paint, to say what a format it cannot draw
-    // looks like: `i` reports it instead of leaving a marker with nothing under it.
     "<p><img src=\"https://github.com/favicon.ico\" alt=\"an icon\"></p>" ++
     "<p>Nothing in this demo leaves the machine: the mail lives in memory and " ++
     "the rendering happens from that copy.</p>\n" ++
@@ -229,10 +223,6 @@ fn template(id: MessageId) []const u8 {
     const index: usize = @intCast(id.to_int() % templates.len);
     return templates[index];
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const core_mime = @import("../mime.zig");
@@ -331,7 +321,6 @@ test "MemoryMail: fetch_body reports an unknown id" {
 test "MemoryMail: fetch_body is scoped to a mailbox" {
     var mail = try seeded();
     var out: [64]u8 = undefined;
-    // UIDs are per mailbox: the right id in the wrong mailbox is not found.
     try testing.expectError(error.NotFound, mail.mail().fetch_body(.sent, MessageId.from_int(1), &out));
 }
 

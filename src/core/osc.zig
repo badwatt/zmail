@@ -28,8 +28,6 @@ pub fn parse_background(bytes: []const u8) ?Rgb {
     var parts = std.mem.splitScalar(u8, rest, '/');
     while (parts.next()) |part| {
         if (index == channels.len) return null;
-        // A trailing bit such as `rgb:1a1a/1b1b/2525 ` with spaces is still a
-        // colour: trailing blanks are common and harmless.
         const trimmed = std.mem.trim(u8, part, " ");
         if (trimmed.len == 0 or trimmed.len > 4) return null;
         const value = std.fmt.parseInt(u16, trimmed, 16) catch return null;
@@ -58,10 +56,6 @@ pub fn background_query() []const u8 {
     return "\x1b]11;?\x1b\\";
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "osc: the xterm form, 16 bits per channel" {
@@ -89,12 +83,12 @@ test "osc: a reply that arrives behind other output is still found" {
 
 test "osc: anything that is not a whole reply is refused" {
     try testing.expect(parse_background("") == null);
-    try testing.expect(parse_background("\x1b]11;rgb:1a1a/1b1b/2525") == null); // no terminator
-    try testing.expect(parse_background("\x1b]11;rgb:1a1a/1b1b\x1b\\") == null); // two channels
+    try testing.expect(parse_background("\x1b]11;rgb:1a1a/1b1b/2525") == null);
+    try testing.expect(parse_background("\x1b]11;rgb:1a1a/1b1b\x1b\\") == null);
     try testing.expect(parse_background("\x1b]11;rgb:1a1a/1b1b/2525/9999\x1b\\") == null);
     try testing.expect(parse_background("\x1b]11;rgb:zz/1b1b/2525\x1b\\") == null);
     try testing.expect(parse_background("\x1b]11;rgb:123456/1b1b/2525\x1b\\") == null);
-    try testing.expect(parse_background("\x1b]10;rgb:1a1a/1b1b/2525\x1b\\") == null); // foreground, not background
+    try testing.expect(parse_background("\x1b]10;rgb:1a1a/1b1b/2525\x1b\\") == null);
 }
 
 test "osc: the query is the standard one" {

@@ -68,11 +68,9 @@ pub const Setup = struct {
     /// Rows the form shows. The password is meaningless with OAuth, and the
     /// client id is too rare to be on screen by default.
     pub fn field_visible(self: *const Setup, index: u8) bool {
-        // Order: address, hosts, sign in, password, advanced, then the rare
-        // rows (username, OAuth client id) below the fold.
         return switch (index) {
-            6 => !self.oauth, // password, when signing in with one
-            8, 9 => self.show_advanced, // username, OAuth client id
+            6 => !self.oauth,
+            8, 9 => self.show_advanced,
             else => true,
         };
     }
@@ -145,7 +143,6 @@ pub const Setup = struct {
             .address, .imap_host, .imap_port, .smtp_host, .smtp_port, .username => {},
             .password, .review => return,
         }
-        // Copy through a scratch buffer: Text.set cannot take an aliased slice.
         var buffer: [limits.address_max]u8 = undefined;
         switch (self.step) {
             .address => self.address.set(trim_copy(self.address.slice(), &buffer)),
@@ -209,13 +206,10 @@ pub const Setup = struct {
                 self.step = .username;
             },
             .username => {
-                // Empty means "the same as the address", which is what nearly
-                // every provider expects. No reason to type it twice.
                 if (self.username.is_empty()) self.username.set(self.address.slice());
                 self.step = .password;
             },
             .password => {
-                // An OAuth account has no password: the token comes later.
                 if (self.password.is_empty() and !self.oauth) {
                     self.problem.set("Enter the password for the account");
                     return;
@@ -308,7 +302,6 @@ pub const Setup = struct {
             self.imap_port.slice(),
         }) catch return "";
 
-        // Only when there is one: an empty value is not a valid config line.
         if (self.oauth and !self.oauth_client_id.is_empty()) {
             writer.print("oauth_client_id = {s}\n", .{self.oauth_client_id.slice()}) catch return "";
         }
@@ -375,25 +368,21 @@ fn config_problem(err: anyerror) []const u8 {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 const TestSetup = Setup;
 
 fn fill_valid(setup: *Setup) void {
     setup.address.set("alice@example.com");
-    setup.next(); // defaults from the address
-    setup.next(); // imap host
-    setup.next(); // imap port
-    setup.next(); // smtp host
-    setup.next(); // smtp port
-    setup.next(); // username
+    setup.next();
+    setup.next();
+    setup.next();
+    setup.next();
+    setup.next();
+    setup.next();
     setup.append('s');
     setup.append('e');
     setup.append('c');
-    setup.next(); // password
+    setup.next();
 }
 
 test "a full run produces the config text and reaches review" {
@@ -417,7 +406,7 @@ test "a full run produces the config text and reaches review" {
     try testing.expect(std.mem.indexOf(u8, text, "smtp_host = smtp.example.com") != null);
     try testing.expect(std.mem.indexOf(u8, text, "password") == null);
 
-    setup.next(); // review: commit
+    setup.next();
     try testing.expect(setup.done);
     try testing.expect(!setup.cancelled);
 }
@@ -427,10 +416,10 @@ test "skipping the SMTP host omits the SMTP block and the port step" {
     defer setup.deinit();
     setup.address.set("alice@example.com");
     setup.next();
-    setup.next(); // imap host
-    setup.next(); // imap port
+    setup.next();
+    setup.next();
     setup.smtp_host.clear();
-    setup.next(); // smtp host empty: skip sending
+    setup.next();
     try testing.expect(!setup.send_enabled);
     try testing.expectEqual(Step.username, setup.step);
 
@@ -447,7 +436,6 @@ test "the username is derived when it is not given" {
     setup.imap_host.set("imap.example.com");
     setup.imap_port.set("993");
 
-    // Hidden by default, because the address is what providers expect.
     try testing.expect(!setup.field_visible(8));
     try testing.expectEqualStrings("alice@example.com", setup.username_or_address());
 
@@ -455,7 +443,6 @@ test "the username is derived when it is not given" {
     const text = setup.config_text(&buffer);
     try testing.expect(std.mem.indexOf(u8, text, "username = alice@example.com") != null);
 
-    // Asked for, it wins.
     setup.toggle_advanced();
     try testing.expect(setup.field_visible(8));
     setup.username.set("alice");
@@ -465,16 +452,14 @@ test "the username is derived when it is not given" {
 test "advanced rows fold away until asked for" {
     var setup = Setup.init();
     defer setup.deinit();
-    // address, hosts, sign in, password, advanced ... then the fold.
-    try testing.expect(setup.field_visible(7)); // advanced itself
-    try testing.expect(!setup.field_visible(8)); // username
-    try testing.expect(!setup.field_visible(9)); // client id
+    try testing.expect(setup.field_visible(7));
+    try testing.expect(!setup.field_visible(8));
+    try testing.expect(!setup.field_visible(9));
     setup.toggle_advanced();
     try testing.expect(setup.field_visible(8));
     try testing.expect(setup.field_visible(9));
     setup.toggle_advanced();
     try testing.expect(!setup.field_visible(9));
-    // The password row disappears with OAuth, and it sits after Sign in.
     try testing.expect(setup.field_visible(6));
     setup.set_oauth(true);
     try testing.expect(!setup.field_visible(6));
@@ -484,13 +469,13 @@ test "an empty username becomes the address, and OAuth needs no password" {
     var setup = Setup.init();
     defer setup.deinit();
     setup.address.set("alice@example.com");
-    setup.next(); // imap_host
-    setup.next(); // imap_port
-    setup.next(); // smtp_host
-    setup.next(); // smtp_port
-    setup.next(); // username
+    setup.next();
+    setup.next();
+    setup.next();
+    setup.next();
+    setup.next();
     setup.username.clear();
-    setup.next(); // username -> password, with the address filled in
+    setup.next();
     try testing.expectEqualStrings("alice@example.com", setup.username.slice());
     try testing.expectEqual(.password, setup.step);
 
@@ -530,24 +515,22 @@ test "each step validates before advancing" {
 
     setup.imap_port.set("993");
     setup.next();
-    setup.next(); // smtp host
+    setup.next();
     setup.smtp_port.set("nope");
     setup.next();
     try testing.expectEqual(Step.smtp_port, setup.step);
 
     setup.smtp_port.set("465");
     setup.next();
-    // An empty username is not an error any more: it becomes the address.
     setup.username.clear();
     setup.next();
     try testing.expectEqual(Step.password, setup.step);
     try testing.expectEqualStrings("alice@example.com", setup.username.slice());
 
-    setup.next(); // empty password, password mode
+    setup.next();
     try testing.expectEqual(Step.password, setup.step);
     try testing.expect(!setup.problem.is_empty());
 
-    // In OAuth mode there is nothing to type.
     setup.set_oauth(true);
     setup.next();
     try testing.expectEqual(Step.review, setup.step);
@@ -626,7 +609,6 @@ test "the review step re-parses the generated config" {
     defer setup.deinit();
     fill_valid(&setup);
 
-    // Break a value after the per-step checks would have passed.
     setup.imap_port.set("99999");
     setup.next();
     try testing.expect(!setup.done);

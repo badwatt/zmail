@@ -107,8 +107,6 @@ pub fn parse(input: []const u8, out: *Structure) Error!void {
                 try nameChild(if (depth == 0) null else &stack[depth - 1], &frame);
 
                 if (try peek(&tokens) == .open_paren) {
-                    // A multipart: no words of its own. The root has no number,
-                    // so its children are "1", "2" and not "1.1", "1.2".
                     if (depth == 0) frame.id_len = 0;
                 } else {
                     const media = try value(&tokens);
@@ -131,8 +129,6 @@ pub fn parse(input: []const u8, out: *Structure) Error!void {
                     top.children_done = true;
                     continue;
                 }
-                // `("APPLICATION" "PDF" ... ("attachment" ("filename" "x.pdf")))`
-                // The disposition arrives quoted as often as bare.
                 const text = switch (token) {
                     .atom => |text| text,
                     .quoted => |text| text,
@@ -160,7 +156,6 @@ fn nameChild(parent: ?*Frame, frame: *Frame) Error!void {
     if (of.next_child == max_parts) return error.TooManyParts;
     of.next_child += 1;
 
-    // The prefix is the parent's number, bytes and all.
     @memcpy(frame.id[0..of.id_len], of.id[0..of.id_len]);
     frame.id_len = of.id_len;
     if (of.id_len > 0) {
@@ -241,7 +236,6 @@ test "the text of a mixed message is inside the alternative, not next to it" {
         \\("APPLICATION" "PDF" ("NAME" "SUPLEMENTO_VIDA.pdf") NIL NIL "BASE64" 900000 NIL
         \\("ATTACHMENT" ("FILENAME" "SUPLEMENTO_VIDA.pdf")) NIL NIL) "MIXED" ("BOUNDARY" "b2") NIL NIL NIL)
     , &buffer);
-    // The part numbers the server accepts in BODY[<n>].
     try testing.expectEqual(@as(u8, 3), structure.count);
     try testing.expectEqualStrings("1.1", structure.reading_part().?);
     try testing.expect(structure.parts[2].attachment);
@@ -276,8 +270,6 @@ test "a forwarded message is not opened to look for words in it" {
         \\("ATTACHMENT" ("FILENAME" "original.eml")) NIL NIL)
         \\"MIXED" ("BOUNDARY" "b") NIL NIL NIL)
     , &buffer);
-    // The only part is the forwarded message, which is an attachment: the
-    // caller fetches the whole message instead of a part of it.
     try testing.expectEqual(@as(?[]const u8, null), structure.reading_part());
 }
 

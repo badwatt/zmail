@@ -157,10 +157,6 @@ pub const Fake = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "Fake: reads scripted input in order, then times out" {

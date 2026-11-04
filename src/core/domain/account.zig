@@ -72,10 +72,6 @@ fn valid_host(host: []const u8) bool {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 fn make_server(host: []const u8, port: u16, security: Security) Server {

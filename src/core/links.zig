@@ -30,9 +30,6 @@ pub const Link = struct {
         assert(self.end <= source.len);
         var length: usize = 0;
         for (self.text(source)) |byte| {
-            // Neither a line break nor the spaces a wrap left behind are part
-            // of an address: flowed text is unfolded before it gets here, and
-            // senders that break long addresses keep the space in the middle.
             if (byte == '\r' or byte == '\n' or byte == ' ') continue;
             if (length == out.len) break;
             out[length] = byte;
@@ -54,8 +51,6 @@ pub fn scan(text: []const u8, out: []Link) usize {
         const found = next_link(text, index) orelse break;
         var end = found.end;
 
-        // Trailing punctuation belongs to the sentence, not to the URL, and an
-        // unbalanced closing bracket is the writer's, not the link's.
         while (end > found.start) {
             const last = text[end - 1];
             if (last == '.' or last == ',' or last == ';' or last == ':' or
@@ -86,16 +81,11 @@ const Candidate = struct { start: usize, end: usize };
 fn next_link(text: []const u8, from: usize) ?Candidate {
     var index = from;
     while (index < text.len) : (index += 1) {
-        // A link must start at a boundary: "xhttp://" is not a link.
         if (index > 0 and is_url_byte(text[index - 1]) and text[index - 1] != ' ') continue;
         for (prefixes) |prefix| {
             if (!std.ascii.startsWithIgnoreCase(text[index..], prefix)) continue;
             var end = index + prefix.len;
             while (end < text.len and is_url_byte(text[end])) end += 1;
-            // Mail wraps long addresses at the margin, and half the time it
-            // wraps them in the middle of the URL. If the line ends inside the
-            // address and the next one carries on with URL characters, it is
-            // still one address.
             while (end < text.len) {
                 if (continuation(text, index, end)) |step| {
                     end = step;
@@ -131,7 +121,6 @@ fn continuation(text: []const u8, link_start: usize, end: usize) ?usize {
     if (index < text.len and text[index] == '\n') {
         index += 1;
         crossed_line = true;
-        // A blank line is a paragraph, not a wrap.
         if (index < text.len and text[index] == '\n') return null;
     }
     if (!crossed_line and spaces == 0) return null;
@@ -165,7 +154,6 @@ fn looks_like_data(token: []const u8) bool {
         }
     }
     if (capitals >= 2) return true;
-    // A long fragment with one capital is still more likely encoded than prose.
     return token.len >= 16 and capitals >= 1;
 }
 
@@ -227,7 +215,6 @@ pub fn unwrap_urls(text: []const u8, out: []u8) []const u8 {
         writer.writeAll(text[cursor..link.start]) catch return writer.buffered();
         const url = link.text(text);
         for (url) |byte| {
-            // The breaks a sender left inside the address are not part of it.
             if (byte == '\r' or byte == '\n' or byte == ' ') continue;
             writer.writeByte(byte) catch return writer.buffered();
         }
@@ -289,10 +276,6 @@ pub fn among(links: []const Link, offset: u32) ?Link {
     return null;
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "scan finds the links in a paragraph" {
@@ -302,7 +285,6 @@ test "scan finds the links in a paragraph" {
     const count = scan(text, &buffer);
     try testing.expectEqual(@as(usize, 3), count);
     try testing.expectEqualStrings("https://example.com/a?b=1", buffer[0].text(text));
-    // The comma is punctuation, not part of the address.
     try testing.expectEqualStrings("www.example.org", buffer[1].text(text));
     try testing.expectEqualStrings("mailto:alice@example.com", buffer[2].text(text));
 }
@@ -349,9 +331,6 @@ test "at reports the link under an offset" {
 }
 
 test "an address wrapped by the sender is still one address" {
-    // What a mailing list does at 76 columns: a newline in the middle.
-    // 66 columns of address, then the rest on the next line: what a mailing
-    // list does when it wraps at 76.
     const text = "unsubscribe here:\n" ++
         "https://www1.ema.rsys.net/u/nrd.php?p=0vDm90jZvy_1780192_7260070\n" ++
         "l=1055472&d=MTM5M2E1MzU0OTM3&ems\n";
@@ -366,14 +345,12 @@ test "an address wrapped by the sender is still one address" {
         url,
     );
 
-    // A click anywhere on it, including the wrapped lines, finds the link.
     try testing.expect(at(text, 40) != null);
     try testing.expect(at(text, text.len - 6) != null);
 }
 
 test "prose on the next line is not swallowed by the link" {
     var buffer: [max_links]Link = undefined;
-    // A short sentence ends well before the margin: the next line is prose.
     const text = "see https://example.com/a\nThanks for reading";
     try testing.expectEqual(@as(usize, 1), scan(text, &buffer));
     try testing.expectEqualStrings("https://example.com/a", buffer[0].text(text));
@@ -432,7 +409,6 @@ test "unwrap_urls joins a wrapped address and leaves the prose alone" {
         shown,
     );
 
-    // The address is now one link in the text the reader is given.
     var buffer: [max_links]Link = undefined;
     try testing.expectEqual(@as(usize, 1), scan(shown, &buffer));
 }
@@ -444,7 +420,6 @@ test "a numbered reference finds its address" {
     try testing.expectEqualStrings("https://b.example", reference_url(text, 2, &out).?);
     try testing.expect(reference_url(text, 3, &out) == null);
 
-    // A click on the number is a click on the reference.
     const at_number = std.mem.indexOf(u8, text, "[1]").? + 1;
     try testing.expectEqual(@as(u32, 1), reference_at(text, @intCast(at_number)).?);
     try testing.expect(reference_at(text, 0) == null);

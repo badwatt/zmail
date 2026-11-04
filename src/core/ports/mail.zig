@@ -93,10 +93,6 @@ pub const Deps = struct {
     mail: Mail,
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 /// A fake that records what it was asked, to prove the thunks forward both the

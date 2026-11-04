@@ -70,10 +70,6 @@ pub const Secret = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "Secret: init copies the bytes and expose returns them" {

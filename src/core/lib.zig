@@ -60,8 +60,6 @@ pub const lazy_mail = @import("adapters/lazy.zig").LazyMail;
 pub const lazy_outbox = @import("adapters/lazy.zig").LazyOutbox;
 pub const config = @import("config.zig");
 
-// Referenced from the module root's test block so `zig build test` includes
-// every submodule's tests.
 test {
     _ = @import("limits.zig");
     _ = @import("argv.zig");

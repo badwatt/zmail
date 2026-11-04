@@ -13,15 +13,9 @@ const Message = @import("../domain/message.zig").Message;
 pub fn replace_mailbox(store: *Store, account: AccountId, mailbox: Mailbox, fetched: []const Message) void {
     _ = store.remove_in(account, mailbox);
     for (fetched) |*message| {
-        // A server that sends more than the cache can hold is truncated, not
-        // allowed to fail the refresh: partial mail is better than no mail.
         store.insert(message) catch {};
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 const MessageId = @import("../domain/id.zig").MessageId;

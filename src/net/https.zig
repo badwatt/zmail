@@ -84,7 +84,6 @@ pub fn parse(raw: []u8) Error!Response {
 fn parseDepth(raw: []u8, depth: u8) Error!Response {
     const split = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return error.Malformed;
     const head = raw[0..split];
-    // The body is decoded in place, so `parse` takes the buffer it was given.
     const body = raw[split + 4 ..];
 
     var lines = std.mem.splitSequence(u8, head, "\r\n");
@@ -106,9 +105,6 @@ fn parseDepth(raw: []u8, depth: u8) Error!Response {
             chunked = containsIgnoreCase(value, "chunked");
         }
     }
-    // A chunked body carries its own framing: size lines and a last empty chunk. Cut
-    // into the buffer as it is, a picture arrives with hex numbers in it -- which is
-    // bytes that are not a PNG, and a reader that says "not a PNG" about a PNG.
     if (chunked) {
         const decoded = dechunk(body) orelse return error.Malformed;
         if (depth < 2 and std.mem.startsWith(u8, decoded, "HTTP/1.")) {
@@ -118,7 +114,6 @@ fn parseDepth(raw: []u8, depth: u8) Error!Response {
         return .{ .status = status, .body = decoded };
     }
     const usable = if (length) |value| body[0..@min(value, body.len)] else body;
-    // The second response can be preceded by its separator, or by nothing at all.
     if (depth < 2) {
         if (findResponseStart(usable)) |offset| {
             const base = @intFromPtr(usable.ptr) - @intFromPtr(raw.ptr);
@@ -148,7 +143,6 @@ pub fn dechunk(body: []u8) ?[]const u8 {
     while (read < body.len) {
         const line_end = std.mem.indexOfPos(u8, body, read, "\r\n") orelse return null;
         const size_text = std.mem.trim(u8, body[read..line_end], " \t");
-        // Extensions after a semicolon are legal and none of our business.
         const hex = std.mem.indexOfScalar(u8, size_text, ';') orelse size_text.len;
         const size = std.fmt.parseInt(usize, size_text[0..hex], 16) catch return null;
         read = line_end + 2;
@@ -165,7 +159,6 @@ pub fn dechunk(body: []u8) ?[]const u8 {
 const testing = std.testing;
 
 test "a body that begins with another response is that response" {
-    // Two responses on one connection: a redirect and the picture it pointed at.
     const raw_text = "HTTP/1.1 301 Moved\r\nLocation: https://x/y.png\r\nContent-Length: 0\r\n\r\n" ++
         "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 4\r\n\r\n\x89PNG";
     var raw: [256]u8 = undefined;

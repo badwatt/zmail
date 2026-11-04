@@ -52,8 +52,6 @@ pub const LazyMail = struct {
 
     fn ensure(self: *LazyMail) mail_port.Error!mail_port.Mail {
         if (self.inner) |opened| return opened;
-        // Keep the reason: a rejected login must be reported as such, not as a
-        // generic "could not load".
         const opened = self.open_fn(self.context) catch |err| return err;
         self.inner = opened;
         return opened;
@@ -142,10 +140,6 @@ pub const LazyOutbox = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 const MemoryMail = @import("memory_mail.zig").MemoryMail;
 const AccountId = @import("../domain/id.zig").AccountId;
@@ -181,8 +175,6 @@ test "lazy mail: the first call opens, later calls reuse the connection" {
     var message = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(1) };
     try opener.mail.seed(&message);
 
-    // Nothing opened yet: the session needs to know, because the thread that
-    // owns the transport is the only one allowed to open it.
     try testing.expect(!lazy.mail().connected());
 
     var out: [4]Message = undefined;
@@ -207,8 +199,6 @@ test "lazy mail: the raw message goes through the opened connection" {
     try opener.mail.seed(&message);
 
     var out: [64]u8 = undefined;
-    // The reader renders text and HTML from these same bytes, so they are the
-    // message itself -- and they open the connection like any other call.
     const raw = try lazy.mail().fetch_raw(.inbox, MessageId.from_int(1), &out);
     try testing.expectEqual(@as(u32, 1), opener.opens);
     try testing.expect(raw.len > 0);

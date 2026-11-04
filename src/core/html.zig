@@ -39,8 +39,6 @@ pub fn render(
     kind_buffer: []Kind,
     anchor_buffer: []Anchor,
 ) Render {
-    // Blank lines never start with content, so every entry is filled in first:
-    // an uninitialised kind would be read as a corrupt enum.
     if (kind_buffer.len > 0) @memset(kind_buffer, .body);
 
     var state = State{
@@ -121,8 +119,6 @@ const State = struct {
     fn flush_breaks(self: *State) void {
         if (self.pending_breaks == 0) return;
         if (self.written() == 0) {
-            // Nothing written yet: a block tag at the top must not open with
-            // blank lines.
             self.pending_breaks = 0;
             self.at_line_start = true;
             self.pending_space = false;
@@ -209,7 +205,6 @@ const State = struct {
         if (self.at_line_start) {
             self.note_kind();
             self.indent();
-            // A list marker was written before the break: do not indent twice.
             self.at_line_start = false;
         } else if (self.pending_space) {
             self.write(" ");
@@ -234,7 +229,6 @@ const State = struct {
         const name = body[0..name_end];
 
         if (std.ascii.eqlIgnoreCase(name, "script") or std.ascii.eqlIgnoreCase(name, "style")) {
-            // Their contents are not prose.
             if (!closing) {
                 const closing_tag = if (std.ascii.eqlIgnoreCase(name, "script"))
                     "</script"
@@ -290,19 +284,14 @@ const State = struct {
             return;
         }
         if (is_block(name)) {
-            // Paragraphs and headings start a new block; table cells and the
-            // like are just a new line.
             if (is_heading(name) or std.ascii.eqlIgnoreCase(name, "p")) {
                 self.break_lines(2);
             } else {
                 self.break_lines(1);
             }
-            // A heading styles its own line; leaving it returns to body text,
-            // which also ends a list item.
             self.kind = if (is_heading(name) and !closing) .heading else .body;
             return;
         }
-        // Everything else (span, b, i, font, td…) only carries style.
     }
 
     fn anchor_tag(self: *State, body: []const u8, closing: bool) void {
@@ -315,9 +304,6 @@ const State = struct {
         self.anchor = null;
         if (target.len == 0) return;
 
-        // The words are the link, and a space between them and the sentence before is not:
-        // the writer emits a pending space when the next word starts, so the anchor's
-        // span begins with a cell of gap that would be underlined as if it were a letter.
         const text = self.writer.buffered();
         var start = self.anchor_text_start;
         var end = text.len;
@@ -326,9 +312,6 @@ const State = struct {
         const text_start = start;
         if (end <= start) return;
 
-        // The words are the link. The address is not written into the text: it
-        // would sit after every "read more", and the reader shows it on demand
-        // instead, when the pointer is over the words with ctrl held.
         if (self.link_count < self.link_buffer.len) {
             self.link_buffer[self.link_count] = .{
                 .start = @intCast(text_start),
@@ -347,12 +330,10 @@ const State = struct {
 
     fn finish(self: *State) void {
         const written_text = self.writer.buffered();
-        // Trailing blank lines are noise in a reader.
         var end = written_text.len;
         while (end > 0 and (written_text[end - 1] == '\n' or written_text[end - 1] == ' ')) end -= 1;
         self.writer.end = end;
         if (self.writer.end == 0) {
-            // Keep the slice honest even when everything was markup.
             self.writer.end = 0;
         }
     }
@@ -481,8 +462,6 @@ pub fn clean_entities(html: []const u8, out: []u8) []const u8 {
         .{ .from = "&rdquo;", .to = "\"" },
         .{ .from = "&ldquo;", .to = "\"" },
         .{ .from = "&nbsp;", .to = " " },
-        // Spacing entities: mail uses them to indent, and a terminal has no
-        // width to spare for the difference between one and four spaces.
         .{ .from = "&emsp;", .to = " " },
         .{ .from = "&ensp;", .to = " " },
         .{ .from = "&thinsp;", .to = " " },
@@ -534,8 +513,6 @@ pub fn clean_entities(html: []const u8, out: []u8) []const u8 {
             }
             if (replaced) continue;
 
-            // A numbered entity is a codepoint, not a name: "&#8203;" is a
-            // zero-width space, and printing it is printing "&#8203;".
             if (numeric_entity(html[index..])) |number| {
                 write_entity(&writer, number.codepoint);
                 index += number.length;
@@ -571,7 +548,6 @@ fn numeric_entity(text: []const u8) ?NumericEntity {
     if (digits.len == 0) return null;
 
     const codepoint = std.fmt.parseInt(u21, digits, base) catch return null;
-    // Surrogates and out-of-range values are not characters.
     if (codepoint > 0x10ffff) return null;
     if (codepoint >= 0xd800 and codepoint <= 0xdfff) return null;
     return .{ .codepoint = codepoint, .length = index + 1 };
@@ -580,10 +556,8 @@ fn numeric_entity(text: []const u8) ?NumericEntity {
 /// Spaces and invisible marks become what they are; everything else is written
 /// as the character it names.
 fn write_entity(writer: *std.Io.Writer, codepoint: u21) void {
-    // Zero-width joiners, directional marks, BOM: nothing to show.
     if (codepoint == 0xfeff or (codepoint >= 0x200b and codepoint <= 0x200f)) return;
     if (codepoint == 0x2060) return;
-    // Every kind of space is one space in a terminal.
     if (codepoint == 0x00a0 or (codepoint >= 0x2000 and codepoint <= 0x200a)) {
         writer.writeByte(' ') catch {};
         return;
@@ -649,14 +623,10 @@ pub fn mark_images(html: []const u8, out: []u8) []const u8 {
         const source = attribute(tag.body, "src");
         const alt = attribute(tag.body, "alt");
 
-        // An image inside the message gets a marker the reader can paint over.
-        // One from the network cannot be drawn here; it is named, not fetched.
         if (std.ascii.startsWithIgnoreCase(source, "cid:")) {
             writer.print("[IMG:{s}]", .{source["cid:".len..]}) catch {};
             if (alt.len > 0) writer.print(" {s}", .{alt}) catch {};
         } else if (remote < max_remote_images) {
-            // Numbered, so the address stays out of the reading and the reader
-            // can still find it.
             writer.print("[IMG:r{d}]", .{remote}) catch {};
             remote += 1;
             if (alt.len > 0) writer.print(" {s}", .{alt}) catch {};
@@ -666,7 +636,6 @@ pub fn mark_images(html: []const u8, out: []u8) []const u8 {
             writer.writeAll("[image]") catch {};
         }
     }
-    // Whatever follows the last tag is text too.
     if (index < html.len) writer.writeAll(html[index..]) catch {};
     return writer.buffered();
 }
@@ -737,10 +706,6 @@ fn indexOfIgnoreCase(haystack: []const u8, from: usize, needle: []const u8) ?usi
     return null;
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
 test "paragraphs, lists and headings become readable text" {
@@ -768,7 +733,6 @@ test "a link is its words, and its address is kept, not printed" {
     const html = "<p>Read <a href=\"https://example.com/a\">the docs</a> today.</p>";
     var anchor_buffer: [max_anchors]Anchor = undefined;
     const rendered = render(html, &out, &link_buffer, &.{}, &anchor_buffer);
-    // Nothing is added to the sentence: the reader shows the address on demand.
     try testing.expectEqualStrings("Read the docs today.", rendered.text);
     try testing.expectEqual(@as(usize, 1), rendered.links.len);
     try testing.expectEqualStrings("the docs", std.mem.trim(u8, rendered.links[0].text(rendered.text), " "));
@@ -799,7 +763,6 @@ test "an image becomes a marker the reader can find" {
     const html = "<p>a<img src=\"cid:logo@x\" alt=\"Logo\">b<img src=\"https://x/y.png\">c</p>";
     try testing.expectEqualStrings("<p>a[IMG:logo@x] Logob[IMG:r0]c</p>", mark_images(html, &out));
 
-    // The address is kept, in order, so the reader can fetch it.
     var sources: [max_remote_images][]const u8 = undefined;
     const count = remote_images(html, &sources);
     try testing.expectEqual(@as(usize, 1), count);
@@ -818,8 +781,6 @@ test "an entity that cannot be encoded is visible, not dropped" {
     var out: [64]u8 = undefined;
     var link_buffer: [2]links.Link = undefined;
     var anchor_buffer: [max_anchors]Anchor = undefined;
-    // A surrogate is not a character. Printing '?' says so; dropping it silently
-    // would leave a hole where the sender wrote something.
     const rendered = render("<p>&#xD800;x</p>", &out, &link_buffer, &.{}, &anchor_buffer);
     try testing.expectEqualStrings("?x", rendered.text);
 }
@@ -840,8 +801,6 @@ test "an entity that is not one is left as it was written" {
 
 test "every kind of space is one space, including the ideographic one" {
     var out: [32]u8 = undefined;
-    // The text part of a mail written from HTML carries these as entities, and a
-    // terminal has one space.
     try testing.expectEqualStrings(
         "a b c",
         clean_spacing("a&#x3000;b&emsp;c", &out),
@@ -871,7 +830,6 @@ test "an attribute that runs to the end of the tag is still an attribute" {
     var out: [128]u8 = undefined;
     try testing.expectEqualStrings("<p>[IMG:r0] logo</p>", mark_images("<p><img alt=logo></p>", &out));
 
-    // The same for a link whose address is unquoted and last in the tag.
     var link_buffer: [2]links.Link = undefined;
     var anchor_buffer: [max_anchors]Anchor = undefined;
     try testing.expectEqualStrings(
@@ -949,7 +907,6 @@ test "the words of an anchor are a link, with the address it points at" {
     const anchor = rendered.anchors[0];
     try testing.expectEqualStrings("the notes", std.mem.trim(u8, rendered.text[anchor.span.start..anchor.span.end], " "));
     try testing.expectEqualStrings("https://example.com/x", anchor.target);
-    // The sentence is untouched: no address is appended to it.
     try testing.expectEqualStrings("See the notes for more", rendered.text);
 }
 
@@ -971,32 +928,25 @@ test "an anchor whose text is the address is one link, not two" {
 
 test "a spacing entity is a space, not its own name" {
     var out: [128]u8 = undefined;
-    // "&emsp;" is what a mail uses to indent: it must never reach the reader.
     const cleaned = clean_entities("a&emsp;b&ensp;c&thinsp;d&nbsp;e", &out);
     try testing.expectEqualStrings("a b c d e", cleaned);
 }
 
 test "a numbered entity is the character it names" {
     var out: [128]u8 = undefined;
-    // Zero-width space and BOM: invisible, so nothing to show.
     try testing.expectEqualStrings("ab", clean_entities("a&#8203;b", &out));
     try testing.expectEqualStrings("ab", clean_entities("a&#x200B;b", &out));
     try testing.expectEqualStrings("ab", clean_entities("a&#65279;b", &out));
-    // A non-breaking space is a space, in decimal and in hex.
     try testing.expectEqualStrings("a b", clean_entities("a&#160;b", &out));
     try testing.expectEqualStrings("a b", clean_entities("a&#xA0;b", &out));
-    // A real character is decoded to its own text.
     try testing.expectEqualStrings("a—b", clean_entities("a&#8212;b", &out));
-    // Something that is not an entity is left alone.
     try testing.expectEqualStrings("&#nope;", clean_entities("&#nope;", &out));
     try testing.expectEqualStrings("a&b", clean_entities("a&b", &out));
 }
 
 test "a text part made from HTML loses its spacing entities" {
     var out: [128]u8 = undefined;
-    // What a sender's "text version" looks like after it has been flattened.
     try testing.expectEqualStrings("  Hola mundo ", clean_spacing("&emsp;&#8203;&nbsp;Hola mundo&nbsp;", &out));
-    // Only spacing and invisible marks go: the words stay exactly as written.
     try testing.expectEqualStrings("a & b", clean_spacing("a & b", &out));
     try testing.expectEqualStrings("AT&T", clean_spacing("AT&T", &out));
 }
@@ -1005,8 +955,6 @@ test "an anchor's span does not include the space before it" {
     var out: [256]u8 = undefined;
     var link_buffer: [4]links.Link = undefined;
     var anchor_buffer: [max_anchors]Anchor = undefined;
-    // The pending space between the sentence and the anchor is emitted when the anchor's
-    // first word starts, so it lands inside the span: underlined as if it were a letter.
     const rendered = render(
         "<p>Need help! <a href=\"https://example.com/support\">Contact our team</a></p>",
         &out,

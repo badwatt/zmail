@@ -95,7 +95,7 @@ pub fn days_from_civil(year: i64, month: u8, day: u8) i64 {
 
     const adjusted_year = if (month <= 2) year - 1 else year;
     const era = @divFloor(adjusted_year, 400);
-    const year_of_era = adjusted_year - era * 400; // [0, 399]
+    const year_of_era = adjusted_year - era * 400;
     const month_prime = if (month > 2) @as(i64, month) - 3 else @as(i64, month) + 9;
     const day_of_year = @divFloor(153 * month_prime + 2, 5) + day - 1;
     const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) - @divFloor(year_of_era, 100) + day_of_year;
@@ -136,14 +136,14 @@ pub fn civil_from_unix(timestamp_unix: i64) CivilDate {
 pub fn civil_from_days(days_since_epoch: i64) CivilDate {
     const z = days_since_epoch + 719_468;
     const era = @divFloor(z, 146_097);
-    const day_of_era = z - era * 146_097; // [0, 146096]
+    const day_of_era = z - era * 146_097;
     const year_of_era = @divFloor(
         day_of_era - @divFloor(day_of_era, 1460) + @divFloor(day_of_era, 36_524) - @divFloor(day_of_era, 146_096),
         365,
-    ); // [0, 399]
+    );
     const year = year_of_era + era * 400;
     const day_of_year = day_of_era - (365 * year_of_era + @divFloor(year_of_era, 4) - @divFloor(year_of_era, 100));
-    const month_prime = @divFloor(5 * day_of_year + 2, 153); // [0, 11]
+    const month_prime = @divFloor(5 * day_of_year + 2, 153);
     const day = day_of_year - @divFloor(153 * month_prime + 2, 5) + 1;
     const month = if (month_prime < 10) month_prime + 3 else month_prime - 9;
     const civil_year = if (month <= 2) year + 1 else year;
@@ -154,10 +154,6 @@ pub fn civil_from_days(days_since_epoch: i64) CivilDate {
         .day = @intCast(day),
     };
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -173,22 +169,18 @@ test "civil_from_unix: the epoch" {
 }
 
 test "civil_from_unix: a known modern timestamp" {
-    // 1700000000 = 2023-11-14T22:13:20Z.
     try expect_date(1_700_000_000, 2023, 11, 14);
 }
 
 test "civil_from_unix: a leap day" {
-    // 951782400 = 2000-02-29T00:00:00Z.
     try expect_date(951_782_400, 2000, 2, 29);
 }
 
 test "civil_from_unix: the day after a non-leap February" {
-    // 1583020800 = 2020-03-01T00:00:00Z.
     try expect_date(1_583_020_800, 2020, 3, 1);
 }
 
 test "civil_from_unix: a date before the epoch" {
-    // -86400 = 1969-12-31.
     try expect_date(-86_400, 1969, 12, 31);
 }
 
@@ -256,7 +248,6 @@ test "month_from_abbrev round-trips every month and rejects the rest" {
 
 test "full_date renders a readable date" {
     var buffer: [16]u8 = undefined;
-    // 2023-11-14T22:13:20Z.
     try testing.expectEqualStrings("14 Nov 2023", full_date(&buffer, 1_700_000_000));
 }
 
@@ -296,7 +287,6 @@ test "relative: days" {
 
 test "relative: a week or older shows the calendar date" {
     var buffer: [8]u8 = undefined;
-    // 2023-11-14T22:13:20Z, read 30 days later.
     const timestamp = 1_700_000_000;
     const now = timestamp + 30 * 86_400;
     try testing.expectEqualStrings("11/14", relative(&buffer, now, timestamp));
@@ -304,7 +294,5 @@ test "relative: a week or older shows the calendar date" {
 
 test "relative: an impossible format degrades to now instead of crashing" {
     var tiny: [1]u8 = undefined;
-    // The buffer is deliberately too small for "59m"; the fallback keeps the
-    // list rendering even if a caller passes a bad buffer.
     try testing.expectEqualStrings("now", relative(&tiny, 100_000, 100_000 - 59 * 60));
 }
