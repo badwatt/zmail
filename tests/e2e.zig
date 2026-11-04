@@ -104,7 +104,7 @@ fn open_pty() !struct { master: c_int, slave: c_int } {
     if (@import("builtin").os.tag == .macos) {
         var master: c_int = -1;
         var slave: c_int = -1;
-        const window = extern struct { row: u16, col: u16, xpixel: u16, ypixel: u16 }{
+        var window = extern struct { row: u16, col: u16, xpixel: u16, ypixel: u16 }{
             .row = 24,
             .col = 80,
             .xpixel = 0,
