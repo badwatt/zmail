@@ -569,21 +569,11 @@ fn render_body(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         return;
     }
 
-    var covered_until: u32 = 0;
     var row: u16 = 0;
     while (row < lay.reader_rows) : (row += 1) {
         const line_index = inputs.state.reader_scroll + row;
         if (line_index >= wrapped.len) break;
-        // A picture occupies the rows it covers: printing text there would be
-        // printing it only to paint over it.
-        if (line_index < covered_until) {
-            _ = out.put_text(1, lay.reader_body_y + row, "", lay.columns - 2, inputs.theme.text);
-            continue;
-        }
-        if (line_index < inputs.cover.len) {
-            const height = inputs.cover[line_index];
-            if (height > 1) covered_until = line_index + height;
-        }
+
         const line = wrapped.at(line_index, inputs.body);
         var line_inputs = inputs;
         line_inputs.line_index = line_index;
@@ -2006,53 +1996,6 @@ test "a sender with no display name is just the address, not twice" {
 
     try testing.expect(screen_contains(&out, "From bob@example.com"));
     try testing.expect(!screen_contains(&out, "<bob@example.com>"));
-}
-
-test "the rows a picture covers are left empty, not printed over" {
-    var store = try core.store.Store.init(testing.allocator, 2);
-    defer store.deinit(testing.allocator);
-
-    var message = core.message.Message{
-        .id = core.id.MessageId.from_int(1),
-        .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
-        .timestamp_unix = 1_700_000_000,
-        .from = try core.address.Address.init("a@example.com"),
-    };
-    message.subject.set("Con imagen");
-    try store.insert(&message);
-
-    var state = State{};
-    state.accounts.add(core.id.AccountId.from_int(1), "work", message.from, .{});
-    state.view = .reader;
-    state.opened_account = message.account;
-    state.opened = message.id;
-    state.rebuild(&store);
-
-    const body = "[IMG:logo@x]\nline under the picture\nlast line";
-    var wrapped: wrap.Wrapped = .{};
-    wrap.wrap(body, 60, &wrapped);
-    try testing.expect(wrapped.len >= 3);
-
-    // The picture is three rows tall: two of text hide behind it.
-    var cover: [8]u8 = @splat(0);
-    cover[0] = 3;
-
-    var out: Screen = .{};
-    frame(.{
-        .state = &state,
-        .store = &store,
-        .theme = &Theme.dark(),
-        .body = body,
-        .wrapped = &wrapped,
-        .cover = &cover,
-        .columns = 100,
-        .rows = 24,
-        .now_unix = 1_700_000_000,
-    }, &out);
-
-    try testing.expect(!screen_contains(&out, "line under the picture"));
-    try testing.expect(!screen_contains(&out, "last line"));
 }
 
 test "the help card names every key that works" {

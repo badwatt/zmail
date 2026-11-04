@@ -247,8 +247,11 @@ pub const Session = struct {
     hover_url: core.text.Text(core.limits.url_max) = .{},
     image_slot_count: u8 = 0,
     /// How many rows each wrapped line hides behind a picture.
-    cover_rows: [wrap.max_lines]u8 = @splat(0),
-    cover_len: u32 = 0,
+    /// The body as the frame wraps it: the message's text with the rows each picture
+    /// needs inserted after its marker. A terminal cannot reflow around a picture, so
+    /// the text is moved out of its way instead of being printed only to be covered.
+    gapped: [core.limits.body_max]u8 = undefined,
+    gapped_len: u32 = 0,
     html_part_len: u32 = 0,
     /// Set when a text browser has to lay the HTML out before it can be shown.
     html_text: [core.limits.body_max]u8 = undefined,
@@ -946,7 +949,8 @@ pub const Session = struct {
         if (self.body_in_flight or self.body_request != null or self.refreshing) return;
         const fetch = self.deps.fetch_image orelse return;
 
-        const text = self.reader_text();
+        // The wrapped lines are ranges into the gapped text, not into the raw one.
+        const text = self.gapped_text();
         var line: u32 = 0;
         while (line < self.wrapped.len) : (line += 1) {
             const content = self.wrapped.at(line, text);
@@ -1005,6 +1009,7 @@ pub const Session = struct {
         if (std.mem.eql(u8, bytes[0..4], "RIFF")) return "a WebP";
         if (bytes[0] == '<') return "an SVG or a web page";
         if (std.mem.startsWith(u8, bytes, "BM")) return "a BMP";
+        if (std.mem.eql(u8, bytes[0..4], "\x00\x00\x01\x00")) return "an ICO";
         // Not a format we recognise: what the server sent instead is the difference
         // between a bug here and a wrong address, so say it in the shape it came --
         // text when it reads as text, hex when it does not.
@@ -1058,7 +1063,7 @@ pub const Session = struct {
         const index = self.state.reader_scroll + row;
         if (index >= self.wrapped.len) return null;
 
-        const text = self.reader_text();
+        const text = self.gapped_text();
         const line = self.wrapped.at(index, text);
         const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
         // Clicking past the end of a line is clicking nothing, not clicking the
@@ -1120,7 +1125,7 @@ pub const Session = struct {
                 return anchor.target;
             }
         }
-        const text = self.reader_text();
+        const text = self.gapped_text();
         if (core.links.at(text, offset)) |link| return link.url(text, out);
         if (core.links.reference_at(text, offset)) |number|
             return core.links.reference_url(text, number, out);
@@ -2200,10 +2205,10 @@ pub const Session = struct {
         }
 
         const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
-        if (self.body_loaded) {
-            wrap.wrap(self.reader_text(), lay.reader_text_width, &self.wrapped);
-        }
-        self.prepare_cover(lay);
+        // One text for the whole frame: what the wrap saw, what the lines point into,
+        // and what the picture search reads -- the same bytes, or the offsets lie.
+        const body = if (self.body_loaded) self.gapped_text() else "";
+        if (self.body_loaded) wrap.wrap(body, lay.reader_text_width, &self.wrapped);
 
         _ = core.update.apply(&self.state, &self.store, .{ .set_viewport = .{
             .list_rows = lay.list_rows,
@@ -2215,13 +2220,12 @@ pub const Session = struct {
             .state = &self.state,
             .store = &self.store,
             .theme = &self.deps.theme,
-            .body = self.reader_text(),
+            .body = body,
             .wrapped = if (self.body_loaded) &self.wrapped else null,
             .links = self.reader_links(),
             .hovered = self.hovered,
             .hover_url = if (self.hover_url.is_empty()) null else self.hover_url.slice(),
             .kinds = self.html_kinds[0..self.html_kind_count],
-            .cover = self.cover_rows[0..self.cover_len],
             .selection = self.selection,
             .reduced_motion = self.deps.reduced_motion,
             .elapsed_ms = os.monotonic_ms() - self.splash_started_ms,
@@ -2289,26 +2293,38 @@ pub const Session = struct {
 
     /// Measures the pictures on the visible lines before the frame is drawn, so
     /// the text underneath them is not printed only to be covered.
-    fn prepare_cover(self: *Session, lay: layout_mod.Layout) void {
-        self.cover_len = 0;
-        if (!self.html_view or self.deps.draw_image == null) return;
+    /// The reader's text with the rows each picture needs inserted after its marker.
+    ///
+    /// One newline per row the picture occupies beyond its own, so the paragraph that
+    /// follows starts below the picture instead of underneath it. Nothing is hidden and
+    /// nothing is printed over: the body simply gets longer.
+    fn gapped_text(self: *Session) []const u8 {
         const text = self.reader_text();
+        if (!self.show_images or self.deps.draw_image == null) return text;
 
-        var line: u32 = 0;
-        while (line < self.wrapped.len and line < self.cover_rows.len) : (line += 1) {
-            const content = self.wrapped.at(line, text);
-            const marker = std.mem.indexOf(u8, content, "[IMG:") orelse continue;
-            const rest = content[marker + 5 ..];
-            const close = std.mem.indexOfScalar(u8, rest, ']') orelse continue;
-            const wanted = self.image_rows(rest[0..close]);
-            // The picture is clipped at the bottom of the reader, so the rows reserved
-            // for it are clipped the same way. Reserving twelve rows for a picture that
-            // only has three of them on screen hides nine lines of somebody's mail.
-            const row = line -| self.state.reader_scroll;
-            const room: u8 = if (row < lay.reader_rows) @intCast(lay.reader_rows - row) else 0;
-            self.cover_rows[line] = @min(wanted, room);
-            self.cover_len = line + 1;
+        var writer = std.Io.Writer.fixed(&self.gapped);
+        var start: usize = 0;
+        while (start <= text.len) {
+            const end = std.mem.indexOfScalarPos(u8, text, start, '\n') orelse text.len;
+            const line = text[start..end];
+            writer.writeAll(line) catch break;
+            if (end == text.len and line.len == 0) break;
+
+            if (std.mem.indexOf(u8, line, "[IMG:")) |marker| {
+                const rest = line[marker + 5 ..];
+                if (std.mem.indexOfScalar(u8, rest, ']')) |close| {
+                    const rows = self.image_rows(rest[0..close]);
+                    var extra: u8 = 1;
+                    while (extra < rows) : (extra += 1) writer.writeByte('\n') catch break;
+                }
+            }
+            if (end < text.len) writer.writeByte('\n') catch break;
+            start = end + 1;
+            if (end == text.len) break;
         }
+        const gapped = writer.buffered();
+        self.gapped_len = @intCast(gapped.len);
+        return gapped;
     }
 
     /// Paints the images of the message over the text, at the markers the layout
@@ -2322,7 +2338,8 @@ pub const Session = struct {
         const draw = self.deps.draw_image orelse return;
         if (self.html_view == false or self.html_len == 0) return;
 
-        const text = self.reader_text();
+        // The same text the wrap used: the wrapped lines are ranges into it.
+        const text = self.gapped_text();
         var row: u16 = 0;
         var painted: u8 = 0;
         while (row < lay.reader_rows and painted < max_images_drawn) : (row += 1) {
@@ -5423,25 +5440,32 @@ test "turning pictures off repaints the rows they were drawn over" {
     try testing.expect(std.mem.indexOf(u8, written, "hello") != null);
 }
 
-test "a picture near the bottom reserves the rows it has, not the rows it wants" {
+test "a picture makes the body longer instead of hiding the words after it" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
 
-    // A tall picture: sixteen rows of cells at this size, on the last line of a body
-    // that is scrolled to its end.
+    // A picture the message carries, decoded from its own bytes: 90x36 at this cell
+    // size is ten columns by two rows.
     rig.session.show_images = true;
     rig.session.deps.draw_image = ImageSink.draw;
-    try rig.open_reader("<p><img src=\"cid:tall\" alt=\"tall\"></p>");
-    rig.session.wrapped = .{};
+    const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const raw = "Content-Type: multipart/related; boundary=\"b\"\n\n--b\nContent-Type: text/html\n\n" ++
+        "<p><img src=\"cid:logo@x\"></p><p>the paragraph after the picture</p>\n" ++
+        "--b\nContent-Type: image/png\nContent-Transfer-Encoding: base64\nContent-ID: <logo@x>\n\n" ++
+        png_base64 ++ "\n--b--\n";
+    try rig.open_reader(raw);
 
-    const lay = layout_mod.Layout.compute(110, 34, 0);
-    rig.session.state.reader_scroll = 0;
-    rig.session.prepare_cover(lay);
-    // No image bytes, so nothing is reserved: the text is not hidden for a picture
-    // that is not there.
-    try testing.expectEqual(@as(u32, 0), rig.session.cover_len);
+    // The marker's line is followed by a blank one for every row the picture has
+    // beyond its own: the paragraph starts below the picture, not under it.
+    const text = rig.session.gapped_text();
+    const marker = std.mem.indexOf(u8, text, "[IMG:logo@x]").?;
+    const after = text[marker..];
+    const newlines = std.mem.indexOf(u8, after, "the paragraph").?;
+    try testing.expect(std.mem.count(u8, after[0..newlines], "\n") >= 2);
+    // And nothing is lost: the words are all still there.
+    try testing.expect(std.mem.indexOf(u8, text, "the paragraph after the picture") != null);
 }
 
 test "pictures are off until asked for, and then they arrive off the loop" {

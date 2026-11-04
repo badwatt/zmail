@@ -201,11 +201,11 @@ const html_message =
     "all in the terminal.</p>" ++
     // A picture the mail points at, for the reader's `i`: nothing is fetched until
     // the reader asks for pictures, and `o` opens the mail where they always load.
-    "<p><img src=\"https://account.brave.com/images/email/brave-white-288x96.png\" alt=\"i0\"></p>" ++
-    "<p><img src=\"https://avatars.githubusercontent.com/u/1?v=4\" alt=\"i1\"></p>" ++
-    "<p><img src=\"https://github.com/favicon.ico\" alt=\"i2\"></p>" ++
-    "<p><img src=\"https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png\" alt=\"i3\"></p>" ++
-    "<p><img src=\"https://account.brave.com/images/email/brave-white-288x96.png?x=1\" alt=\"i4\"></p>" ++
+    "<p><img src=\"https://account.brave.com/images/email/brave-white-288x96.png\" " ++
+    "alt=\"a logo\"></p>" ++
+    // One more picture the reader cannot paint, to say what a format it cannot draw
+    // looks like: `i` reports it instead of leaving a marker with nothing under it.
+    "<p><img src=\"https://github.com/favicon.ico\" alt=\"an icon\"></p>" ++
     "<p>Nothing in this demo leaves the machine: the mail lives in memory and " ++
     "the rendering happens from that copy.</p>\n" ++
     "--demo--\n";
