@@ -275,7 +275,7 @@ fn doubled(
 
 /// One breath, in ticks. The splash repaints every 55ms and the loop's spinner
 /// advances by two per frame, so a full cycle is about 1.8 seconds: in, out, in.
-pub const breath_ticks: u16 = 24;
+pub const breath_ticks: u16 = 32;
 
 /// Below this a letter is not drawn at all. The fade is a mix towards the ground,
 /// which is invisible on the ground itself -- but only when the ground is known; a
@@ -287,12 +287,14 @@ const breath_hidden: f32 = 0.02;
 /// whole word breathes together, which is what makes it read as one thing drawing
 /// breath rather than as letters flickering on their own.
 pub fn breath_level(tick: u16) f32 {
-    // Full on the first frame and moving on the second: the splash paints before the
-    // loop reads anything, so tick zero is the frame that goes out at once -- and the
-    // cosine leaves it heading down, which is the breath starting to happen rather
-    // than a mark standing still for two ticks first.
-    const phase = @as(f32, @floatFromInt(tick % breath_ticks)) / @as(f32, breath_ticks);
-    return 0.5 + 0.5 * @cos(phase * std.math.tau);
+    // Full on the first frame, and dimming by a visible amount on the next: a
+    // triangle, because a cosine spends its first quarter within a couple of per
+    // cent of the peak -- which is a mark that looks frozen for half a second and
+    // then starts to breathe. Constant speed, from the first tick.
+    const half: u16 = breath_ticks / 2;
+    const phase = tick % breath_ticks;
+    const travelled = if (phase <= half) phase else breath_ticks - phase;
+    return 1.0 - @as(f32, @floatFromInt(travelled)) / @as(f32, half);
 }
 
 /// The style of one cell at `level` of opacity.
@@ -2690,4 +2692,17 @@ test "without a derivation the breath is carried by weight and the palette's ste
         highest = @max(highest, index);
     }
     try testing.expect(lowest < highest);
+}
+
+test "the breath moves from the first tick, at a speed the eye can see" {
+    // A cosine would spend its first quarter within two per cent of the peak: a mark
+    // that looks frozen. The level has to be a visible step away by the second tick.
+    const first = breath_level(0);
+    const second = breath_level(1);
+    try testing.expectEqual(@as(f32, 1.0), first);
+    try testing.expect(first - second > 0.05);
+    // And the way back is the same movement in reverse: empty at the trough, and up
+    // again four ticks later.
+    try testing.expectEqual(@as(f32, 0.0), breath_level(breath_ticks / 2));
+    try testing.expect(breath_level(breath_ticks / 2 + 4) > 0.2);
 }
