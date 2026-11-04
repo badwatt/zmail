@@ -18,6 +18,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A suite that hangs must fail in minutes, not in the runner's six hours.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       # setup-zig reads .minimum_zig_version from build.zig.zon.

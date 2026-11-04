@@ -11,6 +11,14 @@ const exe_path = @import("build_options").zmail_exe;
 
 const testing = std.testing;
 
+fn sleep_ms(ms: u64) void {
+    const request: std.posix.timespec = .{
+        .sec = @intCast(ms / 1000),
+        .nsec = @intCast((ms % 1000) * 1_000_000),
+    };
+    _ = std.c.nanosleep(&request, null);
+}
+
 const Run = struct {
     stdout: []u8,
     stderr: []u8,
@@ -93,6 +101,56 @@ fn open_pty() !struct { master: c_int, slave: c_int } {
     return .{ .master = master, .slave = slave };
 }
 
+/// Waits for a child, but not forever.
+///
+/// `Child.wait` has no deadline, and a session that ignores Ctrl+C would then
+/// hang the suite until the runner's own six-hour limit kills the job: the
+/// failure that took the longest to see. The watchdog turns that into a real
+/// answer in seconds, and the signal is loud enough to carry a message.
+const Watchdog = struct {
+    pid: std.posix.pid_t,
+    done: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    fn arm(pid: std.posix.pid_t) Watchdog {
+        var watchdog = Watchdog{ .pid = pid };
+        watchdog.thread = std.Thread.spawn(.{}, Watchdog.run, .{&watchdog}) catch null;
+        return watchdog;
+    }
+
+    fn run(self: *Watchdog) void {
+        // Sliced, so disarming joins immediately instead of waiting the whole
+        // grace period out.
+        var waited: u32 = 0;
+        while (waited < 10_000) : (waited += 50) {
+            if (self.done.load(.acquire)) return;
+            sleep_ms(50);
+        }
+        // SIGKILL, not SIGINT: this is the watchdog, and the point is that the
+        // process ends whether or not it is listening.
+        std.posix.kill(self.pid, std.posix.SIG.KILL) catch {};
+    }
+
+    fn disarm(self: *Watchdog) void {
+        self.done.store(true, .release);
+        if (self.thread) |thread| thread.join();
+    }
+};
+
+fn wait_bounded(io: std.Io, child: *std.process.Child, shown: []const u8) !std.process.Child.Term {
+    var watchdog = Watchdog.arm(child.id orelse return error.TestUnexpectedResult);
+    defer watchdog.disarm();
+    const term = try child.wait(io);
+    // What the session was showing when it should have been leaving: a failure
+    // here is about the child, and this is the only way to see inside it.
+    switch (term) {
+        .exited => |code| if (code == 130) return term,
+        else => {},
+    }
+    std.debug.print("child ended {any}, screen was:\n{s}\n", .{ term, shown });
+    return term;
+}
+
 test "the TUI starts, renders, and quits through a pseudo-terminal" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
@@ -118,13 +176,14 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
     var frame: [16384]u8 = undefined;
     var total: usize = 0;
     var attempts: u32 = 0;
-    while (attempts < 20 and total < frame.len) : (attempts += 1) {
+    while (attempts < 60 and total < frame.len) : (attempts += 1) {
         const ready = try std.posix.poll(&fds, 200);
         if (ready == 0) continue;
         const count = std.posix.read(terminal.master, frame[total..]) catch 0;
         if (count == 0) break;
         total += count;
-        if (std.mem.indexOf(u8, frame[0..total], meta.name) != null) break;
+        if (std.mem.indexOf(u8, frame[0..total], meta.name) != null and
+            std.mem.indexOf(u8, frame[0..total], "Inbox") != null) break;
     }
     if (total == 0) {
         child.kill(io);
@@ -136,7 +195,10 @@ test "the TUI starts, renders, and quits through a pseudo-terminal" {
     // Ctrl+C is a signal, not a key: it reaches the process even while a socket
     // is being read, restores the terminal, and leaves with 130.
     try std.posix.kill(child.id.?, std.posix.SIG.INT);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 130 }, try child.wait(io));
+    try testing.expectEqual(
+        std.process.Child.Term{ .exited = 130 },
+        try wait_bounded(io, &child, frame[0..total]),
+    );
 }
 
 test "a live session with a dead server still quits cleanly" {
@@ -196,7 +258,10 @@ test "a live session with a dead server still quits cleanly" {
 
     // A dead server is reported, and Ctrl+C still gets out of it.
     try std.posix.kill(child.id.?, std.posix.SIG.INT);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 130 }, try child.wait(io));
+    try testing.expectEqual(
+        std.process.Child.Term{ .exited = 130 },
+        try wait_bounded(io, &child, frame[0..total]),
+    );
 
     var rest: [4096]u8 = undefined;
     var seen: usize = 0;
