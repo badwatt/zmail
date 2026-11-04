@@ -71,7 +71,6 @@ pub fn decode(png: []const u8, work: []u8, out: []u8) Error!Image {
         .rgb => 3,
         .rgba => 4,
         .palette => 1,
-        else => return error.Unsupported,
     };
     if (head.color == .palette and palette_len == 0) return error.Corrupt;
 
@@ -97,7 +96,7 @@ pub fn decode(png: []const u8, work: []u8, out: []u8) Error!Image {
     return .{ .width = head.width, .height = head.height, .rgba = out[0..needed] };
 }
 
-const Color = enum { rgb, rgba, palette, other };
+const Color = enum { rgb, rgba, palette };
 
 const Header = struct {
     width: u32,
@@ -118,9 +117,8 @@ fn parseHeader(body: []const u8) Error!Header {
         2 => .rgb,
         6 => .rgba,
         3 => .palette,
-        else => .other,
+        else => return error.Unsupported,
     };
-    if (color == .other) return error.Unsupported;
     return .{ .width = width, .height = height, .color = color };
 }
 
@@ -161,10 +159,10 @@ fn unfilter(
                 else => return error.Corrupt,
             };
             // The bytes are written back in place: each value depends on the
-            // ones already reconstructed on this line.
+            // ones already reconstructed on this line. `previous` is read, never
+            // written, until the row is done -- overwriting it here would make
+            // every filtered row predict from its own left neighbour.
             line[x] +%= add;
-            previous[x] = line[x];
-            _ = &previous;
         }
 
         writeLine(head, line, palette, out, y);
@@ -220,7 +218,6 @@ fn writeLine(
                 }
                 out[target + 3] = 255;
             },
-            .other => {},
         }
     }
 }
@@ -265,4 +262,53 @@ test "paeth picks the neighbour the predictor points at" {
     try testing.expectEqual(@as(u8, 10), paeth(10, 20, 30));
     try testing.expectEqual(@as(u8, 10), paeth(20, 10, 30));
     try testing.expectEqual(@as(u8, 30), paeth(30, 20, 10));
+    // Down-left is the closest here, which is the case that only happens when
+    // the predictor sits between b and c.
+    try testing.expectEqual(@as(u8, 15), paeth(10, 20, 15));
+}
+
+test "a picture without an alpha channel is opaque" {
+    var work: [4096]u8 = undefined;
+    var out: [64]u8 = undefined;
+    const image = try decode(@embedFile("testdata/rgb.png"), &work, &out);
+    try testing.expectEqual(@as(u32, 2), image.width);
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, image.rgba[0..4]);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 255 }, image.rgba[4..8]);
+}
+
+test "a palette picture takes its colours from the palette" {
+    var work: [4096]u8 = undefined;
+    var out: [64]u8 = undefined;
+    const image = try decode(@embedFile("testdata/palette.png"), &work, &out);
+    try testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, image.rgba[0..4]);
+    try testing.expectEqualSlices(u8, &.{ 0, 255, 0, 255 }, image.rgba[4..8]);
+}
+
+test "a palette index past the end is black, not a read past the buffer" {
+    var work: [4096]u8 = undefined;
+    var out: [64]u8 = undefined;
+    const image = try decode(@embedFile("testdata/palette_bad_index.png"), &work, &out);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, image.rgba[0..4]);
+}
+
+test "a palette longer than the decoder keeps is cut, not trusted" {
+    var work: [8192]u8 = undefined;
+    var out: [64]u8 = undefined;
+    const image = try decode(@embedFile("testdata/long_plte.png"), &work, &out);
+    try testing.expectEqual(@as(u32, 1), image.width);
+    // The entries past the bound were dropped, so this one is black.
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 255 }, image.rgba[0..4]);
+}
+
+test "average and paeth filters are undone, and an invented one is refused" {
+    var work: [4096]u8 = undefined;
+    var out: [64]u8 = undefined;
+    const image = try decode(@embedFile("testdata/filters.png"), &work, &out);
+    try testing.expectEqualSlices(u8, &.{ 10, 20, 30, 255 }, image.rgba[0..4]);
+    try testing.expectEqualSlices(u8, &.{ 40, 50, 60, 255 }, image.rgba[4..8]);
+    // The second row was filtered against the first.
+    try testing.expectEqualSlices(u8, &.{ 70, 80, 90, 255 }, image.rgba[8..12]);
+    try testing.expectEqualSlices(u8, &.{ 100, 110, 120, 255 }, image.rgba[12..16]);
+
+    try testing.expectError(error.Corrupt, decode(@embedFile("testdata/bad_filter.png"), &work, &out));
 }
