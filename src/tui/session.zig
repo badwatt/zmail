@@ -1086,8 +1086,21 @@ pub const Session = struct {
         // Each link starts with a mark of its own, and the frame moved everything after
         // it one column right. Walk back the same way, and a click on the mark itself
         // is a click on the link.
-        if (column >= line.len) return null;
-        return line_start + column;
+        // Each link starts with a mark of its own, and the frame moved everything after
+        // it one column right. Walk back the same way, and a click on the mark itself is
+        // a click on the link.
+        const mark: u32 = screen_mod.text_columns(render_mod.link_mark);
+        var shift: u32 = 0;
+        for (self.reader_links()) |link| {
+            if (link.end <= line_start or link.start >= line_start + line.len) continue;
+            if (link.start < line_start) continue;
+            const starts_at = (link.start - line_start) + shift;
+            if (column >= starts_at and column < starts_at + mark) return link.start;
+            if (column < starts_at) break;
+            shift += mark;
+        }
+        if (column < shift or column - shift >= line.len) return null;
+        return line_start + (column - shift);
     }
 
     /// Ctrl held and the pointer over a link: it lights up, so the click is not
@@ -6233,4 +6246,40 @@ test "the picture worker and the body worker never run at once" {
     try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
     rig.session.poll_images();
     try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
+}
+
+test "clicking a link works with the mark in front of it" {
+    var rig: Rig = .{};
+    defer rig.deinit();
+    var sink: LinkSink = .{};
+    try rig.start_with_links(&sink);
+    try rig.open_reader("go to https://example.com/a now");
+
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    const row = lay.reader_body_y;
+    const text = rig.session.gapped_text();
+    const line = rig.session.wrapped.at(rig.session.state.reader_scroll, text);
+    const start: u16 = @intCast(std.mem.indexOf(u8, line, "https://").?);
+    const mark: u16 = @intCast(screen_mod.text_columns(render_mod.link_mark));
+
+    // The first letter of the link: gutter, the text before it, the mark.
+    const on_words = rig.session.cell_offset(lay, .{
+        .x = 1 + start + mark,
+        .y = row,
+        .kind = .press,
+        .button = .left,
+    }) orelse unreachable;
+    try testing.expectEqual(
+        @as(u32, @intCast(std.mem.indexOf(u8, text, "https://").?)) + rig.session.shift_at(@intCast(std.mem.indexOf(u8, text, "https://").?)),
+        on_words,
+    );
+
+    // And the mark itself opens the link too.
+    const on_mark = rig.session.cell_offset(lay, .{
+        .x = 1 + start,
+        .y = row,
+        .kind = .press,
+        .button = .left,
+    }) orelse unreachable;
+    try testing.expectEqual(on_words, on_mark);
 }

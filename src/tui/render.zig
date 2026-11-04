@@ -605,6 +605,25 @@ fn render_hover_popup(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void
 
 /// One wrapped line, with its links underlined so they read as links and not
 /// as punctuation soup.
+/// What marks a link: the chain. Two cells -- it is an emoji -- which is the size at
+/// which a link reads as a link from reading distance; a one-cell glyph next to prose is
+/// a speck of dust.
+pub const link_mark = "\u{1F517}";
+
+/// How many columns the marks before `before` take on this line. The frame adds it when
+/// it draws, and the pointer subtracts it when it is clicked.
+pub fn mark_shift(inputs: Inputs, line_start: usize, line_end: usize, before: usize) u16 {
+    var shift: u16 = 0;
+    const width: u16 = @intCast(screen.text_columns(link_mark));
+    for (inputs.links) |link| {
+        if (link.end <= line_start or link.start >= line_end) continue;
+        // Only the line a link starts on carries its mark.
+        if (link.start < line_start) continue;
+        if (link.start < before) shift += width;
+    }
+    return shift;
+}
+
 fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16) void {
     if (draw_line_selection(inputs, out, line, y, width)) return;
     if (inputs.links.len == 0) {
@@ -624,16 +643,22 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
         const start = @max(link.start, line_start);
         const end = @min(link.end, line_end);
         if (start > cursor) {
-            draw_segment_kind(inputs, out, line, cursor - line_start, start - line_start, y, width, .text);
+            draw_segment_kind(inputs, out, line, cursor - line_start, start - line_start, y, width, .text, false);
             cursor = start;
         }
         if (end > cursor) {
-            draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, .link);
+            // The mark in front of every link, on the line the link starts.
+            const starts_here = link.start >= line_start;
+            if (starts_here) {
+                const at = screen.text_columns(line[0 .. start - line_start]) + mark_shift(inputs, line_start, line_end, start);
+                _ = out.put_text(1 + at, y, link_mark, width -| at, inputs.theme.accent.with_bold());
+            }
+            draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, .link, starts_here);
             cursor = end;
         }
     }
     if (cursor < line_end) {
-        draw_segment_kind(inputs, out, line, cursor - line_start, line.len, y, width, .text);
+        draw_segment_kind(inputs, out, line, cursor - line_start, line.len, y, width, .text, false);
     }
     draw_hover(inputs, out, line, y, width);
 }
@@ -683,7 +708,8 @@ fn draw_hover(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16
     const start = @max(hovered.start, line_start) - line_start;
     const end = @min(hovered.end, line_end) - line_start;
     if (end <= start) return;
-    draw_segment_kind(inputs, out, line, start, end, y, width, .hovered);
+    const marked = hovered.start >= line_start;
+    draw_segment_kind(inputs, out, line, start, end, y, width, .hovered, marked);
 }
 
 fn draw_segment_kind(
@@ -695,10 +721,18 @@ fn draw_segment_kind(
     y: u16,
     width: u16,
     kind: Segment,
+    /// Whether this segment's own mark is in front of it.
+    marked: bool,
 ) void {
     if (end <= start) return;
-    // Columns are counted from the line, which starts after the gutter.
-    const offset = screen.text_columns(line[0..start]);
+    // Columns are counted from the line, which starts after the gutter, plus the marks
+    // drawn before this segment on the same line.
+    const line_start = @intFromPtr(line.ptr) - @intFromPtr(inputs.body.ptr);
+    const line_end = line_start + line.len;
+    var offset = screen.text_columns(line[0..start]);
+    offset += mark_shift(inputs, line_start, line_end, line_start + start);
+    // A segment that carries the link's own mark starts after it.
+    if (marked) offset += screen.text_columns(link_mark);
     const segment = line[@min(start, line.len)..@min(end, line.len)];
     _ = out.put_text(1 + offset, y, segment, width -| offset, segment_style(inputs, kind));
 }
@@ -1884,7 +1918,9 @@ test "size_text covers bytes, kibibytes, and mebibytes" {
 test "a link that wraps is drawn without gaps or doubled spaces" {
     const body = "https://unsubscribe.example.com/?token=abcdefghijklmnopqrstuvwxyz0123456789";
     var wrapped: wrap.Wrapped = .{};
-    wrap.wrap(body, 20, &wrapped);
+    // As wide as the row, less the mark: the link's chain takes its columns first.
+    const mark_columns: u16 = @intCast(screen.text_columns(link_mark));
+    wrap.wrap(body, 20 - mark_columns, &wrapped);
     try testing.expect(wrapped.len > 2);
 
     var buffer: [core.links.max_links]core.links.Link = undefined;
@@ -1912,8 +1948,17 @@ test "a link that wraps is drawn without gaps or doubled spaces" {
     // wrapped line: no gaps, no doubled spaces. The link's mark sits before it, once.
     var text_buffer: [64]u8 = undefined;
     const first = std.mem.trimEnd(u8, canvas.row_text(0, &text_buffer), " ");
-    // The row starts with the gutter and then the line itself, byte for byte.
-    try testing.expectEqualStrings(wrapped.at(0, body), std.mem.trimStart(u8, first, " "));
+    // The row starts with the gutter, the link's chain (and the cells it continues into),
+    // and then the line itself.
+    var expected: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&expected);
+    writer.writeAll(link_mark) catch unreachable;
+    // The cells the chain continues into are the wide glyph's second half: the screen
+    // keeps them as zero, and skips them when it writes the row.
+    var pad: u16 = 0;
+    while (pad + 1 < mark_columns) : (pad += 1) writer.writeByte(0) catch unreachable;
+    writer.writeAll(wrapped.at(0, body)) catch unreachable;
+    try testing.expectEqualStrings(writer.buffered(), std.mem.trimStart(u8, first, " "));
     var second: [64]u8 = undefined;
     const next = std.mem.trimEnd(u8, canvas.row_text(1, &second), " ");
     try testing.expectEqualStrings(wrapped.at(1, body), std.mem.trimStart(u8, next, " "));
@@ -2479,4 +2524,41 @@ test "both sizes of the mark answer their own cells" {
     try testing.expectEqual(small.width * 2, large.width);
     try testing.expectEqual(small.width * 3, huge.width);
     try testing.expectEqual(small.height * 2, large.height);
+}
+
+test "every link gets a mark, and only one each" {
+    const body = "one https://a.example/x two https://b.example/y and a long one " ++
+        "https://c.example/a/very/long/address/that/wraps/over/two/lines/at/this/width";
+    var wrapped: wrap.Wrapped = .{};
+    wrap.wrap(body, 40, &wrapped);
+
+    var buffer: [core.links.max_links]core.links.Link = undefined;
+    const count = core.links.scan(body, &buffer);
+
+    var canvas: Screen = .{};
+    canvas.resize(60, 12);
+    const state = State{};
+    const theme = Theme.dark();
+    var row: u16 = 0;
+    while (row < wrapped.len) : (row += 1) {
+        const inputs = Inputs{
+            .state = &state,
+            .store = undefined,
+            .theme = &theme,
+            .body = body,
+            .links = buffer[0..count],
+            .line_index = row,
+        };
+        draw_line_with_links(inputs, &canvas, wrapped.at(row, body), row, 50);
+    }
+
+    var marks: usize = 0;
+    var row_buffer: [512]u8 = undefined;
+    var line: u16 = 0;
+    while (line < canvas.rows) : (line += 1) {
+        marks += std.mem.count(u8, canvas.row_text(line, &row_buffer), link_mark);
+    }
+    // One per link, even the one that wraps: three links, three marks.
+    try testing.expectEqual(@as(usize, 3), marks);
+    try testing.expectEqual(@as(usize, 3), count);
 }
