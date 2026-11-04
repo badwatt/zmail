@@ -12,11 +12,8 @@ const exe_path = @import("build_options").zmail_exe;
 const testing = std.testing;
 
 fn sleep_ms(ms: u64) void {
-    const request: std.posix.timespec = .{
-        .sec = @intCast(ms / 1000),
-        .nsec = @intCast((ms % 1000) * 1_000_000),
-    };
-    _ = std.c.nanosleep(&request, null);
+    var empty = [_]std.posix.pollfd{};
+    _ = std.posix.poll(&empty, @intCast(@min(ms, std.math.maxInt(i32)))) catch 0;
 }
 
 const Run = struct {

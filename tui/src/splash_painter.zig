@@ -59,6 +59,23 @@ pub const Painter = struct {
         labels: []const u8,
     ) void {
         if (self.thread != null) return;
+        self.set_up(system, size, theme, reduced_motion, started_ms, labels);
+        if (self.placement.height == 0) return;
+        self.stop.store(false, .release);
+        self.thread = std.Thread.spawn(.{}, Painter.run, .{self}) catch null;
+    }
+
+    /// Remembers what to draw and where, without painting anything: `start` adds the
+    /// thread, and a test calls `paint` itself.
+    pub fn set_up(
+        self: *Painter,
+        system: System,
+        size: system_mod.Size,
+        theme: theme_mod.Theme,
+        reduced_motion: bool,
+        started_ms: i64,
+        labels: []const u8,
+    ) void {
         if (size.columns == 0 or size.rows == 0) return;
         self.system = system;
         self.placement = splash.splash_mark(size.columns, size.rows);
@@ -91,10 +108,7 @@ pub const Painter = struct {
         while (!self.stop.load(.acquire)) {
             var waited: u64 = 0;
             while (waited < frame_ms and !self.stop.load(.acquire)) : (waited += 10) {
-                _ = std.c.nanosleep(&std.posix.timespec{
-                    .sec = 0,
-                    .nsec = 10 * std.time.ns_per_ms,
-                }, null);
+                os.sleep_ms(10);
             }
             if (self.stop.load(.acquire)) return;
             self.paint();
@@ -199,9 +213,10 @@ test "the painter draws the mark where the splash put it, and stops" {
     var fake: system_mod.Fake = .{};
     var painter = Painter{};
 
-    painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
-    // Long enough for at least one frame, short enough not to slow the suite.
-    _ = std.c.nanosleep(&std.posix.timespec{ .sec = 0, .nsec = 120 * std.time.ns_per_ms }, null);
+    // The frame is drawn here rather than waited for: a test that sleeps is a test
+    // that measures the machine, and this one measures the drawing.
+    painter.set_up(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
+    painter.paint();
     painter.finish();
 
     const written = fake.output_text();
@@ -235,7 +250,8 @@ test "the painter draws the mark where the splash put it, and stops" {
 test "with no room for a mark, nothing is painted" {
     var fake: system_mod.Fake = .{};
     var painter = Painter{};
-    painter.start(fake.system(), .{ .columns = 0, .rows = 0 }, theme_mod.Theme.dark(), false, 0, "");
+    painter.set_up(fake.system(), .{ .columns = 0, .rows = 0 }, theme_mod.Theme.dark(), false, 0, "");
+    painter.paint();
     painter.finish();
     try testing.expectEqualStrings("", fake.output_text());
 }
@@ -282,10 +298,31 @@ test "the mark at its largest scale still fits a row" {
     // three bytes a cell, and the buffer was sized for the two-times one.
     var fake: system_mod.Fake = .{};
     var painter = Painter{};
-    painter.start(fake.system(), .{ .columns = 170, .rows = 45 }, theme_mod.Theme.from_background(.{ .r = 20, .g = 20, .b = 24 }), false, 0, "home");
-    _ = std.c.nanosleep(&std.posix.timespec{ .sec = 0, .nsec = 120 * std.time.ns_per_ms }, null);
+    painter.set_up(fake.system(), .{ .columns = 170, .rows = 45 }, theme_mod.Theme.from_background(.{ .r = 20, .g = 20, .b = 24 }), false, 0, "home");
+    painter.paint();
     painter.finish();
 
     try testing.expectEqual(@as(u8, 4), painter.placement.scale);
     try testing.expect(fake.output_len > 0);
+}
+
+test "the thread paints on its own, and stops when asked" {
+    // The other tests draw by hand so they measure the drawing, not the machine.
+    // This one is the opposite: the thread is the point, so it waits for it -- and
+    // waits no longer than it has to.
+    var fake: system_mod.Fake = .{};
+    var painter = Painter{};
+    painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
+    defer painter.finish();
+
+    var waited: u32 = 0;
+    while (fake.output_len == 0 and waited < 2_000) : (waited += 5) os.sleep_ms(5);
+    try testing.expect(fake.output_len > 0);
+
+    painter.finish();
+    try testing.expect(painter.thread == null);
+    // And it is quiet afterwards: the frame it drew is the last byte written.
+    const after = fake.output_len;
+    os.sleep_ms(150);
+    try testing.expectEqual(after, fake.output_len);
 }

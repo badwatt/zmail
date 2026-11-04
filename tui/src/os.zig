@@ -180,13 +180,16 @@ pub fn monotonic_ms() i64 {
 }
 
 /// Sleeps for `ms`. Signals may shorten it, which only matters for a spinner.
+///
+/// A wait with nothing to wait for, rather than `nanosleep`: the C call returned
+/// immediately on macOS, which turned every frame of the loop into a busy spin. A
+/// zero-length poll set with a timeout is the same pause on every system this
+/// program builds for, and it is the one the loop already uses when it waits for a
+/// key.
 pub fn sleep_ms(ms: u64) void {
     if (ms == 0) return;
-    const request: std.posix.timespec = .{
-        .sec = @intCast(ms / 1000),
-        .nsec = @intCast((ms % 1000) * 1_000_000),
-    };
-    _ = std.c.nanosleep(&request, null);
+    var empty = [_]std.posix.pollfd{};
+    _ = std.posix.poll(&empty, @intCast(@min(ms, std.math.maxInt(i32)))) catch 0;
 }
 
 /// The mode every file zmail writes is created with: only its owner reads it.
