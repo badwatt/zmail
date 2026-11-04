@@ -213,11 +213,11 @@ const spinner_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 /// between the letters, so it reads as a masthead instead of as a fence. A
 /// terminal cannot set type, and this is the closest it gets.
 const wordmark_rows = [_][]const u8{
-    "█████ █   █  ███  ▀ █",
-    "   ██ ██ ██ █   █   █",
-    "  ██  █ █ █ █████ █ █",
-    " ██   █   █ █   █ █ █",
-    "█████ █   █  ███  █ █",
+    "▐██████ ▐█   ██ ▐██████ ▐██ ▐██    ",
+    "   ▐██  ▐██ ███ ▐██ ▐██ ▐██ ▐██    ",
+    "  ▐██   ▐█ █ ██ ▐██████ ▐██ ▐██    ",
+    " ▐██    ▐█   ██ ▐██ ▐██ ▐██ ▐██    ",
+    "▐██████ ▐█   ██ ▐██ ▐██ ▐██ ▐█████ ",
 };
 
 /// One wordmark, two sizes. The big one is the small one with every cell drawn
@@ -225,13 +225,13 @@ const wordmark_rows = [_][]const u8{
 /// wordmark is to draw more of it, and deriving it from one shape is what keeps
 /// the two from drifting apart.
 const wordmark = Words{
-    .small = decode(5, 21, wordmark_rows),
-    .large = doubled(5, 21, decode(5, 21, wordmark_rows)),
+    .small = decode(5, 35, wordmark_rows),
+    .large = masthead(5, 35, decode(5, 35, wordmark_rows)),
 };
 
 const Words = struct {
-    small: [5][21]u21,
-    large: [10][42]u21,
+    small: [5][35]u21,
+    large: [10][70]u21,
 };
 
 fn decode(
@@ -255,7 +255,13 @@ fn decode(
     return out;
 }
 
-fn doubled(
+/// The masthead: the same word at twice the size, in solid blocks.
+///
+/// Every cell is drawn twice across and twice down, and every drawn cell becomes a
+/// full block. The half block (`▐`) that gives the small mark its spine is what makes
+/// the letters read at one size, but doubled sideways it becomes a speckled pair --
+/// `▐▐` is a stripe, not an edge -- so at this size the strokes are solid.
+fn masthead(
     comptime rows: usize,
     comptime width: usize,
     comptime grid: [rows][width]u21,
@@ -264,10 +270,11 @@ fn doubled(
     var out: [rows * 2][width * 2]u21 = @splat(@splat(' '));
     for (grid, 0..) |line, y| {
         for (line, 0..) |cell, x| {
-            out[y * 2][x * 2] = cell;
-            out[y * 2][x * 2 + 1] = cell;
-            out[y * 2 + 1][x * 2] = cell;
-            out[y * 2 + 1][x * 2 + 1] = cell;
+            if (cell == ' ') continue;
+            out[y * 2][x * 2] = '█';
+            out[y * 2][x * 2 + 1] = '█';
+            out[y * 2 + 1][x * 2] = '█';
+            out[y * 2 + 1][x * 2 + 1] = '█';
         }
     }
     return out;
@@ -1966,9 +1973,9 @@ test "the boot splash is a wordmark, the account, and a footer" {
 
     var out = Screen.init(80, 24);
     frame(f.inputs(80, 24), &out);
-    // middle = 12: the big mark on 5..14, status on 15, address on 16, footer 23.
-    try row_contains(&out, 5, "██████████  ██      ██");
-    try row_contains(&out, 14, "██████████  ██      ██");
+    // middle = 12: the big mark on 5..14, status on 17, address on 18, footer 23.
+    try row_contains(&out, 5, "██████████████  ████      ████  ██████████████  ██████  ██████");
+    try row_contains(&out, 14, "██████████████  ████      ████  ██████  ██████  ██████  ████████████");
     try row_contains(&out, 17, "connecting to work");
     try row_contains(&out, 18, "alice@example.com");
     var footer_buffer: [512]u8 = undefined;
@@ -2780,6 +2787,7 @@ test "both sizes of the mark answer their own cells" {
     const small = splash_mark(30, 24);
     try testing.expect(!small.large);
     try testing.expect(mark_cell(false, 0, 0) != 0);
-    // The small mark is the same word, half the columns.
+    // The masthead is the same word at twice the size, in both directions.
     try testing.expectEqual(small.width * 2, large.width);
+    try testing.expectEqual(small.height * 2, large.height);
 }

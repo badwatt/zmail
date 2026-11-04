@@ -109,7 +109,7 @@ pub const Painter = struct {
         // Simple and idempotent: every row, its address, its glyphs.
         var row: u16 = 0;
         while (row < placement.height) : (row += 1) {
-            var row_text: [128]u8 = undefined;
+            var row_text: [256]u8 = undefined;
             var length: usize = 0;
             var column: u16 = 0;
             while (column < placement.width) : (column += 1) {
