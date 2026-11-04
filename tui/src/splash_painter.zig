@@ -91,8 +91,6 @@ pub const Painter = struct {
         self.theme = theme;
         self.reduced_motion = reduced_motion;
         self.started_ms = started_ms;
-        self.stop.store(false, .release);
-        self.thread = std.Thread.spawn(.{}, Painter.run, .{self}) catch null;
     }
 
     /// Stops and waits: the caller is about to write to the terminal itself.
@@ -209,6 +207,27 @@ fn write_sgr(writer: *std.Io.Writer, theme: theme_mod.Theme, level: f32) std.Io.
 
 const testing = std.testing;
 
+/// `written` without its escape sequences: the words, not the colours.
+fn plain(written: []const u8, buffer: []u8) []const u8 {
+    var length: usize = 0;
+    var index: usize = 0;
+    while (index < written.len and length < buffer.len) {
+        if (written[index] == 0x1b) {
+            index += 1;
+            if (index < written.len and written[index] == '[') {
+                index += 1;
+                while (index < written.len and (written[index] < '@' or written[index] > '~')) index += 1;
+                index += 1;
+            }
+            continue;
+        }
+        buffer[length] = written[index];
+        length += 1;
+        index += 1;
+    }
+    return buffer[0..length];
+}
+
 test "the painter draws the mark where the splash put it, and stops" {
     var fake: system_mod.Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
     var painter = Painter{};
@@ -226,24 +245,8 @@ test "the painter draws the mark where the splash put it, and stops" {
     try testing.expect(std.mem.indexOf(u8, written, ";38;") != null);
     // The words under the mark are carried too: they move with it. Their runs are
     // separated by colour changes, so the text is found with the escapes stripped.
-    var plain: [4096]u8 = undefined;
-    var length: usize = 0;
-    var index: usize = 0;
-    while (index < written.len and length < plain.len) {
-        if (written[index] == 0x1b) {
-            index += 1;
-            if (index < written.len and written[index] == '[') {
-                index += 1;
-                while (index < written.len and (written[index] < '@' or written[index] > '~')) index += 1;
-                index += 1;
-            }
-            continue;
-        }
-        plain[length] = written[index];
-        length += 1;
-        index += 1;
-    }
-    try testing.expect(std.mem.indexOf(u8, plain[0..length], "connecting to home") != null);
+    var words: [4096]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, plain(written, &words), "connecting to home") != null);
     try testing.expect(painter.thread == null);
 }
 
@@ -325,4 +328,44 @@ test "the thread paints on its own, and stops when asked" {
     const after = fake.output_len;
     os.sleep_ms(150);
     try testing.expectEqual(after, fake.output_len);
+}
+
+test "a frame says the same thing twice, so a second one cannot pile up" {
+    // The painter draws over its own last frame ninety times a second. Anything it
+    // reads back from its own output -- the sentence, the layout -- would grow a word
+    // per frame, and the first screen would fill with a staircase of near-copies.
+    var fake: system_mod.Fake = .{ .size_value = .{ .columns = 200, .rows = 28 } };
+    var painter = Painter{};
+    painter.set_up(fake.system(), .{ .columns = 200, .rows = 28 }, theme_mod.Theme.dark(), false, 0, "azama, gmail");
+
+    painter.paint();
+    const first = fake.output_len;
+    const first_text = fake.output_text()[0..first];
+
+    fake.output_len = 0;
+    painter.paint();
+    try testing.expectEqual(first, fake.output_len);
+    try testing.expectEqualStrings(first_text, fake.output_text());
+    // And the sentence is the sentence: one prefix, not two.
+    var words: [4096]u8 = undefined;
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, plain(fake.output_text(), &words), "connecting to "));
+}
+
+test "one painter, one thread: the layout does not start anything" {
+    // `set_up` remembers where to draw; `start` is the only thing that spawns. When the
+    // tail of `start` was left in `set_up`, every splash had two painters -- the second
+    // never joined -- and both wrote the mark at their own layout, on top of the loop's
+    // frame.
+    var fake: system_mod.Fake = .{ .size_value = .{ .columns = 100, .rows = 30 } };
+    var painter = Painter{};
+    painter.set_up(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
+    try testing.expect(painter.thread == null);
+    try testing.expectEqual(@as(u16, 10), painter.placement.height);
+
+    painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
+    // The second start finds the first thread and leaves it alone.
+    painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
+    try testing.expect(painter.thread != null);
+    painter.finish();
+    try testing.expect(painter.thread == null);
 }
