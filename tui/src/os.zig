@@ -470,10 +470,17 @@ test "restoreNow gives the terminal back in one call, from anywhere" {
     try testing.expect(after.lflag.ICANON);
     try testing.expect(after.lflag.ECHO);
 
-    // And the alternate screen is left, so the shell comes back to its own.
-    var buffer: [128]u8 = undefined;
-    const count = pty.readMaster(&buffer);
-    try testing.expect(std.mem.indexOf(u8, buffer[0..count], "\x1b[?1049l") != null);
+    // And the alternate screen is left, so the shell comes back to its own. Read
+    // until it arrives: the terminal may also be carrying the progress bar's clear,
+    // which is a sequence of its own and may land in the same read or before it.
+    var buffer: [512]u8 = undefined;
+    var filled: usize = 0;
+    var attempts: u8 = 0;
+    while (attempts < 4 and filled < buffer.len) : (attempts += 1) {
+        filled += pty.readMaster(buffer[filled..]);
+        if (std.mem.indexOf(u8, buffer[0..filled], "\x1b[?1049l") != null) break;
+    }
+    try testing.expect(std.mem.indexOf(u8, buffer[0..filled], "\x1b[?1049l") != null);
 }
 
 test "leaving raw mode without entering it is a no-op" {

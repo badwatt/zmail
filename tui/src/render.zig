@@ -273,62 +273,68 @@ fn doubled(
     return out;
 }
 
-/// Ticks a wave of light takes to cross the wordmark. The loop wakes ten times
-/// a second, so one crossing lasts about three seconds: slow enough to read as
-/// breathing rather than as a progress bar.
-const pulse_ticks: u16 = 32;
+/// One breath, in ticks. The splash repaints every 55ms and the loop's spinner
+/// advances by two per frame, so this is about a second in, a second out: slow
+/// enough to read as breathing rather than as a blink.
+const breath_ticks: u16 = 32;
 
-/// The wordmark's light, as steps of lightness away from the theme's accent. It
-/// is derived, not listed: the generated theme has no 256-colour index to walk,
-/// and hard-coding one is how the first screen kept its old colours while the
-/// rest of the app changed.
-const pulse_offsets = [_]f32{ -0.14, -0.07, 0.0, 0.07 };
+/// How far a letter fades at its emptiest. Never zero: the mark is the first thing
+/// anyone reads, and a screen that goes blank twice a second is not a screen.
+const breath_floor: f32 = 0.30;
 
-/// Where a column of the wordmark sits on the ramp, one wave later than the
-/// column to its left. `tick` moves the whole ramp; nothing else on the screen
-/// moves at all.
-fn pulse_shade(tick: u16, column: u16, width: u16) u8 {
-    // The light crosses and comes back, like the shimmer under it: one movement on
-    // the screen, not two that disagree.
-    const steps = pulse_offsets.len;
-    // A triangle, not a sawtooth: the light reaches the edge and turns round.
-    const phase = (@as(u32, tick % (pulse_ticks * 2)) * steps) / pulse_ticks;
-    const travel = if (phase <= steps) phase else steps * 2 - phase;
-    const across = @as(u32, column) * steps / @max(1, width);
-    return @intCast((travel + across) % steps);
+/// How far across the letters the wave runs, in ticks of the breath. A whole word
+/// breathing in lockstep is a blink; a shallow wave reads as air moving over it.
+const breath_skew: f32 = 0.55;
+const breath_skew_columns: u16 = 16;
+
+/// How solid a cell of the wordmark is at `tick`, from `breath_floor` to one.
+pub fn breath_level(tick: u16, column: u16) f32 {
+    const phase = @as(f32, @floatFromInt(tick % breath_ticks)) / @as(f32, breath_ticks);
+    const skew = @as(f32, @floatFromInt(column % breath_skew_columns)) /
+        @as(f32, breath_skew_columns) * breath_skew;
+    // A cosine, so the breath starts full: the first frame already shows the mark,
+    // and nothing has to wait a cycle to see the product's name.
+    const level = 0.5 + 0.5 * @cos((phase + skew) * std.math.tau);
+    return breath_floor + (1.0 - breath_floor) * level;
 }
 
-fn pulse_style(theme: *const Theme, shade: u8) Style {
-    const step = pulse_offsets[@min(shade, pulse_offsets.len - 1)];
+/// The style of one cell at `level` of opacity.
+///
+/// A terminal has no alpha channel, so transparency is a mix towards the colour
+/// behind the letter: the theme's own ground when it knows it, in OKLCH, so a light
+/// terminal fades towards paper and a dark one towards its own dark. Without a
+/// derivation to follow -- no colour, or the built-in palette -- the ramp is carried
+/// by weight and by the palette's steps instead.
+fn breath_style(theme: *const Theme, level: f32) Style {
+    const clamped = std.math.clamp(level, 0.0, 1.0);
 
-    // No color: the ramp is carried by weight alone, which keeps the wave
-    // visible on a monochrome terminal instead of flattening it.
     if (!theme.colored) {
-        return switch (shade) {
-            0 => theme.accent.with_dim(),
-            pulse_offsets.len - 1 => theme.accent.with_bold(),
-            else => theme.accent,
-        };
+        return if (clamped < 0.55) theme.accent.with_dim() else theme.accent.with_bold();
     }
 
     switch (theme.accent.fg) {
-        // A derived theme: the light is the same hue at four depths, in OKLCH,
-        // so it follows whatever the terminal's background asked for.
+        // A derived theme fades towards the ground it was made for.
         .rgb => |rgb| {
-            const base = core.oklch.from_rgb(.{ .r = rgb.r, .g = rgb.g, .b = rgb.b });
-            const lit = core.oklch.to_rgb(core.oklch.with_lightness(base, base.l + step));
-            return (Style{}).with_fg(.{ .rgb = .{ .r = lit.r, .g = lit.g, .b = lit.b } }).with_bold();
+            const accent = core.oklch.from_rgb(.{ .r = rgb.r, .g = rgb.g, .b = rgb.b });
+            const ground_rgb: core.oklch.Rgb = theme.ground orelse core.oklch.Rgb{ .r = 0, .g = 0, .b = 0 };
+            const ground = core.oklch.from_rgb(ground_rgb);
+            const mixed = core.oklch.Oklch{
+                .l = ground.l + (accent.l - ground.l) * clamped,
+                .c = accent.c * clamped,
+                .h = accent.h,
+            };
+            const out = core.oklch.to_rgb(mixed);
+            return (Style{}).with_fg(.{ .rgb = .{ .r = out.r, .g = out.g, .b = out.b } });
         },
-        // The built-in palette has no derivation to follow: keep its ramps.
+        // The built-in palette has no derivation: four steps of its own ramp.
         else => {
             const fixed = [_]u8{ 64, 68, 74, 80 };
-            return (Style{}).with_fg(.{ .ansi256 = fixed[@min(shade, fixed.len - 1)] }).with_bold();
+            const step: usize = @intFromFloat(clamped * @as(f32, fixed.len - 1) + 0.5);
+            return (Style{}).with_fg(.{ .ansi256 = fixed[@min(step, fixed.len - 1)] }).with_bold();
         },
     }
 }
 
-/// Draws the wordmark, one row at a time, shading each column by where the
-/// light has reached it.
 fn draw_wordmark(out: *Screen, top: u16, tick: u16, theme: *const Theme) void {
     // The big one where there is room for it: an 80-column terminal gets the
     // masthead at twice the size, a narrow one keeps the small mark rather than
@@ -348,7 +354,8 @@ fn draw_grid(out: *Screen, grid: anytype, top: u16, tick: u16, theme: *const The
         if (row >= out.rows) return;
         for (line, 0..) |cell, column| {
             if (cell == ' ') continue;
-            out.put(left +| @as(u16, @intCast(column)), row, cell, pulse_style(theme, pulse_shade(tick, @intCast(column), width)));
+            const level = breath_level(tick, @intCast(column));
+            out.put(left +| @as(u16, @intCast(column)), row, cell, breath_style(theme, level));
         }
     }
 }
@@ -2604,4 +2611,57 @@ test "a shimmer with nothing to shine on draws nothing" {
     try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 0, 0, "", 0, &theme));
     try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 0, 5, "text", 0, &theme));
     try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 12, 0, "text", 0, &theme));
+}
+
+test "the wordmark breathes: it dims, returns, and never disappears" {
+    var lowest: f32 = 1;
+    var highest: f32 = 0;
+    var tick: u16 = 0;
+    while (tick < breath_ticks * 2) : (tick += 1) {
+        const level = breath_level(tick, 0);
+        lowest = @min(lowest, level);
+        highest = @max(highest, level);
+    }
+    // A breath, not a blink: it reaches the floor and comes back to solid.
+    try testing.expect(lowest <= breath_floor + 0.02);
+    try testing.expect(highest >= 0.99);
+    // And it is a wave: the far end of the word is not in lockstep with the start.
+    try testing.expect(@abs(breath_level(0, 0) - breath_level(0, 8)) > 0.05);
+}
+
+test "a faded letter is mixed towards the terminal's own ground" {
+    // A light terminal fades towards its paper; a dark one towards its own dark.
+    const paper = theme_mod.Theme.from_background(.{ .r = 253, .g = 246, .b = 227 });
+    const night = theme_mod.Theme.from_background(.{ .r = 20, .g = 20, .b = 24 });
+
+    const faint_on_paper = breath_style(&paper, 0.05);
+    const faint_at_night = breath_style(&night, 0.05);
+    try testing.expect(faint_on_paper.fg == .rgb);
+    try testing.expect(faint_at_night.fg == .rgb);
+
+    const paper_level = core.oklch.luminance(.{ .r = faint_on_paper.fg.rgb.r, .g = faint_on_paper.fg.rgb.g, .b = faint_on_paper.fg.rgb.b });
+    const night_level = core.oklch.luminance(.{ .r = faint_at_night.fg.rgb.r, .g = faint_at_night.fg.rgb.g, .b = faint_at_night.fg.rgb.b });
+    try testing.expect(paper_level > night_level);
+    // Faded is dimmer than solid, on the same ground.
+    const solid = breath_style(&night, 1.0);
+    const solid_level = core.oklch.luminance(.{ .r = solid.fg.rgb.r, .g = solid.fg.rgb.g, .b = solid.fg.rgb.b });
+    try testing.expect(solid_level > night_level);
+}
+
+test "without a derivation the breath is carried by weight and the palette's steps" {
+    const mono = theme_mod.Theme.mono();
+    try testing.expect(breath_style(&mono, 0.2).attrs.dim);
+    try testing.expect(breath_style(&mono, 0.9).attrs.bold);
+
+    // The built-in palette has no ground to mix towards: it walks its own ramp.
+    const dark = theme_mod.Theme.dark();
+    var lowest: u8 = 255;
+    var highest: u8 = 0;
+    var tick: u16 = 0;
+    while (tick < breath_ticks * 2) : (tick += 1) {
+        const index = breath_style(&dark, breath_level(tick, 0)).fg.ansi256;
+        lowest = @min(lowest, index);
+        highest = @max(highest, index);
+    }
+    try testing.expect(lowest < highest);
 }

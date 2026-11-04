@@ -22,6 +22,10 @@ pub const Theme = struct {
     /// glance even before reading the label.
     account_colors: [4]screen.Color = @splat(screen.Color.default),
     colored: bool = false,
+    /// What the terminal paints behind the text, when it said. The splash needs it:
+    /// a terminal has no alpha, so fading a letter out means mixing it towards the
+    /// colour it sits on.
+    ground: ?oklch.Rgb = null,
 
     /// Muted blue accent, warm amber for stars, dim gray for metadata.
     pub fn dark() Theme {
@@ -99,6 +103,9 @@ pub const Theme = struct {
                 rgb_color(tinted(accent_hue + 60, 0.05, if (on_dark) 0.80 else 0.46)),
             },
             .colored = true,
+            // What the terminal paints behind the text: the splash fades towards
+            // this, and there is nothing else to fade towards.
+            .ground = background,
         };
     }
 };
