@@ -785,21 +785,21 @@ const trash_hints = [_]Hint{
 const list_hints = [_]Hint{
     .{ .keys = "j/k", .action = "move" },
     .{ .keys = "Enter", .action = "open" },
+    .{ .keys = "/", .action = "search" },
     .{ .keys = "c", .action = "compose" },
     .{ .keys = "r", .action = "reply" },
+    .{ .keys = "d", .action = "archive" },
     .{ .keys = "^R", .action = "refresh" },
-    .{ .keys = "A", .action = "accounts" },
     .{ .keys = "?", .action = "help" },
 };
 
 const reader_hints = [_]Hint{
     .{ .keys = "j/k", .action = "scroll" },
-    .{ .keys = "Space", .action = "page" },
+    .{ .keys = "i", .action = "pictures" },
+    .{ .keys = "\\", .action = "details" },
     .{ .keys = "H", .action = "html" },
-    .{ .keys = "click", .action = "open link" },
     .{ .keys = "r", .action = "reply" },
     .{ .keys = "q", .action = "back (never quits)" },
-    .{ .keys = "^R", .action = "refresh" },
 };
 
 const search_hints = [_]Hint{
@@ -917,73 +917,64 @@ fn render_hints(hints: []const Hint, y: u16, limit: u16, theme: *const Theme, ou
 /// `keys` is a heading.
 const help_rows = [_]Hint{
     .{ .keys = "", .action = "-- anywhere" },
-    .{ .keys = "?", .action = "this card (j/k scrolls, / filters)" },
-    .{ .keys = "Ctrl+C", .action = "quit" },
-    .{ .keys = "Ctrl+R", .action = "refresh" },
-    .{ .keys = "Tab / [ ]", .action = "next / previous mailbox" },
-    .{ .keys = "1 - 6", .action = "Inbox, Sent, Drafts, Archive, Trash, Junk" },
-    .{ .keys = "a", .action = "next account scope" },
-    .{ .keys = "A", .action = "accounts: pick, add, edit, rename, sign in" },
+    .{ .keys = "?", .action = "this card" },
+    .{ .keys = "Ctrl+C", .action = "quit (the only way out)" },
     .{ .keys = "/", .action = "search the list" },
-    .{ .keys = "", .action = "-- moving" },
-    .{ .keys = "j / Down", .action = "down a line" },
-    .{ .keys = "k / Up", .action = "up a line" },
-    .{ .keys = "g / Home", .action = "first row" },
-    .{ .keys = "G / End", .action = "last row" },
-    .{ .keys = "Ctrl+D / U", .action = "half a page" },
-    .{ .keys = "Ctrl+F / B", .action = "a whole page" },
-    .{ .keys = "Ctrl+N / P", .action = "down / up a line" },
-    .{ .keys = "PageDown / PageUp", .action = "a whole page" },
-    .{ .keys = "Space", .action = "a whole page" },
+    .{ .keys = "Ctrl+R", .action = "refresh from the server" },
+    .{ .keys = "Tab / [ ]", .action = "next / previous mailbox" },
+    .{ .keys = "1 - 6", .action = "the six mailboxes, in order" },
+    .{ .keys = "a / A", .action = "next account / accounts overlay" },
     .{ .keys = "", .action = "-- the list" },
-    .{ .keys = "Enter / l / Right", .action = "open the message" },
-    .{ .keys = "o", .action = "open the message" },
-    .{ .keys = "c", .action = "compose a new one" },
-    .{ .keys = "r", .action = "reply" },
-    .{ .keys = "u", .action = "read / unread" },
-    .{ .keys = "s / *", .action = "star / unstar" },
+    .{ .keys = "Enter / l / →", .action = "open the message" },
+    .{ .keys = "j / k", .action = "down / up a row" },
+    .{ .keys = "g / G", .action = "first / last row" },
+    .{ .keys = "Space, Ctrl+D/U", .action = "a page, and half a page" },
+    .{ .keys = "Ctrl+F/B, PageDown", .action = "a whole page" },
+    .{ .keys = "Up Down Home End", .action = "the same, without vim" },
+    .{ .keys = "c / r", .action = "compose / reply" },
+    .{ .keys = "u", .action = "read or unread" },
+    .{ .keys = "s / *", .action = "star or unstar" },
     .{ .keys = "d", .action = "archive" },
     .{ .keys = "# / Delete", .action = "move to Trash" },
     .{ .keys = "X", .action = "delete for good (Trash only)" },
     .{ .keys = "E", .action = "empty Trash" },
-    .{ .keys = "click", .action = "select a row; again to open it" },
-    .{ .keys = "wheel", .action = "scroll the list" },
     .{ .keys = "", .action = "-- the reader" },
-    .{ .keys = "q / h / Esc / Left", .action = "back to the list" },
+    .{ .keys = "q / h / Esc / ←", .action = "back to the list" },
+    .{ .keys = "j / k / Space", .action = "scroll" },
+    .{ .keys = "r / c", .action = "reply / compose" },
+    .{ .keys = "o", .action = "the whole mail in a browser" },
     .{ .keys = "H", .action = "HTML view, or the plain text one" },
-    .{ .keys = "\\", .action = "every header: to, cc, reply-to, date, id" },
     .{ .keys = "i", .action = "the pictures the message carries" },
-    .{ .keys = "o", .action = "open the mail in a browser" },
+    .{ .keys = "\\", .action = "every header: to, cc, reply-to, date, id" },
+    .{ .keys = "u / s / d / #", .action = "as in the list, on this message" },
     .{ .keys = "Ctrl+click", .action = "open the link under the pointer" },
-    .{ .keys = "drag", .action = "select, then copy (and the primary selection)" },
+    .{ .keys = "drag", .action = "select, and copy it" },
     .{ .keys = "", .action = "-- writing" },
     .{ .keys = "Tab / Shift+Tab", .action = "next / previous field" },
-    .{ .keys = "Enter", .action = "next field, or a new line in the body" },
-    .{ .keys = "Ctrl+S", .action = "send in 5s, save (forms)" },
+    .{ .keys = "Enter", .action = "next field, or a line break in the body" },
+    .{ .keys = "Ctrl+S", .action = "send in five seconds" },
     .{ .keys = "Ctrl+E", .action = "write the body in $EDITOR" },
     .{ .keys = "Ctrl+U", .action = "clear the field" },
-    .{ .keys = "Space", .action = "toggle an option" },
     .{ .keys = "Esc", .action = "cancel, close" },
     .{ .keys = "", .action = "-- the accounts overlay" },
     .{ .keys = "n / e / r / d", .action = "add, edit, rename, remove" },
     .{ .keys = "o", .action = "sign in with the provider" },
-    .{ .keys = "Enter", .action = "use this account" },
+    .{ .keys = "Enter / Esc", .action = "use this account / close" },
     .{ .keys = "", .action = "-- in this card" },
     .{ .keys = "/", .action = "filter the keys by word" },
-    .{ .keys = "Enter", .action = "keep the filter" },
-    .{ .keys = "Esc", .action = "drop the filter" },
+    .{ .keys = "j / k", .action = "scroll" },
+    .{ .keys = "any other key", .action = "closes" },
 };
 
 /// What the card must mention, checked by a test: a key that works and is not
 /// here is a key nobody will find.
 const required_in_help = [_][]const u8{
-    "Ctrl+C", "Ctrl+R", "Tab",    "1 - 6",  "a",      "A",          "/",        "j",
-    "k",      "g",      "G",      "Ctrl+D", "Ctrl+F", "Ctrl+N",     "PageDown", "Space",
-    "Enter",  "l",      "Right",  "o",      "c",      "r",          "u",        "s",
-    "*",      "d",      "#",      "Delete", "X",      "E",          "click",    "wheel",
-    "q",      "h",      "Esc",    "Left",   "H",      "Ctrl+click", "drag",     "Shift+Tab",
-    "Ctrl+S", "Ctrl+U", "Ctrl+E", "n",      "e",      "Up",         "Down",     "Home",
-    "End",
+    "Ctrl+C",    "Ctrl+R", "Tab",    "1 - 6",      "a",      "A",        "/",     "j",
+    "k",         "g",      "G",      "Ctrl+D",     "Ctrl+F", "PageDown", "Space", "Enter",
+    "l",         "o",      "c",      "r",          "u",      "s",        "d",     "#",
+    "X",         "E",      "q",      "h",          "Esc",    "H",        "i",     "drag",
+    "Shift+Tab", "Ctrl+S", "Ctrl+U", "Ctrl+E",     "n",      "e",        "Up",    "Down",
+    "Home",      "End",    "Delete", "Ctrl+click",
 };
 
 const account_rows_max = 8;
@@ -1153,7 +1144,7 @@ fn render_help(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     _ = out.put_text(rect.x + 2, rect.bottom() - 1, footer, card_width - 4, inputs.theme.dim);
 }
 
-const help_key_width: u16 = 18;
+const help_key_width: u16 = 24;
 
 fn render_help_filter(inputs: Inputs, rect: Rect, out: *Screen) void {
     const y = rect.y + 1;

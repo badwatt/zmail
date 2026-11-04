@@ -68,37 +68,57 @@ and disappears on the next action.
 
 ## Keys
 
-| Key | Action |
-|-----|--------|
-| `j` `↓` | move down / scroll down |
-| `k` `↑` | move up / scroll up |
-| `g` `Home` | first row |
-| `G` `End` | last row |
-| `Ctrl+D` / `Ctrl+U` | half page down / up |
-| `Ctrl+F` / `Ctrl+B`, `PageDown` / `PageUp` | page down / up |
-| `Enter` `l` `o` `→` | open the selected message |
-| `q` | quit from the list, back from the reader, type `q` in a field |
-| `h` `Esc` `←` | back one layer; never quits |
-| `u` | toggle read / unread |
-| `s` `*` | star / unstar |
-| `d` | archive |
-| `#` `Delete` | move to trash |
-| `/` | search (live filter over sender and subject) |
-| `Tab` `]` | next mailbox |
-| `Shift+Tab` `[` | previous mailbox |
-| `1`–`6` | jump to Inbox, Sent, Drafts, Archive, Trash, Junk |
-| `Ctrl+R` | refresh from the server |
-| `?` | help: every key, grouped by where it works (`j`/`k` scrolls it, `/` filters it, anything else closes it) |
-| `c` | compose a new message |
-| `r` | reply to the selected message |
-| `a` | cycle account scope: all → account 1 → … → all |
-| `X` | delete the selected message for good (Trash only) |
-| `E`, `E` | empty Trash (asks once) |
-| `Ctrl+N` / `Ctrl+P` | down / up, for terminals without arrow keys |
-| `Space` | a page in the list and the reader |
-| `H` | in the reader: HTML view, or the plain text one. The HTML is read by zmail itself: no browser, no external program |
-| `o` | in the reader: the whole mail in a browser |
+The card behind `?` shows the ones that matter for the screen you are on; this is all of
+them.
+
+| Anywhere | |
+|---|---|
+| `?` | the key card (`j`/`k` scrolls it, `/` filters it, anything else closes) |
 | `Ctrl+C` | quit. Nothing else does: not `Esc`, `q`, `h`, or `Ctrl+Q` |
+| `Ctrl+R` | refresh from the server |
+| `/` | search the list |
+| `Tab` `]` / `Shift+Tab` `[` | next / previous mailbox |
+| `1`–`6` | Inbox, Sent, Drafts, Archive, Trash, Junk |
+| `a` / `A` | next account scope / the accounts overlay |
+| `j` `k` `g` `G`, `↑` `↓` `Home` `End` | move: down, up, first, last |
+| `Ctrl+D` `Ctrl+U` / `Ctrl+F` `Ctrl+B`, `PageDown` `PageUp` | half a page / a page |
+| `Ctrl+N` `Ctrl+P` | down / up, for terminals without arrow keys |
+| `Space` | a page |
+
+| The list | |
+|---|---|
+| `Enter` `l` `o` `→` | open the selected message |
+| `c` / `r` | compose / reply |
+| `u` / `s` `*` | read or unread / star or unstar |
+| `d` / `#` `Delete` | archive / move to Trash |
+| `X` / `E` | delete for good (Trash only) / empty Trash |
+| click, wheel | select a row (again to open it), scroll |
+
+| The reader | |
+|---|---|
+| `q` `h` `Esc` `←` | back to the list; never quits |
+| `j` `k` `Space`, `↑` `↓` `PageDown` | scroll |
+| `r` / `c` | reply / compose |
+| `u` `s` `d` `#` | the list's actions, on the message you are reading |
+| `o` | the whole mail in a browser, pictures and all |
+| `H` | HTML view, or the plain text one. The HTML is read by zmail itself: no browser, no external program |
+| `i` | the pictures the message carries: the ones in it, and the ones it points at (fetched by `curl`, off the loop) |
+| `\` | every header: to, cc, reply-to, date, message-id |
+| `Ctrl+click` / `drag` | open the link under the pointer / select and copy |
+
+| Writing | |
+|---|---|
+| `Tab` / `Shift+Tab` | next / previous field |
+| `Enter` | next field, or a line break in the body |
+| `Ctrl+S` | send in five seconds; `Enter` again sends now |
+| `Ctrl+E` / `Ctrl+U` | write the body in `$EDITOR` / clear the field |
+| `Esc` | cancel, close |
+
+| The accounts overlay | |
+|---|---|
+| `n` `e` `r` `d` | add, edit, rename, remove |
+| `o` | sign in with the provider |
+| `Enter` / `Esc` | use this account / close |
 
 Search is live: typing filters as you go, `Enter` keeps the filter, `Esc`
 cancels it. `↑`/`↓` still move the cursor while typing. Inside the help overlay,
