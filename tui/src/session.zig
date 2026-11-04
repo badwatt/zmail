@@ -573,7 +573,11 @@ pub const Session = struct {
             // as a bug.
             self.state.booting = true;
             self.sync_progress();
-            self.play_splash(4);
+            // One full breath before the slow part starts: the first screen is a
+            // welcome, and a mark that fades out and back in has to have the time to
+            // do it. Sixteen frames at 55ms is a second, and the connection is not
+            // waiting on it -- it has not started yet.
+            self.play_splash(render_mod.breath_ticks / 2);
             self.boot();
         } else {
             // Nothing here can block: no empty frame, no splash.

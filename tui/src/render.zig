@@ -274,28 +274,23 @@ fn doubled(
 }
 
 /// One breath, in ticks. The splash repaints every 55ms and the loop's spinner
-/// advances by two per frame, so this is about a second in, a second out: slow
-/// enough to read as breathing rather than as a blink.
-const breath_ticks: u16 = 32;
+/// advances by two per frame, so a full cycle is about 1.8 seconds: in, out, in.
+pub const breath_ticks: u16 = 32;
 
-/// How far a letter fades at its emptiest. Never zero: the mark is the first thing
-/// anyone reads, and a screen that goes blank twice a second is not a screen.
-const breath_floor: f32 = 0.30;
+/// Below this a letter is not drawn at all. The fade is a mix towards the ground,
+/// which is invisible on the ground itself -- but only when the ground is known; a
+/// cell that is not painted is gone on every terminal, so the mark hides and shows
+/// the same way everywhere.
+const breath_hidden: f32 = 0.02;
 
-/// How far across the letters the wave runs, in ticks of the breath. A whole word
-/// breathing in lockstep is a blink; a shallow wave reads as air moving over it.
-const breath_skew: f32 = 0.55;
-const breath_skew_columns: u16 = 16;
-
-/// How solid a cell of the wordmark is at `tick`, from `breath_floor` to one.
-pub fn breath_level(tick: u16, column: u16) f32 {
+/// How solid the wordmark is at `tick`: one at the peak, zero at the trough. The
+/// whole word breathes together, which is what makes it read as one thing drawing
+/// breath rather than as letters flickering on their own.
+pub fn breath_level(tick: u16) f32 {
     const phase = @as(f32, @floatFromInt(tick % breath_ticks)) / @as(f32, breath_ticks);
-    const skew = @as(f32, @floatFromInt(column % breath_skew_columns)) /
-        @as(f32, breath_skew_columns) * breath_skew;
-    // A cosine, so the breath starts full: the first frame already shows the mark,
-    // and nothing has to wait a cycle to see the product's name.
-    const level = 0.5 + 0.5 * @cos((phase + skew) * std.math.tau);
-    return breath_floor + (1.0 - breath_floor) * level;
+    // A cosine, so the first frame is full: nothing waits a cycle to read the
+    // product's name. Half-way through, the letters are gone.
+    return 0.5 + 0.5 * @cos(phase * std.math.tau);
 }
 
 /// The style of one cell at `level` of opacity.
@@ -352,9 +347,10 @@ fn draw_grid(out: *Screen, grid: anytype, top: u16, tick: u16, theme: *const The
     for (grid, 0..) |line, index| {
         const row = top +| @as(u16, @intCast(index));
         if (row >= out.rows) return;
+        const level = breath_level(tick);
+        if (level < breath_hidden) continue;
         for (line, 0..) |cell, column| {
             if (cell == ' ') continue;
-            const level = breath_level(tick, @intCast(column));
             out.put(left +| @as(u16, @intCast(column)), row, cell, breath_style(theme, level));
         }
     }
@@ -2613,20 +2609,48 @@ test "a shimmer with nothing to shine on draws nothing" {
     try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 12, 0, "text", 0, &theme));
 }
 
-test "the wordmark breathes: it dims, returns, and never disappears" {
+test "the wordmark breathes: it goes away and comes back" {
     var lowest: f32 = 1;
     var highest: f32 = 0;
     var tick: u16 = 0;
-    while (tick < breath_ticks * 2) : (tick += 1) {
-        const level = breath_level(tick, 0);
+    while (tick < breath_ticks) : (tick += 1) {
+        const level = breath_level(tick);
         lowest = @min(lowest, level);
         highest = @max(highest, level);
     }
-    // A breath, not a blink: it reaches the floor and comes back to solid.
-    try testing.expect(lowest <= breath_floor + 0.02);
+    // All the way: empty at the trough, solid at the peak.
+    try testing.expect(lowest <= breath_hidden);
     try testing.expect(highest >= 0.99);
-    // And it is a wave: the far end of the word is not in lockstep with the start.
-    try testing.expect(@abs(breath_level(0, 0) - breath_level(0, 8)) > 0.05);
+}
+
+test "at the trough the mark is gone, and at the peak it is whole" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.booting = true;
+
+    var shown = Screen.init(80, 24);
+    f.state.spinner = 0;
+    frame(f.inputs(80, 24), &shown);
+
+    var hidden = Screen.init(80, 24);
+    // Half a breath in -- the trough of the cosine: nothing is painted at all.
+    f.state.spinner = breath_ticks / 2;
+    frame(f.inputs(80, 24), &hidden);
+
+    var drawn_shown = false;
+    var drawn_hidden = false;
+    for (0..24) |y| {
+        for (0..80) |x| {
+            const mark = shown.cells[y][x].ch == '█' or shown.cells[y][x].ch == '▀';
+            if (mark) drawn_shown = true;
+            const gone = hidden.cells[y][x].ch == '█' or hidden.cells[y][x].ch == '▀';
+            if (gone) drawn_hidden = true;
+        }
+    }
+    try testing.expect(drawn_shown);
+    try testing.expect(!drawn_hidden);
+    // Nothing else moved: the words under it are still there while it is gone.
+    try testing.expect(screen_contains(&hidden, "connecting to"));
 }
 
 test "a faded letter is mixed towards the terminal's own ground" {
@@ -2659,7 +2683,7 @@ test "without a derivation the breath is carried by weight and the palette's ste
     var highest: u8 = 0;
     var tick: u16 = 0;
     while (tick < breath_ticks * 2) : (tick += 1) {
-        const index = breath_style(&dark, breath_level(tick, 0)).fg.ansi256;
+        const index = breath_style(&dark, breath_level(tick)).fg.ansi256;
         lowest = @min(lowest, index);
         highest = @max(highest, index);
     }
