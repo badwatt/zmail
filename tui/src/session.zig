@@ -15,6 +15,7 @@ const layout_mod = @import("layout.zig");
 const render_mod = @import("render.zig");
 const progress_mod = @import("progress.zig");
 const splash_painter_mod = @import("splash_painter.zig");
+const media = @import("media.zig");
 const screen_mod = @import("screen.zig");
 const system_mod = @import("system.zig");
 const theme_mod = @import("theme.zig");
@@ -157,72 +158,16 @@ pub const Deps = struct {
 /// How many images one frame will paint: past a handful the mail is a gallery,
 /// not a message.
 const max_images_drawn: u8 = 8;
-const cell_width: u32 = 9;
-const cell_height: u32 = 18;
+const cell_width: u32 = media.cell_width;
+const cell_height: u32 = media.cell_height;
 /// An image taller than this is scaled down: a reader scrolls, it does not zoom.
-const max_image_rows: u32 = 12;
+const max_image_rows: u32 = media.max_image_rows;
 
 const ImageSlot = struct {
     key: core.text.Text(128) = .{},
     bytes: [96 * 1024]u8 = undefined,
     len: u32 = 0,
 };
-
-const ImageSize = struct { width: u32, height: u32 };
-const ImageCells = struct { columns: u16, rows: u16 };
-
-/// A picture's id in the terminal. It has to be unique per message as well as
-/// per marker: a terminal ignores a transmission for an id it already holds, so
-/// "r0" in another mail would quietly show the previous logo.
-fn image_id(account: core.id.AccountId, message: core.id.MessageId, key: []const u8) u32 {
-    var hash = std.hash.Wyhash.init(0xa5a5);
-    hash.update(std.mem.asBytes(&account));
-    hash.update(std.mem.asBytes(&message));
-    hash.update(key);
-    return @intCast((hash.final() & 0x7fffffff) | 1);
-}
-
-/// The marker a numbered network image gets: "r0", "r1", …
-fn is_remote_marker(key: []const u8) bool {
-    if (key.len < 2 or key[0] != 'r') return false;
-    for (key[1..]) |byte| if (!std.ascii.isDigit(byte)) return false;
-    return true;
-}
-
-/// An image that came with the message can be painted; one with an address
-/// cannot, without fetching it.
-fn is_local_image(key: []const u8) bool {
-    if (key.len == 0) return false;
-    return std.mem.indexOf(u8, key, "://") == null and
-        std.mem.indexOfScalar(u8, key, '/') == null and
-        std.mem.indexOfScalar(u8, key, '.') == null;
-}
-
-/// Width and height from a PNG's IHDR chunk. Anything else is refused: the
-/// terminal paints PNG, and a terminal cannot transcode a JPEG.
-fn png_size(bytes: []const u8) ?ImageSize {
-    if (bytes.len < 24) return null;
-    if (bytes[0] != 0x89 or bytes[1] != 'P' or bytes[2] != 'N' or bytes[3] != 'G') return null;
-    const width = std.mem.readInt(u32, bytes[16..20], .big);
-    const height = std.mem.readInt(u32, bytes[20..24], .big);
-    if (width == 0 or height == 0) return null;
-    return .{ .width = width, .height = height };
-}
-
-fn image_cells(size: ImageSize) ImageCells {
-    const wanted_rows = (size.height + cell_height - 1) / cell_height;
-    const scale = if (wanted_rows > max_image_rows)
-        @as(f64, @floatFromInt(max_image_rows)) / @as(f64, @floatFromInt(wanted_rows))
-    else
-        1.0;
-
-    const columns_f = @as(f64, @floatFromInt(size.width)) / @as(f64, @floatFromInt(cell_width)) * scale;
-    const rows_f = @as(f64, @floatFromInt(wanted_rows)) * scale;
-    return .{
-        .columns = @intFromFloat(@max(1.0, @min(columns_f, 255.0))),
-        .rows = @intFromFloat(@max(1.0, @min(rows_f, 255.0))),
-    };
-}
 
 pub const Session = struct {
     /// When the bar went up, and what it is showing: the minimum-visible window is
@@ -1988,9 +1933,9 @@ pub const Session = struct {
         // "r3" is a picture with an address; anything else names a part of the
         // message. Checking the other way round treats "r3" as a content id.
         var decoded: ?[]const u8 = null;
-        if (is_remote_marker(key)) {
+        if (media.is_remote_marker(key)) {
             if (self.remote_source(key[1..])) |url| decoded = self.remote_image(url);
-        } else if (is_local_image(key)) {
+        } else if (media.is_local_image(key)) {
             decoded = core.mime.image_body(self.raw[0..self.raw_len], key, &self.image_buffer);
         }
 
@@ -2009,8 +1954,8 @@ pub const Session = struct {
     /// How many rows a picture needs, which is how many rows of text it hides.
     fn image_rows(self: *Session, key: []const u8) u8 {
         const png = self.image_png(key) orelse return 0;
-        const size = png_size(png) orelse return 0;
-        return @intCast(@min(image_cells(size).rows, 255));
+        const size = media.png_size(png) orelse return 0;
+        return @intCast(@min(media.image_cells(size).rows, 255));
     }
 
     /// What the picture layer depends on: the message, the scroll, the size.
@@ -2087,8 +2032,8 @@ pub const Session = struct {
             const close = std.mem.indexOfScalar(u8, rest, ']') orelse continue;
             const key = rest[0..close];
             const png = self.image_png(key) orelse continue;
-            const size = png_size(png) orelse continue;
-            const cells = image_cells(size);
+            const size = media.png_size(png) orelse continue;
+            const cells = media.image_cells(size);
             if (cells.columns == 0 or cells.rows == 0) continue;
             const height: u16 = @min(cells.rows, lay.reader_rows -| row);
             const width: u16 = @min(cells.columns, lay.columns -| 1);
@@ -2100,7 +2045,7 @@ pub const Session = struct {
             _ = draw(
                 self.deps.draw_image_context,
                 png,
-                image_id(self.state.opened_account, self.state.opened, key),
+                media.image_id(self.state.opened_account, self.state.opened, key),
                 column,
                 lay.reader_body_y + row,
                 @min(width, lay.columns -| column),
@@ -4467,9 +4412,9 @@ test "an account out of scope is never connected" {
 }
 
 test "an image marker is only painted when it came with the message" {
-    try testing.expect(is_local_image("logo@x"));
-    try testing.expect(!is_local_image("https://example.com/logo.png"));
-    try testing.expect(!is_local_image(""));
+    try testing.expect(media.is_local_image("logo@x"));
+    try testing.expect(!media.is_local_image("https://example.com/logo.png"));
+    try testing.expect(!media.is_local_image(""));
 }
 
 test "a PNG knows how big it is, and how many cells that is" {
@@ -4481,17 +4426,17 @@ test "a PNG knows how big it is, and how many cells that is" {
     std.mem.writeInt(u32, png[16..20], 90, .big);
     std.mem.writeInt(u32, png[20..24], 36, .big);
 
-    const size = png_size(&png).?;
+    const size = media.png_size(&png).?;
     try testing.expectEqual(@as(u32, 90), size.width);
     try testing.expectEqual(@as(u32, 36), size.height);
-    const cells = image_cells(size);
+    const cells = media.image_cells(size);
     try testing.expectEqual(@as(u16, 10), cells.columns);
     try testing.expectEqual(@as(u16, 2), cells.rows);
 
     // Not a PNG: refused rather than painted as garbage.
-    try testing.expect(png_size("GIF89a") == null);
+    try testing.expect(media.png_size("GIF89a") == null);
     const tiny: [4]u8 = @splat(0);
-    try testing.expect(png_size(&tiny) == null);
+    try testing.expect(media.png_size(&tiny) == null);
 }
 
 test "a tall image is scaled down to the reader, not to the page" {
@@ -4503,7 +4448,7 @@ test "a tall image is scaled down to the reader, not to the page" {
     std.mem.writeInt(u32, png[16..20], 900, .big);
     std.mem.writeInt(u32, png[20..24], 1800, .big);
 
-    const cells = image_cells(png_size(&png).?);
+    const cells = media.image_cells(media.png_size(&png).?);
     try testing.expectEqual(@as(u16, 12), cells.rows);
     try testing.expect(cells.columns > 0 and cells.columns < 100);
 }
@@ -4711,15 +4656,15 @@ test "clicking a reference number opens the address it points at" {
 
 test "the same marker in another message gets another picture id" {
     const account = core.id.AccountId.from_int(1);
-    const first = image_id(account, MessageId.from_int(10), "r0");
-    const second = image_id(account, MessageId.from_int(11), "r0");
+    const first = media.image_id(account, MessageId.from_int(10), "r0");
+    const second = media.image_id(account, MessageId.from_int(11), "r0");
 
     // A terminal keeps one picture per id: two messages cannot share one.
     try testing.expect(first != second);
     try testing.expect(first != 0);
-    try testing.expect(image_id(account, MessageId.from_int(10), "r0") == first);
-    try testing.expect(image_id(account, MessageId.from_int(10), "r1") != first);
-    try testing.expect(image_id(core.id.AccountId.from_int(2), MessageId.from_int(10), "r0") != first);
+    try testing.expect(media.image_id(account, MessageId.from_int(10), "r0") == first);
+    try testing.expect(media.image_id(account, MessageId.from_int(10), "r1") != first);
+    try testing.expect(media.image_id(core.id.AccountId.from_int(2), MessageId.from_int(10), "r0") != first);
 }
 
 test "a marker with the same name in another message is another picture" {

@@ -273,7 +273,6 @@ pub const breath_ms: i64 = @as(i64, breath_ticks) * 90;
 /// How solid the wordmark is, one at the peak. The whole word breathes together,
 /// which is what makes it read as one thing drawing breath rather than as letters
 /// flickering on their own.
-
 /// The breath at a moment in the first screen's life, from zero upwards.
 ///
 /// It takes milliseconds, not a frame count: two things paint this mark -- the loop
