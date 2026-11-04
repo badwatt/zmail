@@ -335,25 +335,22 @@ fn drawImageThunk(
 ) bool {
     const self = browser_of(context);
 
-    var drawn = false;
-    const work = self.gpa.alloc(u8, png_bytes.len + core.limits.body_max * 2) catch null;
-    if (work) |block_work| {
-        defer self.gpa.free(block_work);
-        const rgba = self.gpa.alloc(u8, core.limits.body_max) catch null;
-        if (rgba) |pixels| {
-            defer self.gpa.free(pixels);
-            if (core.png.decode(png_bytes, block_work, pixels)) |image| {
-                drawn = halfblocks.draw(self.system, image, x, y, columns, rows, ground);
-            } else |_| {}
+    // The terminal's own protocol first: it paints the picture with its alpha, over
+    // whatever is behind it. Blocks are the fallback, never both -- a transparent
+    // pixel in the picture would show the blocks we drew under it, and a logo would
+    // arrive with a checkerboard behind the letters.
+    if (graphics.supported()) {
+        if (graphics.transmit(self.system, png_bytes, id)) {
+            if (graphics.place(self.system, id, x, y, columns, rows)) return true;
         }
     }
 
-    if (graphics.supported()) {
-        if (graphics.transmit(self.system, png_bytes, id)) {
-            if (graphics.place(self.system, id, x, y, columns, rows)) drawn = true;
-        }
-    }
-    return drawn;
+    const work = self.gpa.alloc(u8, png_bytes.len + core.limits.body_max * 2) catch return false;
+    defer self.gpa.free(work);
+    const rgba = self.gpa.alloc(u8, core.limits.body_max) catch return false;
+    defer self.gpa.free(rgba);
+    const image = core.png.decode(png_bytes, work, rgba) catch return false;
+    return halfblocks.draw(self.system, image, x, y, columns, rows, ground);
 }
 
 fn clearImagesThunk(context: *anyopaque) void {

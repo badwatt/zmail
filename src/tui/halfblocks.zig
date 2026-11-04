@@ -136,7 +136,7 @@ fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16
         }
     }
     if (count == 0) return transparent;
-    if (alpha_total / count < 8) return transparent;
+    if (alpha_total / count < 40) return transparent;
     return ((red_total / count) << 16) | ((green_total / count) << 8) | (blue_total / count);
 }
 
