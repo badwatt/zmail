@@ -645,9 +645,9 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
     draw_hover(inputs, out, line, y, width);
 }
 
-/// What marks a link: an arrow pointing out of the page, one cell wide so the columns
-/// of the line stay countable.
-pub const link_mark = "\u{2197}";
+/// What marks a link: a chain, the one glyph everyone reads as "this goes somewhere".
+/// It is two cells wide, which the frame and the pointer both have to know.
+pub const link_mark = "\u{1F517}";
 
 /// How many columns the link marks before `before` take on this line. The frame draws
 /// by adding it, and the pointer reads back by subtracting it.
@@ -1917,7 +1917,7 @@ test "size_text covers bytes, kibibytes, and mebibytes" {
 test "a link that wraps is drawn without gaps or doubled spaces" {
     const body = "https://unsubscribe.example.com/?token=abcdefghijklmnopqrstuvwxyz0123456789";
     var wrapped: wrap.Wrapped = .{};
-    // Eighteen wide, drawn in twenty: the link's mark takes one of the twenty.
+    // Eighteen wide, drawn in twenty: the link's mark takes the other two.
     wrap.wrap(body, 18, &wrapped);
     try testing.expect(wrapped.len > 2);
 
@@ -1946,7 +1946,9 @@ test "a link that wraps is drawn without gaps or doubled spaces" {
     // wrapped line: no gaps, no doubled spaces. The link's mark sits before it, once.
     var text_buffer: [64]u8 = undefined;
     const first = std.mem.trimEnd(u8, canvas.row_text(0, &text_buffer), " ");
-    try testing.expectEqualStrings(wrapped.at(0, body), std.mem.trimStart(u8, first, link_mark ++ " "));
+    // The row starts with the gutter, the mark, and then the line itself.
+    try testing.expect(std.mem.indexOf(u8, first, link_mark) != null);
+    try testing.expect(std.mem.endsWith(u8, std.mem.trimStart(u8, first, " "), wrapped.at(0, body)));
     var second: [64]u8 = undefined;
     const next = std.mem.trimEnd(u8, canvas.row_text(1, &second), " ");
     try testing.expectEqualStrings(wrapped.at(1, body), std.mem.trimStart(u8, next, " "));

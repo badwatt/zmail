@@ -1075,14 +1075,16 @@ pub const Session = struct {
         // Each link starts with a mark of its own, and the frame moved everything after
         // it one column right. Walk back the same way, and a click on the mark itself
         // is a click on the link.
+        const mark: u32 = screen_mod.text_columns(render_mod.link_mark);
         var shift: u32 = 0;
         for (self.reader_links()) |link| {
             if (link.end <= line_start or link.start >= line_start + line.len) continue;
             if (link.start < line_start) continue;
             const starts_at = (link.start - line_start) + shift;
-            if (column == starts_at) return link.start;
+            // Either cell of the mark is the link.
+            if (column >= starts_at and column < starts_at + mark) return link.start;
             if (column < starts_at) break;
-            shift += 1;
+            shift += mark;
         }
         if (column < shift or column - shift >= line.len) return null;
         return line_start + (column - shift);
@@ -6138,8 +6140,9 @@ test "clicking a link works with the mark in front of it" {
     const start: u16 = @intCast(std.mem.indexOf(u8, line, "https://").?);
 
     // Column of the link's first letter on screen: one gutter cell, the text before
-    // it, and the mark.
-    const x = 1 + start + 1;
+    // it, and the mark (two cells, it is an emoji).
+    const mark: u16 = @intCast(screen_mod.text_columns(render_mod.link_mark));
+    const x = 1 + start + mark;
     const offset = rig.session.cell_offset(lay, .{ .x = x, .y = row, .kind = .press, .button = .left }) orelse
         unreachable;
     try testing.expect(offset == @as(u32, @intCast(std.mem.indexOf(u8, rig.session.gapped_text(), "https://").?)));
