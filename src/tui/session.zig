@@ -148,10 +148,6 @@ pub const Deps = struct {
         rows: u16,
     ) bool = null,
     draw_image_context: *anyopaque = undefined,
-    /// Fetches one picture the message points at. Only ever called from the image
-    /// worker, never from a frame.
-    fetch_image: ?refresh_mod.ImageFetch = null,
-    fetch_image_context: *anyopaque = undefined,
     /// Takes every painted image away before the next frame is drawn.
     clear_images: ?*const fn (context: *anyopaque) void = null,
     clear_images_context: *anyopaque = undefined,
@@ -300,18 +296,9 @@ pub const Session = struct {
     /// When the footer spinner may stop: a bar that appears and vanishes inside one
     /// frame reads as a glitch, so the body keeps it up for the minimum.
     body_loading_until_ms: i64 = 0,
-    /// The addresses of the pictures the message points at, in the order the markers
-    /// number them ("r0" is the first).
-    remote_sources: [core.html.max_remote_images]core.text.Text(core.limits.url_max) = @splat(.{}),
-    remote_sources_count: usize = 0,
     /// Whether the reader is showing the pictures. Off until asked: a receipt full of
     /// tracking pixels is not downloaded because a key was pressed to open it.
     show_images: bool = false,
-    image_job: refresh_mod.ImageJob = .{},
-    image_in_flight: bool = false,
-    /// The marker the worker is fetching for ("r0"): the address is not the name the
-    /// frame asks by.
-    image_wanted: core.text.Text(32) = .{},
     /// Effects that need the connection and arrived while a refresh had it. Bounded,
     /// and drained one per tick once the worker is free.
     pending_effects: [pending_effects_max]core.effect.Effect = undefined,
@@ -573,7 +560,6 @@ pub const Session = struct {
         self.poll_refresh();
         self.poll_pending();
         self.poll_body();
-        self.poll_images();
         self.boot_step();
         if (self.state.booting) self.needs_render = true;
         self.sync_progress();
@@ -893,8 +879,10 @@ pub const Session = struct {
         return true;
     }
 
-    /// Pictures on or off. A receipt's tracking pixels are a decision, not a side
-    /// effect of opening it.
+    /// Pictures on or off. Only the ones the message carries: a picture with an address
+    /// is a socket, and a socket in a frame is a reader that stops answering keys -- and
+    /// one that a receipt can use to know it was opened. Those open with `o`, in a
+    /// browser, where they belong.
     fn toggle_images(self: *Session) bool {
         self.show_images = !self.show_images;
         // Whatever was decoded belongs to the frame that asked for it.
@@ -911,113 +899,6 @@ pub const Session = struct {
         }
         self.repaint();
         return true;
-    }
-
-    /// The address behind `[IMG:rN]`, when the message had one.
-    fn remote_marker_url(self: *const Session, key: []const u8) ?[]const u8 {
-        if (!media.is_remote_marker(key)) return null;
-        const index = std.fmt.parseInt(usize, key[1..], 10) catch return null;
-        if (index >= self.remote_sources_count) return null;
-        return self.remote_sources[index].slice();
-    }
-
-    fn image_slot_of(self: *const Session, key: []const u8) ?*const ImageSlot {
-        for (self.image_slots[0..self.image_slot_count]) |*slot| {
-            if (std.mem.eql(u8, slot.key.slice(), key)) return slot;
-        }
-        return null;
-    }
-
-    /// One picture per tick, off the loop: the frame only ever paints bytes that
-    /// already arrived.
-    fn poll_images(self: *Session) void {
-        if (self.image_in_flight) {
-            if (!self.image_job.finished()) return;
-            self.finish_image();
-            return;
-        }
-        if (!self.show_images or self.state.view != .reader) return;
-        // One worker in the network at a time: the body and the picture share an
-        // allocator and an IO handle, and they are not both reentrant.
-        if (self.body_in_flight or self.body_request != null or self.refreshing) return;
-        const fetch = self.deps.fetch_image orelse return;
-
-        const text = self.reader_text();
-        var line: u32 = 0;
-        while (line < self.wrapped.len) : (line += 1) {
-            const content = self.wrapped.at(line, text);
-            const marker = std.mem.indexOf(u8, content, "[IMG:") orelse continue;
-            const rest = content[marker + 5 ..];
-            const close = std.mem.indexOfScalar(u8, rest, ']') orelse continue;
-            const key = rest[0..close];
-            if (self.image_slot_of(key) != null) continue;
-            const url = self.remote_marker_url(key) orelse continue;
-            if (url.len == 0) continue;
-            self.image_in_flight = true;
-            self.image_wanted.set(key);
-            self.image_job.start(fetch, self.deps.fetch_image_context, url, &self.image_buffer);
-            return;
-        }
-    }
-
-    fn finish_image(self: *Session) void {
-        self.image_job.join();
-        self.image_in_flight = false;
-        const key = self.image_wanted.slice();
-        if (self.image_slot_count >= self.image_slots.len) return;
-        // A slot for what came and for what did not: a picture that failed is not
-        // asked for again on every frame.
-        const slot = &self.image_slots[self.image_slot_count];
-        slot.key.set(key);
-        slot.len = 0;
-        if (self.image_job.ok and self.image_job.len > 0 and self.image_job.len <= slot.bytes.len) {
-            @memcpy(slot.bytes[0..self.image_job.len], self.image_job.buffer[0..self.image_job.len]);
-            slot.len = self.image_job.len;
-        }
-        // Kept even when it failed: a picture that did not come is not asked for
-        // again on the next frame, and the next, and the next.
-        self.image_slot_count += 1;
-        if (slot.len > 0 and media.png_size(slot.bytes[0..slot.len]) == null) {
-            // Downloaded, and unusable: a terminal paints PNG, and what the server
-            // actually sent is the one thing worth saying.
-            var kind_buffer: [48]u8 = undefined;
-            self.state.set_status("That picture is {s}; o opens the mail", .{
-                picture_kind(slot.bytes[0..slot.len], &kind_buffer),
-            });
-        }
-        self.repaint();
-    }
-
-    /// What the bytes call themselves. Enough to say why a terminal that paints PNG
-    /// cannot paint this, without a decoder for every format on the web.
-    fn picture_kind(bytes: []const u8, out: []u8) []const u8 {
-        if (bytes.len < 4) return "empty";
-        if (std.mem.eql(u8, bytes[0..4], "\x89PNG")) return "a PNG the terminal refused";
-        if (std.mem.eql(u8, bytes[0..3], "GIF")) return "a GIF";
-        if (bytes[0] == 0xff and bytes[1] == 0xd8) return "a JPEG";
-        if (std.mem.eql(u8, bytes[0..4], "RIFF")) return "a WebP";
-        if (bytes[0] == '<') return "an SVG or a web page";
-        if (std.mem.startsWith(u8, bytes, "BM")) return "a BMP";
-        // Not a format we recognise: what the server sent instead is the difference
-        // between a bug here and a wrong address, so say it in the shape it came --
-        // text when it reads as text, hex when it does not.
-        if (printablePrefix(bytes)) |text| {
-            return std.fmt.bufPrint(out, "not an image ({s})", .{text}) catch "not an image";
-        }
-        return std.fmt.bufPrint(out, "not an image ({x:0>2} {x:0>2} {x:0>2})", .{
-            bytes[0], bytes[1], bytes[2],
-        }) catch "not an image";
-    }
-
-    /// The first printable run of `bytes`, for a message a human reads.
-    fn printablePrefix(bytes: []const u8) ?[]const u8 {
-        var length: usize = 0;
-        while (length < bytes.len and length < 40) : (length += 1) {
-            const byte = bytes[length];
-            if (byte < 0x20 or byte > 0x7e) break;
-        }
-        if (length == 0) return null;
-        return bytes[0..length];
     }
 
     /// A picture of the mail, drawn in the terminal: what a mail client shows,
@@ -1528,7 +1409,7 @@ pub const Session = struct {
         const request = self.body_request orelse return;
         // One connection per account: a refresh owns it until it finishes, and the
         // picture worker is another thread using the same IO.
-        if (self.refreshing or self.image_in_flight) return;
+        if (self.refreshing) return;
         self.body_request = null;
         self.body_in_flight = true;
         self.body_job.start(request, &self.raw);
@@ -1632,11 +1513,6 @@ pub const Session = struct {
         self.html_cleaned_len = @intCast(cleaned.len);
         const marked = core.html.mark_images(cleaned, &self.html_marked);
         self.html_marked_len = @intCast(marked.len);
-        var sources: [core.html.max_remote_images][]const u8 = undefined;
-        self.remote_sources_count = core.html.remote_images(part, &sources);
-        for (sources[0..self.remote_sources_count], 0..) |source, index| {
-            self.remote_sources[index].set(source);
-        }
 
         const rendered = core.html.render(
             self.html_marked[0..self.html_marked_len],
@@ -5012,6 +4888,27 @@ const ImageSink = struct {
     }
 };
 
+test "pictures are the message's own, and the key says so" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.deps.draw_image = ImageSink.draw;
+    try rig.open_reader("<p>hello</p>");
+
+    // On: the reader shows what the message carries.
+    rig.fake_system.push_input("i");
+    _ = rig.session.step();
+    try testing.expect(rig.session.show_images);
+    try testing.expectEqualStrings("Showing pictures", rig.session.state.status.slice());
+
+    // Off: and nothing is decoded for the next frame.
+    rig.fake_system.push_input("i");
+    _ = rig.session.step();
+    try testing.expect(!rig.session.show_images);
+    try testing.expectEqualStrings("Pictures hidden", rig.session.state.status.slice());
+}
+
 test "an image that came with the message is painted where its marker landed" {
     // A 90x36 PNG, one pixel per byte of IHDR plus a body.
     const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -5350,137 +5247,6 @@ test "a terminal that cannot paint says so instead of doing nothing" {
         rig.session.state.status.slice(),
     );
 }
-
-test "pictures are off until asked for, and then they arrive off the loop" {
-    // A 90x36 PNG, one pixel per byte of IHDR plus a body.
-    // IHDR enough for the reader to place it: 90x36.
-    const png = [_]u8{
-        0x89, 'P', 'N', 'G',  0x0d, 0x0a, 0x1a, 0x0a,
-        0,    0,   0,   0,    0,    0,    0,    0,
-        0,    0,   0,   0,    0,    0,    0,    0,
-        0,    0,   0,   0x5a, 0,    0,    0,    0x24,
-    };
-
-    var rig: Rig = .{};
-    try rig.start();
-    defer rig.deinit();
-    _ = rig.session.step();
-
-    var sink: RemoteFetch = .{ .png = &png };
-    rig.session.deps.fetch_image = RemoteFetch.fetch;
-    rig.session.deps.fetch_image_context = &sink;
-    rig.session.deps.draw_image = ImageSink.draw;
-
-    rig.session.state.view = .reader;
-    rig.session.state.opened_account = core.id.AccountId.from_int(1);
-    rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/logo.png\" alt=\"Logo\"></p>");
-
-    // Off: the frame draws, the marker stays, and nobody is asked for anything.
-    rig.session.needs_render = true;
-    _ = rig.session.step();
-    try testing.expectEqual(@as(u8, 0), sink.fetches);
-    try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "[IMG:r0]") != null);
-
-    // `i` turns them on: the worker brings the picture, and the next frame has it.
-    rig.fake_system.push_input("i");
-    _ = rig.session.step();
-    try testing.expect(rig.session.show_images);
-    // A frame drawn before the picture arrives must not count as "dealt with".
-    rig.session.render();
-    try testing.expect(rig.session.image_slot_count == 0);
-
-    // The next tick starts the worker; the one after takes its answer.
-    var guard: u32 = 0;
-    while (sink.fetches == 0 and guard < 500) : (guard += 1) {
-        _ = rig.session.step();
-        os.sleep_ms(1);
-    }
-    guard = 0;
-    while (rig.session.image_in_flight and guard < 500) : (guard += 1) {
-        _ = rig.session.step();
-        os.sleep_ms(1);
-    }
-    try testing.expectEqual(@as(u8, 1), sink.fetches);
-    try testing.expect(rig.session.image_png("r0") != null);
-
-    // And off again: the status says so and the next frame paints no picture.
-    rig.fake_system.push_input("i");
-    _ = rig.session.step();
-    try testing.expect(!rig.session.show_images);
-    try testing.expectEqualStrings("Pictures hidden", rig.session.state.status.slice());
-    try testing.expect(rig.session.image_png("r0") == null);
-}
-
-test "a picture that is not a PNG is downloaded once and named as such" {
-    var rig: Rig = .{};
-    try rig.start();
-    defer rig.deinit();
-    _ = rig.session.step();
-
-    // A GIF: the terminal cannot paint it, and the reader says so instead of showing
-    // a marker that never becomes anything.
-    const gif = [_]u8{ 'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0, 0, 0 };
-    // With headers in front, the way the real client answers: the picture is a slice
-    // further into the buffer, and it used to be read from the front.
-    var sink: RemoteFetch = .{ .png = &gif, .lead = 20 };
-    rig.session.deps.fetch_image = RemoteFetch.fetch;
-    rig.session.deps.fetch_image_context = &sink;
-    rig.session.deps.draw_image = ImageSink.draw;
-
-    rig.session.state.view = .reader;
-    rig.session.state.opened_account = core.id.AccountId.from_int(1);
-    rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/x.gif\"></p>");
-
-    rig.fake_system.push_input("i");
-    _ = rig.session.step();
-    // Wait for the picture to be dealt with, not for the status: turning them on is
-    // itself a status line.
-    var guard: u32 = 0;
-    while (rig.session.image_slot_count == 0 and guard < 300) : (guard += 1) {
-        _ = rig.session.step();
-        os.sleep_ms(1);
-    }
-    try testing.expectEqual(@as(u8, 1), sink.fetches);
-    try testing.expectEqualStrings("That picture is a GIF; o opens the mail", rig.session.state.status.slice());
-}
-
-test "a picture is named by what its bytes are" {
-    // The message is the diagnosis: "not a PNG" is not enough to know what to do.
-    var out: [64]u8 = undefined;
-    try testing.expectEqualStrings("a JPEG", Session.picture_kind(&[_]u8{ 0xff, 0xd8, 0, 0 }, &out));
-    try testing.expectEqualStrings("a WebP", Session.picture_kind("RIFF0000WEBP", &out));
-    try testing.expectEqualStrings("an SVG or a web page", Session.picture_kind("<svg xmlns", &out));
-    try testing.expectEqualStrings("a BMP", Session.picture_kind("BM000000", &out));
-    try testing.expectEqualStrings("a GIF", Session.picture_kind("GIF89a", &out));
-    try testing.expectEqualStrings("not an image (00 01 02)", Session.picture_kind("\x00\x01\x02\x03", &out));
-    try testing.expectEqualStrings("empty", Session.picture_kind("", &out));
-    try testing.expectEqualStrings("a PNG the terminal refused", Session.picture_kind("\x89PNG0000", &out));
-    // Text is quoted as text: a status line says far more than "48 54 54".
-    try testing.expectEqualStrings(
-        "not an image (HTTP/1.1 301 Moved)",
-        Session.picture_kind("HTTP/1.1 301 Moved\r\n\r\n", &out),
-    );
-}
-
-const RemoteFetch = struct {
-    fetches: u8 = 0,
-    png: []const u8,
-    /// Bytes of headers to leave in front, as the real client does: the body it hands
-    /// back is a slice of the buffer, not its first byte.
-    lead: usize = 0,
-
-    fn fetch(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 {
-        const self: *RemoteFetch = @ptrCast(@alignCast(context));
-        self.fetches += 1;
-        _ = url;
-        if (self.lead + self.png.len > out.len) return null;
-        @memset(out[0..self.lead], 'H');
-        @memcpy(out[self.lead..][0..self.png.len], self.png);
-        return out[self.lead..][0..self.png.len];
-    }
-};
 
 test "the page sent to the browser carries the pictures the message came with" {
     const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -5949,29 +5715,4 @@ test "the splash breathes until the inbox is here, and then it is gone" {
     try testing.expect(!rig.session.state.booting);
     try testing.expect(!rig.session.booting_now);
     try testing.expect(ticks >= Session.boot_min_ticks);
-}
-
-test "the picture worker and the body worker never run at once" {
-    var rig: Rig = .{};
-    try rig.start();
-    defer rig.deinit();
-    _ = rig.session.step();
-
-    var gate: FakeMail.Gate = .{};
-    rig.fake_mail.gate = &gate;
-    defer gate.release();
-    var fetch_sink: RemoteFetch = .{ .png = "PNG", .lead = 8 };
-    rig.session.deps.fetch_image = RemoteFetch.fetch;
-    rig.session.deps.fetch_image_context = &fetch_sink;
-    rig.session.deps.draw_image = ImageSink.draw;
-
-    // A body is in the air: the picture worker waits its turn instead of opening a
-    // second connection with the same IO handle underneath it.
-    rig.fake_system.push_input("\r");
-    _ = rig.session.step();
-    try testing.expect(rig.session.body_in_flight);
-    try testing.expect(!rig.session.image_in_flight);
-    try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
-    rig.session.poll_images();
-    try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
 }

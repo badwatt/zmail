@@ -205,8 +205,6 @@ fn run_session(
         .open_external_context = &browser,
         .edit_text = editTextThunk,
         .edit_text_context = &editor,
-        .fetch_image = fetchImageThunk,
-        .fetch_image_context = &browser,
         // Wired only where the terminal said it can paint: the session then has an
         // honest answer for a key that asks for pictures.
         .draw_image = if (graphics.supported()) drawImageThunk else null,
@@ -253,20 +251,6 @@ const Browser = struct {
 
 /// Writes the page a second time with each anchor's address in the text, for
 /// the browsers whose dump prints no references.
-/// Downloads one picture the message points at. Only the image worker calls this,
-/// never a frame: a socket inside a frame is a reader that stops answering keys.
-fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 {
-    const self = browser_of(context);
-    const rest = if (std.mem.startsWith(u8, url, "https://")) url["https://".len..] else return null;
-    const host_end = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
-    const host = rest[0..host_end];
-    const path = rest[host_end..];
-
-    const response = net.https.get(self.gpa, self.io, host, path, out) catch return null;
-    if (response.status != 200 or response.body.len == 0) return null;
-    return response.body;
-}
-
 /// One image of the message, painted where the layout left its marker.
 ///
 /// Two ways to draw it, and the plain one goes first. Half blocks are text: every
