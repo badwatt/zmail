@@ -227,6 +227,14 @@ pub const Session = struct {
     /// When the bar went up, and what it is showing: the minimum-visible window is
     /// measured from the first.
     progress_since_ms: i64 = 0,
+    /// The first connection, one account per tick so the splash keeps breathing.
+    /// `boot_cursor` is how far it got; `booting_now` says it is still going.
+    boot_cursor: u8 = 0,
+    boot_ticks: u16 = 0,
+    booting_now: bool = false,
+    reload_loaded: bool = false,
+    reload_failed: bool = false,
+    reload_login_failed: bool = false,
 
     gpa: std.mem.Allocator,
     deps: Deps,
@@ -503,12 +511,55 @@ pub const Session = struct {
         // Io belongs to the event loop, and opening it from the worker leaves
         // both waiting forever (no mail, spinner forever). Later refreshes
         // reuse the open connection, so those can run in the background.
-        self.state.booting = self.deps.splash;
-        self.sync_progress();
-        self.reload(self.state.mailbox);
-        self.state.booting = false;
+        if (!self.deps.splash) {
+            self.state.booting = false;
+            self.reload(self.state.mailbox);
+            return;
+        }
+
+        // The splash is on screen, so the connection is made one account per tick
+        // instead of all at once: the first screen keeps breathing for as long as
+        // the network takes, and it goes away on the tick the inbox is ready --
+        // not a moment before, and not a moment after.
+        self.state.booting = true;
+        self.booting_now = true;
+        self.boot_cursor = 0;
+        self.boot_ticks = 0;
         self.sync_progress();
         self.repaint();
+    }
+
+    /// One account of the first connection. Called from the loop, once per tick,
+    /// while the splash is up.
+    fn boot_step(self: *Session) void {
+        if (!self.booting_now) return;
+        self.boot_ticks +|= 1;
+
+        // One account per tick: between two of them the loop paints, so a start
+        // with several accounts breathes between fetches instead of freezing
+        // through all of them.
+        const sources = self.live_sources();
+        while (self.boot_cursor < sources.len) {
+            const index = self.boot_cursor;
+            self.boot_cursor += 1;
+            const source = sources[index];
+            if (!self.in_scope(source.id)) continue;
+            self.sync_progress();
+            self.fetch_source(source, @intCast(index), self.state.mailbox);
+            break;
+        }
+
+        if (self.boot_cursor < sources.len) return;
+
+        // The mail is here. If the connection was quick, the mark still gets one
+        // breath -- a fade nobody sees is not a fade -- and if it was slow, this is
+        // already behind us and the splash goes now.
+        if (self.boot_ticks < boot_min_ticks) return;
+
+        self.booting_now = false;
+        self.state.booting = false;
+        self.finish_reload(self.state.mailbox);
+        self.sync_progress();
     }
 
     pub fn deinit(self: *Session) void {
@@ -528,6 +579,8 @@ pub const Session = struct {
     /// Advances the loop by one step. Returns false when the session is over.
     pub fn step(self: *Session) bool {
         self.poll_refresh();
+        self.boot_step();
+        if (self.state.booting) self.needs_render = true;
         self.sync_progress();
         // While a refresh runs the spinner must move, so every tick redraws.
         if (self.refreshing) self.needs_render = true;
@@ -568,16 +621,9 @@ pub const Session = struct {
     pub fn loop(self: *Session) void {
         const needs_network = self.needs_boot;
         if (self.deps.splash) {
-            // The welcome screen shows on every start, with the spinner moving
-            // for a moment before the slow part. A frozen one-frame splash read
-            // as a bug.
-            self.state.booting = true;
-            self.sync_progress();
-            // One full breath before the slow part starts: the first screen is a
-            // welcome, and a mark that fades out and back in has to have the time to
-            // do it. Sixteen frames at 55ms is a second, and the connection is not
-            // waiting on it -- it has not started yet.
-            self.play_splash(render_mod.breath_ticks / 2);
+            // The welcome screen shows on every start, and it breathes while the
+            // connection is made: `boot` starts it, `step` advances it one account
+            // per tick, and the mark fades in and out until the inbox is here.
             self.boot();
         } else {
             // Nothing here can block: no empty frame, no splash.
@@ -699,18 +745,6 @@ pub const Session = struct {
 
     /// Paints `frames` splash frames with a short pause between them, so the
     /// spinner is visibly alive even when the wait that follows is short.
-    fn play_splash(self: *Session, frames: u8) void {
-        var frame: u8 = 0;
-        while (frame < frames) : (frame += 1) {
-            self.state.spinner = frame * 2;
-            self.render();
-            // The splash is a loading screen, so the terminal's bar moves with
-            // it: the sequence is the animation.
-            self.sync_progress();
-            os.sleep_ms(55);
-        }
-    }
-
     fn sync_size(self: *Session) void {
         const size = self.deps.system.size() catch return;
         if (size.columns == self.size.columns) {
@@ -1069,6 +1103,11 @@ pub const Session = struct {
     /// Shortest time the terminal's bar is allowed on screen: anything shorter
     /// reads as a glitch rather than as work.
     const progress_visible_ms: i64 = 400;
+    /// The first screen stays for at least one full breath. A start fast enough to
+    /// skip the fade would show a flash of the mark, which is worse than the second
+    /// it costs; a start that takes longer than this keeps breathing for as long as
+    /// it takes.
+    const boot_min_ticks: u16 = render_mod.breath_ticks;
 
     fn sync_progress(self: *Session) void {
         if (self.state.loading or self.state.booting or self.refreshing) {
@@ -1087,6 +1126,14 @@ pub const Session = struct {
 
         progress_mod.end();
         self.progress_since_ms = 0;
+    }
+
+    /// Test hook: the ticks the loop would run, so the first screen finishes.
+    pub fn settle_boot_for_test(self: *Session) void {
+        var ticks: u16 = 0;
+        while (self.booting_now and ticks < boot_min_ticks * 2) : (ticks += 1) {
+            _ = self.step();
+        }
     }
 
     /// Test hook: the tail of the loading wrapper, without the effect.
@@ -1786,42 +1833,48 @@ pub const Session = struct {
 
     /// Boot only: the first load, synchronous, with the splash on screen. A
     /// worker thread would need a store the splash could already read.
-    fn reload(self: *Session, mailbox: Mailbox) void {
-        var loaded_any = false;
-        var failed = false;
-        var login_failed = false;
-
-        for (self.live_sources(), 0..) |source, index| {
-            // A single account in scope means the others are not opened at all:
-            // no socket, no login, nothing to wait for.
-            if (!self.in_scope(source.id)) continue;
-            // This can block for as long as a server takes to answer, and the
-            // splash is on screen meanwhile: the terminal's bar is repeated here
-            // because the loop that would repeat it is not running.
-            self.sync_progress();
-            const count = source.mail.fetch(mailbox, self.scratch) catch |err| {
-                failed = true;
-                if (err == error.Rejected) login_failed = true;
-                continue;
-            };
-            core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..count]);
-            self.loaded_mask |= mask_bit(@intCast(index), @backingInt(mailbox));
-            loaded_any = true;
-            if (self.deps.cache) |cache| {
-                cache.save(source.id, mailbox, self.scratch[0..count]) catch {};
-            }
+    /// One account's mail, into the store. The unit both the blocking reload and the
+    /// animated boot step work in, so a mailbox cannot be read one way on a refresh
+    /// and another on the first screen.
+    fn fetch_source(self: *Session, source: MailSource, index: u8, mailbox: Mailbox) void {
+        const count = source.mail.fetch(mailbox, self.scratch) catch |err| {
+            self.reload_failed = true;
+            if (err == error.Rejected) self.reload_login_failed = true;
+            return;
+        };
+        core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..count]);
+        self.loaded_mask |= mask_bit(index, @backingInt(mailbox));
+        self.reload_loaded = true;
+        if (self.deps.cache) |cache| {
+            cache.save(source.id, mailbox, self.scratch[0..count]) catch {};
         }
+    }
 
+    fn finish_reload(self: *Session, mailbox: Mailbox) void {
         self.state.rebuild(&self.store);
-        if (failed and !loaded_any) {
+        if (self.reload_failed and !self.reload_loaded) {
             // A refused login is the most useful thing we know: say it.
-            if (login_failed) {
+            if (self.reload_login_failed) {
                 self.state.set_alert("Login failed: {s}", .{self.login_hint()});
             } else {
                 self.state.set_alert("Could not load {s}", .{mailbox.title()});
             }
         }
+        self.reload_loaded = false;
+        self.reload_failed = false;
+        self.reload_login_failed = false;
         self.repaint();
+    }
+
+    fn reload(self: *Session, mailbox: Mailbox) void {
+        for (self.live_sources(), 0..) |source, index| {
+            // A single account in scope means the others are not opened at all:
+            // no socket, no login, nothing to wait for.
+            if (!self.in_scope(source.id)) continue;
+            self.sync_progress();
+            self.fetch_source(source, @intCast(index), mailbox);
+        }
+        self.finish_reload(mailbox);
     }
 
     fn render(self: *Session) void {
@@ -2151,7 +2204,11 @@ const Rig = struct {
             .loading_ms = 0,
         });
         // Tests exercise the steady state: the cache is empty, so boot fetches.
+        // The first screen breathes while it does, one account per tick, so the rig
+        // runs the ticks the real loop would until the inbox is here.
+        self.session.needs_boot = true;
         self.session.boot();
+        self.session.settle_boot_for_test();
         self.session.settle_refresh_for_test();
     }
 
@@ -2232,6 +2289,7 @@ test "session paints the list before it touches the network" {
 
     rig.session.render();
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     rig.session.settle_refresh_for_test();
     try testing.expectEqual(@as(u32, 2), rig.session.store.len);
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), core.meta.name) != null);
@@ -2602,6 +2660,7 @@ test "two accounts share one unified list, and a cycles the scope" {
     });
     defer session.deinit();
     session.boot();
+    session.settle_boot_for_test();
     session.settle_refresh_for_test();
 
     try testing.expectEqual(@as(u32, 2), session.store.len);
@@ -2663,6 +2722,7 @@ test "starting from a cache does not touch the network, and R refreshes and save
         .cache = cache.cache(),
     });
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     defer rig.deinit();
 
     try testing.expectEqual(@as(u32, 1), cache.loads);
@@ -2697,6 +2757,7 @@ test "switching to an unloaded mailbox reads the cache, not the network" {
     try testing.expect(!rig.session.needs_boot);
     try testing.expect(rig.session.state.status.is_empty());
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
     try testing.expectEqualStrings("cached", rig.session.store.at(0).subject.slice());
 
@@ -2732,6 +2793,7 @@ test "a cache miss falls back to the network and fills the cache" {
         .cache = cache.cache(),
     });
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     rig.session.settle_refresh_for_test();
     defer rig.deinit();
 
@@ -2759,6 +2821,7 @@ test "a failing cache degrades to the network" {
         .cache = cache.cache(),
     });
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     rig.session.settle_refresh_for_test();
     defer rig.deinit();
 
@@ -2882,6 +2945,7 @@ test "an in-memory source boots without a splash" {
 
     // Same order as `loop` for a source that cannot block.
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     rig.session.render();
     try testing.expectEqual(@as(u32, 2), rig.session.store.len);
     try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "connecting") == null);
@@ -2900,11 +2964,13 @@ test "a boot with nothing to connect leaves the splash" {
     rig.session.state.booting = true;
     rig.session.needs_boot = false;
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     try testing.expect(!rig.session.state.booting);
 
     rig.session.state.booting = true;
     rig.session.needs_boot = true;
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     try testing.expect(!rig.session.state.booting);
 }
 
@@ -2948,6 +3014,8 @@ test "a refused login explains the provider, when the provider is known" {
     defer rig.deinit();
 
     rig.session.boot();
+
+    rig.session.settle_boot_for_test();
     try testing.expectEqualStrings(
         "Login failed: Microsoft needs OAuth2 or an app password",
         rig.session.state.status.slice(),
@@ -2972,6 +3040,8 @@ test "a refused login is named, not hidden behind a generic error" {
     defer rig.deinit();
 
     rig.session.boot();
+
+    rig.session.settle_boot_for_test();
     try testing.expectEqualStrings("Login failed: check the password", rig.session.state.status.slice());
     try testing.expectEqual(@as(u32, 0), rig.session.store.len);
 }
@@ -2994,6 +3064,8 @@ test "a cold boot that cannot connect says so, and shows an empty list" {
     defer rig.deinit();
 
     rig.session.boot();
+
+    rig.session.settle_boot_for_test();
     try testing.expectEqualStrings("Could not load Inbox", rig.session.state.status.slice());
     try testing.expectEqual(@as(u32, 0), rig.session.store.len);
 
@@ -3101,6 +3173,7 @@ test "the form shows the servers the source reported" {
     });
     defer rig.deinit();
     rig.session.boot();
+    rig.session.settle_boot_for_test();
 
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = core.id.AccountId.from_int(1) } }});
     const form = &rig.session.settings.?;
@@ -3520,6 +3593,7 @@ test "removing an account rewrites the config and drops its mail" {
     });
     defer rig.deinit();
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     rig.session.render();
 
     // No port: refuse and say so.
@@ -3636,6 +3710,7 @@ test "an effect paints the spinner, even when it is instant" {
     });
     defer rig.deinit();
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     rig.session.settle_refresh_for_test();
     rig.session.render();
     rig.fake_system.output_len = 0;
@@ -4369,6 +4444,7 @@ test "an account out of scope is never connected" {
     rig.fake_mail.fetch_calls = 0;
     rig.session.needs_boot = true;
     rig.session.boot();
+    rig.session.settle_boot_for_test();
     _ = rig.session.state.mailbox;
     try testing.expectEqual(@as(u32, 1), rig.fake_mail.fetch_calls);
 }
@@ -5154,4 +5230,50 @@ test "a wait raises the bar, keeps it for a moment, and takes it down" {
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
     try testing.expectEqual(core.progress.State.clear, progress_mod.state());
+}
+
+test "the splash breathes until the inbox is here, and then it is gone" {
+    var rig: Rig = .{};
+    try rig.seed();
+    // Two accounts, so the boot takes two ticks and the splash has to survive one.
+    var sources = [_]MailSource{
+        .{ .id = core.id.AccountId.from_int(1), .label = "one", .mail = rig.fake_mail.mail() },
+        .{ .id = core.id.AccountId.from_int(2), .label = "two", .mail = rig.fake_mail.mail() },
+    };
+    try rig.session.init(testing.allocator, .{
+        .accounts = &sources,
+        .system = rig.fake_system.system(),
+        .theme = theme_mod.Theme.dark(),
+        .now = fixed_now,
+        .loading_ms = 0,
+        .splash = true,
+    });
+    defer rig.deinit();
+
+    try testing.expectEqual(@as(u8, 2), rig.session.source_count);
+    // The first screen is up and the network has not been touched: nothing loads
+    // inside `boot` any more, so the mark can breathe while it does.
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    try testing.expect(rig.session.state.booting);
+    try testing.expectEqual(@as(u32, 0), rig.session.store.len);
+    const mark_before = rig.session.state.spinner;
+
+    // One account per tick: the splash is still up after the first.
+    _ = rig.session.step();
+    try testing.expect(rig.session.state.booting);
+    try testing.expect(rig.session.state.spinner > mark_before);
+    _ = rig.session.step();
+    try testing.expect(rig.session.state.booting);
+
+    // The inbox is here, and the mark still finishes its breath: a fade nobody
+    // sees is not a fade. Then the splash goes, on the tick the minimum is met.
+    try testing.expect(rig.session.store.len > 0);
+    var ticks: u16 = 2;
+    while (rig.session.state.booting and ticks < 64) : (ticks += 1) {
+        _ = rig.session.step();
+    }
+    try testing.expect(!rig.session.state.booting);
+    try testing.expect(!rig.session.booting_now);
+    try testing.expect(ticks >= Session.boot_min_ticks);
 }
