@@ -146,6 +146,9 @@ pub const Deps = struct {
         y: u16,
         columns: u16,
         rows: u16,
+        /// The colour the terminal paints behind the text, so a half transparent
+        /// picture is composited over the page and not over an invented card.
+        ground: u32,
     ) bool = null,
     draw_image_context: *anyopaque = undefined,
     /// Fetches one picture the message points at. Only ever called from the image
@@ -2239,6 +2242,13 @@ pub const Session = struct {
         self.paint_images(lay);
     }
 
+    /// The theme's background as one number, for the picture renderer: the colour the
+    /// terminal paints behind everything.
+    fn ground_colour(theme: *const theme_mod.Theme) u32 {
+        const rgb = theme.ground orelse return 0x000000;
+        return (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
+    }
+
     /// The bytes of the picture behind a marker: a part of the message, or one
     /// downloaded from its address.
     fn image_png(self: *Session, key: []const u8) ?[]const u8 {
@@ -2370,6 +2380,7 @@ pub const Session = struct {
                 lay.reader_body_y + row,
                 @min(width, lay.columns -| column),
                 height,
+                ground_colour(&self.deps.theme),
             );
             painted += 1;
         }
@@ -5026,9 +5037,10 @@ const ImageSink = struct {
         y: u16,
         columns: u16,
         rows: u16,
+        ground: u32,
     ) bool {
         const self: *ImageSink = @ptrCast(@alignCast(context));
-        _ = .{ id, x, y };
+        _ = .{ id, x, y, ground };
         self.calls += 1;
         self.bytes = png.len;
         self.columns = columns;
@@ -5466,6 +5478,14 @@ test "a picture makes the body longer instead of hiding the words after it" {
     try testing.expect(std.mem.count(u8, after[0..newlines], "\n") >= 2);
     // And nothing is lost: the words are all still there.
     try testing.expect(std.mem.indexOf(u8, text, "the paragraph after the picture") != null);
+}
+
+test "the ground a picture is drawn over is the terminal's own background" {
+    var theme = theme_mod.Theme.from_background(.{ .r = 0x14, .g = 0x14, .b = 0x18 });
+    try testing.expectEqual(@as(u32, 0x141418), Session.ground_colour(&theme));
+    // A theme with no background of its own: black, which is what the terminal paints.
+    theme.ground = null;
+    try testing.expectEqual(@as(u32, 0x000000), Session.ground_colour(&theme));
 }
 
 test "pictures are off until asked for, and then they arrive off the loop" {

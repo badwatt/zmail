@@ -331,6 +331,7 @@ fn drawImageThunk(
     y: u16,
     columns: u16,
     rows: u16,
+    ground: u32,
 ) bool {
     const self = browser_of(context);
 
@@ -342,7 +343,7 @@ fn drawImageThunk(
         if (rgba) |pixels| {
             defer self.gpa.free(pixels);
             if (core.png.decode(png_bytes, block_work, pixels)) |image| {
-                drawn = halfblocks.draw(self.system, image, x, y, columns, rows);
+                drawn = halfblocks.draw(self.system, image, x, y, columns, rows, ground);
             } else |_| {}
         }
     }

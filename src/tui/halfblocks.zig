@@ -30,6 +30,9 @@ pub fn draw(
     y: u16,
     columns: u16,
     rows: u16,
+    /// What the terminal paints behind the text. A picture that is half transparent is
+    /// half that colour: compositing it over white is what put a card behind a logo.
+    ground: u32,
 ) bool {
     if (image.width == 0 or image.height == 0 or columns == 0 or rows == 0) return false;
 
@@ -48,8 +51,8 @@ pub fn draw(
 
         var column: u16 = 0;
         while (column < columns) : (column += 1) {
-            const top = sample(image, column, row * 2, columns, rows);
-            const bottom = sample(image, column, row * 2 + 1, columns, rows);
+            const top = sample(image, column, row * 2, columns, rows, ground);
+            const bottom = sample(image, column, row * 2 + 1, columns, rows, ground);
             // The glyph follows the two halves: nothing, one of them, or a solid cell
             // when they are the same colour. A cell that is one colour drawn as a half
             // block is a picture with a texture it does not have.
@@ -99,7 +102,7 @@ pub fn draw(
 /// The colour a cell stands for: the average of the pixels it covers, flattened
 /// over white. Averaging is what keeps a picture from turning into a staircase
 /// when it is far bigger than the cells it has to fit in.
-fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16) u32 {
+fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16, ground: u32) u32 {
     // Wide arithmetic: a cell count times a pixel count is bigger than a u32 once either
     // side is large, and the picture is untrusted bytes either way.
     const target_rows: u64 = @max(1, @as(u64, rows) * 2);
@@ -119,17 +122,21 @@ fn sample(image: png.Image, column: u16, pixel_row: u16, columns: u16, rows: u16
         var x = @min(from_x, image.width - 1);
         while (x < @min(to_x, image.width)) : (x += 1) {
             const index = (@as(usize, y) * image.width + x) * 4;
-            // No blending: a picture sits on whatever colour the reader is, and
-            // flattening over white is what put a white card behind every logo.
-            alpha_total += image.rgba[index + 3];
-            red_total += image.rgba[index];
-            green_total += image.rgba[index + 1];
-            blue_total += image.rgba[index + 2];
+            // Composited over the reader's own ground, which is the colour the
+            // terminal will paint behind whatever is left out.
+            const alpha: u32 = image.rgba[index + 3];
+            const over_red: u32 = (@as(u32, image.rgba[index]) * alpha + red(ground) * (255 - alpha)) / 255;
+            const over_green: u32 = (@as(u32, image.rgba[index + 1]) * alpha + green(ground) * (255 - alpha)) / 255;
+            const over_blue: u32 = (@as(u32, image.rgba[index + 2]) * alpha + blue(ground) * (255 - alpha)) / 255;
+            alpha_total += alpha;
+            red_total += over_red;
+            green_total += over_green;
+            blue_total += over_blue;
             count += 1;
         }
     }
     if (count == 0) return transparent;
-    if (alpha_total / count < 16) return transparent;
+    if (alpha_total / count < 8) return transparent;
     return ((red_total / count) << 16) | ((green_total / count) << 8) | (blue_total / count);
 }
 
@@ -163,7 +170,7 @@ fn two_by_two() png.Image {
 
 test "a picture is drawn with two pixels per cell" {
     var fake: system_mod.Fake = .{};
-    const drawn = draw(fake.system(), two_by_two(), 0, 0, 2, 1);
+    const drawn = draw(fake.system(), two_by_two(), 0, 0, 2, 1, 0x101018);
     const written = fake.output_text();
     try testing.expect(drawn);
     // The four pixels become two cells on one row, with their colours.
@@ -179,7 +186,7 @@ test "the same colour twice is not sent twice" {
     const image = png.Image{ .width = 2, .height = 2, .rgba = &rgba };
 
     var fake: system_mod.Fake = .{};
-    const drawn = draw(fake.system(), image, 0, 0, 2, 1);
+    const drawn = draw(fake.system(), image, 0, 0, 2, 1, 0x101018);
     const written = fake.output_text();
     try testing.expect(drawn);
     // One colour pair for the whole row.
@@ -195,7 +202,7 @@ test "a picture with nothing in its background shows the reader through it" {
     const image = png.Image{ .width = 2, .height = 2, .rgba = &rgba };
 
     var fake: system_mod.Fake = .{};
-    try testing.expect(draw(fake.system(), image, 0, 0, 2, 1));
+    try testing.expect(draw(fake.system(), image, 0, 0, 2, 1, 0x101018));
     const written = fake.output_text();
     // The first cell is a space with the terminal's own colours, not a white one:
     // the transparent sentinel is nearly white, and writing its bits made a card.
@@ -211,7 +218,7 @@ test "a cell with only its lower half painted uses the lower block" {
     const image = png.Image{ .width = 1, .height = 2, .rgba = &rgba };
 
     var fake: system_mod.Fake = .{};
-    try testing.expect(draw(fake.system(), image, 0, 0, 1, 1));
+    try testing.expect(draw(fake.system(), image, 0, 0, 1, 1, 0x101018));
     try testing.expect(std.mem.indexOf(u8, fake.output_text(), lower_half_block) != null);
 }
 
@@ -219,8 +226,8 @@ test "nothing to draw is not drawn" {
     var fake: system_mod.Fake = .{};
     var empty = two_by_two();
     empty.width = 0;
-    try testing.expect(!draw(fake.system(), empty, 0, 0, 4, 4));
-    try testing.expect(!draw(fake.system(), two_by_two(), 0, 0, 0, 4));
+    try testing.expect(!draw(fake.system(), empty, 0, 0, 4, 4, 0x101018));
+    try testing.expect(!draw(fake.system(), two_by_two(), 0, 0, 0, 4, 0x101018));
     try testing.expectEqualStrings("", fake.output_text());
 }
 
@@ -234,8 +241,28 @@ test "a cell that is one colour is drawn as one block" {
     const image = png.Image{ .width = 2, .height = 2, .rgba = &rgba };
 
     var fake: system_mod.Fake = .{};
-    try testing.expect(draw(fake.system(), image, 0, 0, 2, 1));
+    try testing.expect(draw(fake.system(), image, 0, 0, 2, 1, 0x101018));
     const written = fake.output_text();
     try testing.expect(std.mem.indexOf(u8, written, full_block) != null);
     try testing.expect(std.mem.indexOf(u8, written, half_block) == null);
+}
+
+test "a half transparent picture is composited over the reader, not over a card" {
+    // A pixel at half alpha over a dark ground is a dark pixel, not a bright one.
+    const rgba = [_]u8{
+        255, 255, 255, 128,
+        255, 255, 255, 128,
+    };
+    const image = png.Image{ .width = 1, .height = 2, .rgba = &rgba };
+
+    var fake: system_mod.Fake = .{};
+    try testing.expect(draw(fake.system(), image, 0, 0, 1, 1, 0x000000));
+    const written = fake.output_text();
+    // White at half alpha over black: 255 * 128 / 255, in every channel.
+    try testing.expect(std.mem.indexOf(u8, written, "38;2;128;128;128") != null);
+
+    // The same picture over a white ground is white: the ground is what is behind it.
+    var other: system_mod.Fake = .{};
+    try testing.expect(draw(other.system(), image, 0, 0, 1, 1, 0xFFFFFF));
+    try testing.expect(std.mem.indexOf(u8, other.output_text(), "38;2;255;255;255") != null);
 }
