@@ -262,8 +262,11 @@ pub fn query_background(system: system_mod.System) ?core.oklch.Rgb {
     var buffer: [128]u8 = undefined;
     var received: usize = 0;
     var attempts: u8 = 0;
-    while (attempts < 4) : (attempts += 1) {
-        const read = system.read(buffer[received..], 50) catch return null;
+    // Two tries of 40ms: the answer comes in microseconds or not at all, and this
+    // happens before the first frame, where a wait is a startup delay the user
+    // reads as "it is slow".
+    while (attempts < 1) : (attempts += 1) {
+        const read = system.read(buffer[received..], 30) catch return null;
         if (read == 0) continue;
         received += read;
         if (core.osc.parse_background(buffer[0..received])) |colour| return colour;

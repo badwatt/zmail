@@ -628,6 +628,10 @@ pub const Session = struct {
             // is made: `splash_on` puts it up, `boot` decides what to fetch, and
             // `step` advances that one account per tick.
             self.splash_on();
+            // Painted before the first read: the loop's read waits up to a tick for
+            // input, and a first screen that waits for the keyboard to be idle is a
+            // first screen that arrives late.
+            self.render();
             self.boot();
         } else {
             // Nothing here can block: no empty frame, no splash.

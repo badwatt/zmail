@@ -44,6 +44,8 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) !u8 {
     install_panic_button(&posix);
     // Asked while the terminal is raw and before anything reads keys: both
     // answers come on stdin, and a parser would read them as typing.
+    // Both of these block before a single cell is painted, and a terminal answers
+    // in microseconds or never: one short try each, not two long ones.
     graphics.detect(system);
     background = os.query_background(system);
     // A pipe, a log, or a `dumb` terminal must not be sent a progress bar; one

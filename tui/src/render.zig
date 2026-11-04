@@ -277,9 +277,6 @@ fn doubled(
 /// advances by two per frame, so a full cycle is about 1.8 seconds: in, out, in.
 pub const breath_ticks: u16 = 24;
 
-/// Ticks the mark is simply there before it starts breathing.
-const breath_settled: u16 = 2;
-
 /// Below this a letter is not drawn at all. The fade is a mix towards the ground,
 /// which is invisible on the ground itself -- but only when the ground is known; a
 /// cell that is not painted is gone on every terminal, so the mark hides and shows
@@ -290,13 +287,11 @@ const breath_hidden: f32 = 0.02;
 /// whole word breathes together, which is what makes it read as one thing drawing
 /// breath rather than as letters flickering on their own.
 pub fn breath_level(tick: u16) f32 {
-    // The name is the first thing anyone reads, so it is solid before the first
-    // frame goes out: the breath starts on its second cycle, not before the mark
-    // has been seen once.
-    if (tick < breath_settled) return 1.0;
-
-    const phase = @as(f32, @floatFromInt((tick - breath_settled) % breath_ticks)) /
-        @as(f32, breath_ticks);
+    // Full on the first frame and moving on the second: the splash paints before the
+    // loop reads anything, so tick zero is the frame that goes out at once -- and the
+    // cosine leaves it heading down, which is the breath starting to happen rather
+    // than a mark standing still for two ticks first.
+    const phase = @as(f32, @floatFromInt(tick % breath_ticks)) / @as(f32, breath_ticks);
     return 0.5 + 0.5 * @cos(phase * std.math.tau);
 }
 
@@ -2641,7 +2636,7 @@ test "at the trough the mark is gone, and at the peak it is whole" {
 
     var hidden = Screen.init(80, 24);
     // Half a breath in -- the trough of the cosine: nothing is painted at all.
-    f.state.spinner = breath_settled + breath_ticks / 2;
+    f.state.spinner = breath_ticks / 2;
     frame(f.inputs(80, 24), &hidden);
 
     var drawn_shown = false;
