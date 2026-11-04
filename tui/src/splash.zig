@@ -223,7 +223,10 @@ pub fn mark_cell(scale: u8, row: u16, column: u16) u21 {
     if (source == spine_block) {
         if (scale == 1) return spine_block;
         const half: u16 = (@as(u16, scale) + 1) / 2;
-        return if (column % scale < half) solid_block else ' ';
+        // The spine's ink sits against the stroke that follows it, not against the air
+        // that precedes it: half a cell of ink butting up to the body of the letter,
+        // which is how the drawing reads at its own size.
+        return if (column % scale < half) ' ' else solid_block;
     }
     return if (scale == 1) source else solid_block;
 }
