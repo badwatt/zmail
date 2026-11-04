@@ -537,6 +537,12 @@ pub const Session = struct {
         if (!self.booting_now) return;
         self.boot_ticks +|= 1;
 
+        // A few ticks before the first connection: the first fetch blocks the
+        // event loop for as long as the server takes, and nothing paints inside it.
+        // Breathing has to start before that, or the splash is a still frame with a
+        // fade attached to the wrong end.
+        if (self.boot_ticks < boot_warmup) return;
+
         // One account per tick: between two of them the loop paints, so a start
         // with several accounts breathes between fetches instead of freezing
         // through all of them.
@@ -1116,6 +1122,9 @@ pub const Session = struct {
     /// it costs; a start that takes longer than this keeps breathing for as long as
     /// it takes.
     const boot_min_ticks: u16 = render_mod.breath_ticks;
+    /// Ticks the mark breathes before the first fetch starts. Small: it is there to
+    /// make the movement visible before the one call that freezes the loop.
+    const boot_warmup: u16 = 3;
 
     fn sync_progress(self: *Session) void {
         if (self.state.loading or self.state.booting or self.refreshing) {
@@ -5270,18 +5279,31 @@ test "the splash breathes until the inbox is here, and then it is gone" {
     try testing.expect(rig.session.state.booting);
     try testing.expectEqual(@as(u32, 0), rig.session.store.len);
     const mark_before = rig.session.state.spinner;
+    const mail_before = rig.session.store.len;
 
-    // One account per tick: the splash is still up after the first.
+    // The first ticks are for the breathing: nothing is read yet, or the mark would
+    // sit still for as long as the server takes.
+    var warm: u16 = 0;
+    while (warm < Session.boot_warmup) : (warm += 1) {
+        _ = rig.session.step();
+        // Up, and moving: the mark is animating before the server has been asked
+        // for anything.
+        try testing.expect(rig.session.state.booting);
+        try testing.expect(rig.session.state.spinner > mark_before + warm);
+    }
+    _ = mail_before;
+    try testing.expect(rig.session.state.spinner > mark_before);
+
+    // Then one account per tick.
     _ = rig.session.step();
     try testing.expect(rig.session.state.booting);
-    try testing.expect(rig.session.state.spinner > mark_before);
     _ = rig.session.step();
     try testing.expect(rig.session.state.booting);
 
     // The inbox is here, and the mark still finishes its breath: a fade nobody
     // sees is not a fade. Then the splash goes, on the tick the minimum is met.
     try testing.expect(rig.session.store.len > 0);
-    var ticks: u16 = 2;
+    var ticks: u16 = Session.boot_warmup + 2;
     while (rig.session.state.booting and ticks < 64) : (ticks += 1) {
         _ = rig.session.step();
     }
