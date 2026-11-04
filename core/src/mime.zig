@@ -1220,6 +1220,23 @@ test "an image inside the message is found by its Content-ID" {
     try testing.expect(image_body(raw, "", &out) == null);
 }
 
+test "a message with only images has no words to show" {
+    const raw = "Content-Type: multipart/mixed; boundary=b\r\n\r\n" ++
+        "--b\r\nContent-Type: image/png\r\n\r\nPNG\r\n--b--\r\n";
+    var out: [32]u8 = undefined;
+    var scratch: [256]u8 = undefined;
+    try testing.expectEqualStrings("", text_body(raw, &out, &scratch));
+}
+
+test "a multipart that never sends its closing delimiter still has its text" {
+    // A cut-off message: the last part has no `--b--` after it.
+    const raw = "Content-Type: multipart/mixed; boundary=b\r\n\r\n" ++
+        "--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhi";
+    var out: [32]u8 = undefined;
+    var scratch: [256]u8 = undefined;
+    try testing.expectEqualStrings("hi", text_body(raw, &out, &scratch));
+}
+
 test "a part arrives as headers and content, and is read like a message" {
     const body = "aGkgdGhlcmU="; // "hi there"
     var out: [64]u8 = undefined;

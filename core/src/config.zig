@@ -214,6 +214,9 @@ fn smtp_server(entry: *Entry) *account.Server {
 /// The same file with one account's label changed.
 /// A label that is not taken yet: `alvaro`, `alvaro2`, `alvaro3`... Returns an
 /// empty slice when every candidate is used, which the caller reports.
+/// A label the file does not already use, so two accounts cannot be confused in
+/// the account list. `text` is the whole file: a label is only taken if it is
+/// there.
 pub fn unique_label(text: []const u8, wanted: []const u8, buffer: []u8) []const u8 {
     if (!has_label(text, wanted)) {
         if (wanted.len > buffer.len) return "";
@@ -551,4 +554,32 @@ test "zero ports and invalid hosts are refused by the account rules" {
 test "a per-section label overrides the section name" {
     const file = try parse("[account work]\n" ++ minimal ++ "label = office\n");
     try testing.expectEqualStrings("office", file.items()[0].label.slice());
+}
+
+/// A section that passes `parse`: every required key, and nothing else.
+const complete_entry = "address = me@example.com\nusername = me\n" ++
+    "imap_host = imap.example.com\nimap_port = 993\nimap_security = tls\n";
+
+test "a label already in the file gets a number, and a free one is kept" {
+    const file = "[account work]\n" ++ complete_entry ++ "[account other]\n" ++ complete_entry;
+    var buffer: [32]u8 = undefined;
+    try testing.expectEqualStrings("home", unique_label(file, "home", &buffer));
+    try testing.expectEqualStrings("work2", unique_label(file, "work", &buffer));
+
+    // Already numbered: try the next number, not the same one again.
+    const numbered = "[account work2]\n" ++ complete_entry ++ "[account work]\n" ++ complete_entry;
+    try testing.expectEqualStrings("work3", unique_label(numbered, "work", &buffer));
+
+    // A label too long for the caller's buffer is refused, not truncated into
+    // one that might collide.
+    var small: [3]u8 = undefined;
+    try testing.expectEqualStrings("", unique_label(file, "work", &small));
+}
+
+test "the oauth keys are read where they are written" {
+    const file = try parse(
+        "[account work]\n" ++ complete_entry ++ "oauth_client_id = abc123\noauth_tenant = contoso\n",
+    );
+    try testing.expectEqualStrings("abc123", file.items()[0].oauth_client_id.slice());
+    try testing.expectEqualStrings("contoso", file.items()[0].oauth_tenant.slice());
 }

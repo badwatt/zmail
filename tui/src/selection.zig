@@ -147,6 +147,21 @@ test "a wrapped line joins without a newline, a paragraph keeps one" {
     try testing.expect(std.mem.indexOfScalar(u8, extract(across, &wrapped, body, &out), '\n') != null);
 }
 
+test "a drag to the left on one line still reads left to right" {
+    var wrapped: wrap.Wrapped = .{};
+    const body = "one line";
+    wrap.wrap(body, 40, &wrapped);
+
+    var out: [16]u8 = undefined;
+    // The anchor is at the end and the cursor at the start: the selection is
+    // the same run of text either way.
+    const backwards = Selection{
+        .anchor = .{ .line = 0, .column = 8 },
+        .cursor = .{ .line = 0, .column = 4 },
+    };
+    try testing.expectEqualStrings("line", extract(backwards, &wrapped, body, &out));
+}
+
 test "a click is not a drag" {
     const click = Selection.start(.{ .line = 4, .column = 7 });
     try testing.expect(!click.isDrag());

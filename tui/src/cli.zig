@@ -316,6 +316,12 @@ test "--live launches with a config, without a path" {
     try testing.expect(action.launch.config_path == null);
 }
 
+test "--oauth starts the browser sign-in instead of a password" {
+    const launch = parse(&[_][]const u8{ meta.name, "--oauth" }).launch;
+    try testing.expect(launch.oauth);
+    try testing.expectEqual(Mode.live, launch.mode);
+}
+
 test "--config takes the next argument and implies live" {
     const action = parse(&[_][]const u8{ meta.name, "--config", "/tmp/zmail.conf" });
     try testing.expectEqual(Mode.live, action.launch.mode);

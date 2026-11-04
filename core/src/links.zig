@@ -379,13 +379,7 @@ test "an address broken with spaces, the way mailing lists do it" {
         "J9.OMhLWsKF3hmlXYLL  HCfTeCMkde0KpicLd  N9Gel7DRw\n";
 
     var buffer: [max_links]Link = undefined;
-    switch (scan(text, &buffer)) {
-        1 => {},
-        else => |count| {
-            std.debug.print("found {d}, last=[{s}]\n", .{ count, buffer[count - 1].text(text) });
-            return error.TooManyLinks;
-        },
-    }
+    try testing.expectEqual(@as(usize, 1), scan(text, &buffer));
 
     var url_buffer: [512]u8 = undefined;
     try testing.expectEqualStrings(

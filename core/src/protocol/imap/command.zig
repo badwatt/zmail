@@ -335,6 +335,15 @@ test "fetch_body uses UID and peeks so it does not mark the message read" {
     try expect_command("a4 UID FETCH 42 (BODY.PEEK[]<0.4096>)\r\n", fetch_body(&buffer, "a4", 42, 4096));
 }
 
+test "a SASL payload that does not fit is an error, not a cut-off login" {
+    var buffer: [128]u8 = undefined;
+    var tiny: [8]u8 = undefined;
+    try testing.expectError(
+        error.NoSpaceLeft,
+        authenticate_xoauth2(&buffer, "a1", "me@example.com", "token", &tiny),
+    );
+}
+
 test "the structure fetch asks for the shape, nothing else" {
     var buffer: [128]u8 = undefined;
     try expect_command("a5 UID FETCH 9 (BODYSTRUCTURE)\r\n", fetch_structure(&buffer, "a5", 9));

@@ -682,6 +682,18 @@ test "a row with an emoji occupies the same columns as one without" {
     try testing.expectEqualStrings("1234567", std.mem.trimEnd(u8, screen.row_text(1, &buffer), " "));
 }
 
+test "a combining mark belongs to the glyph before it and takes no cell" {
+    var screen: Screen = .{};
+    screen.resize(6, 1);
+
+    // "e" followed by U+0301 COMBINING ACUTE: one cell, and the row stays as
+    // wide as its text.
+    const written = screen.put_text(0, 0, "e\u{301}x", 6, .{});
+    try testing.expectEqual(@as(u16, 2), written);
+    try testing.expectEqual(@as(u21, 'e'), screen.cells[0][0].ch);
+    try testing.expectEqual(@as(u21, 'x'), screen.cells[0][1].ch);
+}
+
 test "a wide glyph is sent once, without an extra cell after it" {
     var screen: Screen = .{};
     screen.resize(20, 1);

@@ -512,6 +512,18 @@ test "accounts keep labels and addresses, and filter by id" {
     try testing.expect(accounts.address_for(AccountId.from_int(9)) == null);
 }
 
+test "labels that share a prefix sort shortest first" {
+    var accounts: Accounts = .{};
+    accounts.add(AccountId.from_int(1), "work-two", .{}, .{});
+    accounts.add(AccountId.from_int(2), "work", .{}, .{});
+    accounts.add(AccountId.from_int(3), "WORK-one", .{}, .{});
+
+    var order: [accounts_max]u8 = undefined;
+    // "work" is a prefix of the other two, so it comes first; the rest differ at
+    // the character after it, and case is not a difference.
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 0 }, accounts.sorted_order(&order));
+}
+
 test "rebuild honours the account filter" {
     var store = try Store.init(testing.allocator, 8);
     defer store.deinit(testing.allocator);
