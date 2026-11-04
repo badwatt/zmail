@@ -937,6 +937,9 @@ pub const Session = struct {
             return;
         }
         if (!self.show_images or self.state.view != .reader) return;
+        // One worker in the network at a time: the body and the picture share an
+        // allocator and an IO handle, and they are not both reentrant.
+        if (self.body_in_flight or self.body_request != null or self.refreshing) return;
         const fetch = self.deps.fetch_image orelse return;
 
         const text = self.reader_text();
@@ -1523,8 +1526,9 @@ pub const Session = struct {
             return;
         }
         const request = self.body_request orelse return;
-        // One connection per account: a refresh owns it until it finishes.
-        if (self.refreshing) return;
+        // One connection per account: a refresh owns it until it finishes, and the
+        // picture worker is another thread using the same IO.
+        if (self.refreshing or self.image_in_flight) return;
         self.body_request = null;
         self.body_in_flight = true;
         self.body_job.start(request, &self.raw);
@@ -5945,4 +5949,29 @@ test "the splash breathes until the inbox is here, and then it is gone" {
     try testing.expect(!rig.session.state.booting);
     try testing.expect(!rig.session.booting_now);
     try testing.expect(ticks >= Session.boot_min_ticks);
+}
+
+test "the picture worker and the body worker never run at once" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    var gate: FakeMail.Gate = .{};
+    rig.fake_mail.gate = &gate;
+    defer gate.release();
+    var fetch_sink: RemoteFetch = .{ .png = "PNG", .lead = 8 };
+    rig.session.deps.fetch_image = RemoteFetch.fetch;
+    rig.session.deps.fetch_image_context = &fetch_sink;
+    rig.session.deps.draw_image = ImageSink.draw;
+
+    // A body is in the air: the picture worker waits its turn instead of opening a
+    // second connection with the same IO handle underneath it.
+    rig.fake_system.push_input("\r");
+    _ = rig.session.step();
+    try testing.expect(rig.session.body_in_flight);
+    try testing.expect(!rig.session.image_in_flight);
+    try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
+    rig.session.poll_images();
+    try testing.expectEqual(@as(u8, 0), fetch_sink.fetches);
 }
