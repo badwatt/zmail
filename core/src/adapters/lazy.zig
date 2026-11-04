@@ -199,6 +199,21 @@ test "lazy mail: the first call opens, later calls reuse the connection" {
     try testing.expectEqual(@as(u32, 1), opener.closes);
 }
 
+test "lazy mail: the raw message goes through the opened connection" {
+    var opener: Opener = .{};
+    var lazy = opener.lazy();
+    defer lazy.close();
+    var message = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(1) };
+    try opener.mail.seed(&message);
+
+    var out: [64]u8 = undefined;
+    // The reader renders text and HTML from these same bytes, so they are the
+    // message itself -- and they open the connection like any other call.
+    const raw = try lazy.mail().fetch_raw(.inbox, MessageId.from_int(1), &out);
+    try testing.expectEqual(@as(u32, 1), opener.opens);
+    try testing.expect(raw.len > 0);
+}
+
 test "lazy mail: a failed open is Unavailable and is retried next time" {
     var opener: Opener = .{ .fail = true };
     var lazy = opener.lazy();

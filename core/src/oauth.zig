@@ -368,6 +368,27 @@ test "the Microsoft tenant comes from the config" {
     try testing.expect(std.mem.indexOf(u8, fallback, "/common/") != null);
 }
 
+test "a percent sign that is not an escape stays a percent sign" {
+    var buffer: [32]u8 = undefined;
+    // A truncated escape, and one that is not hex: neither is a byte to decode.
+    try testing.expectEqualStrings("a%2 a%zz", url_decode("a%2+a%zz", &buffer));
+    // The buffer bounds the work, and nothing is written past it.
+    var small: [3]u8 = undefined;
+    try testing.expectEqualStrings("abc", url_decode("abcdef", &small));
+}
+
+test "a tenant too long for the buffer gets the endpoint that always fits" {
+    var tiny: [8]u8 = undefined;
+    // The Microsoft URL is built per tenant; when it cannot be, the provider's
+    // own endpoint is still a valid answer.
+    try testing.expectEqualStrings(
+        "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+        auth_base(.microsoft, "consumers", &tiny),
+    );
+    // Everyone else ignores the tenant entirely.
+    try testing.expectEqualStrings(endpoints(.google).auth_url, auth_base(.google, "x", &tiny));
+}
+
 test "the authorization URL carries PKCE, scope, and state" {
     var buffer: [1024]u8 = undefined;
     const url = auth_url(

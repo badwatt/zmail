@@ -555,3 +555,13 @@ test "query_background gives up quietly when the terminal says nothing" {
     noisy.push_input("not a reply at all");
     try testing.expect(query_background(noisy.system()) == null);
 }
+
+test "suspending and resuming never fail, even when the terminal has gone" {
+    // Descriptors that are not open: the terminal went away while the reader was
+    // opening a browser. The escapes cannot be written, and the caller must still
+    // be able to carry on -- it is on its way out of the screen either way.
+    var posix = Posix.init(-1, -1);
+    const system = posix.system();
+    try system.suspend_ui();
+    try system.resume_ui();
+}

@@ -387,6 +387,22 @@ test "a message whose shape is not understood is read whole, not refused" {
     try testing.expect(std.mem.indexOf(u8, output, "BODY.PEEK[]<0.") != null);
 }
 
+test "the raw message is handed over as sent, cut to the caller's buffer" {
+    const message = "Content-Type: text/plain; charset=utf-8\r\n\r\nhi";
+    var scripted: Scripted = .{ .input = login_ok ++
+        "* 1 EXISTS\r\na2 OK selected\r\n" ++
+        "* 1 FETCH (BODY[]<0> {45}\r\n" ++ message ++ ")\r\na3 OK\r\n" ++
+        "* 1 FETCH (BODY[]<0> {45}\r\n" ++ message ++ ")\r\na4 OK\r\n" };
+    var imap = try ImapMail.open(scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var out: [128]u8 = undefined;
+    try testing.expectEqualStrings(message, try imap.mail().fetch_raw(.inbox, MessageId.from_int(7), &out));
+
+    var small: [8]u8 = undefined;
+    try testing.expectEqualStrings(message[0..8], try imap.mail().fetch_raw(.inbox, MessageId.from_int(7), &small));
+}
+
 test "delete flags the message and expunges it, falling back without UIDPLUS" {
     var scripted: Scripted = .{ .input = login_ok ++
         "* 1 EXISTS\r\na2 OK selected\r\n" ++
