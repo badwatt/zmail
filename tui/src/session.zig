@@ -1863,12 +1863,14 @@ pub const Session = struct {
         // screen and nobody else is painting: the mark keeps breathing from here, and
         // stops the moment the mail is in, before this thread touches the terminal.
         if (self.state.booting) {
+            var labels: [96]u8 = undefined;
             self.splash_painter.start(
                 self.deps.system,
                 self.size,
                 self.deps.theme,
                 self.deps.reduced_motion,
                 @intCast(self.state.spinner),
+                render_mod.account_labels(&self.state, &labels),
             );
         }
         defer self.splash_painter.finish();

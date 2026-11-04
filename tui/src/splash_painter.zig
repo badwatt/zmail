@@ -27,6 +27,11 @@ pub const Painter = struct {
     stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     system: System = undefined,
     placement: render.MarkPlacement = .{ .left = 0, .top = 0, .height = 0, .width = 0, .large = false },
+    /// `connecting to <accounts>`, copied: the caller's text lives on the stack.
+    line: [160]u8 = undefined,
+    line_row: u16 = 0,
+    line_left: u16 = 0,
+    line_len: usize = 0,
     theme: theme_mod.Theme = theme_mod.Theme.dark(),
     reduced_motion: bool = false,
     tick: u16 = 0,
@@ -40,11 +45,16 @@ pub const Painter = struct {
         theme: theme_mod.Theme,
         reduced_motion: bool,
         from_tick: u16,
+        labels: []const u8,
     ) void {
         if (self.thread != null) return;
         if (size.columns == 0 or size.rows == 0) return;
         self.system = system;
         self.placement = render.splash_mark(size.columns, size.rows);
+        const line = render.splash_line(size.columns, size.rows, labels, &self.line);
+        self.line_row = line.row;
+        self.line_left = line.left;
+        self.line_len = line.text.len;
         self.theme = theme;
         self.reduced_motion = reduced_motion;
         self.tick = from_tick;
@@ -93,6 +103,7 @@ pub const Painter = struct {
         self.system.write(writer.buffered()) catch return;
 
         // Simple and idempotent: every row, its address, its glyphs.
+        self.paint_line();
         var row: u16 = 0;
         while (row < placement.height) : (row += 1) {
             var row_text: [128]u8 = undefined;
@@ -117,7 +128,56 @@ pub const Painter = struct {
             self.system.write(row_text[0..length]) catch return;
         }
     }
+    fn paint_line(self: *Painter) void {
+        if (self.line_len == 0) return;
+        const text = self.line[0..self.line_len];
+        const width: u16 = @intCast(@min(screen.text_columns(text), 160));
+
+        var move: [32]u8 = undefined;
+        const at = std.fmt.bufPrint(&move, "\x1b[{d};{d}H", .{
+            self.line_row + 1,
+            self.line_left + 1,
+        }) catch return;
+        self.system.write(at) catch return;
+
+        // One SGR per stretch of the same level, so a twenty-cell word is a handful
+        // of writes rather than forty.
+        var elapsed: i64 = @intCast(self.tick);
+        elapsed *= frame_ms;
+        var current: ?u8 = null;
+        var cells: u16 = 0;
+        var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
+        while (it.nextCodepoint()) |codepoint| {
+            if (cells >= width) break;
+            const level = render.shimmer_level(cells, width, elapsed);
+            if (current == null or current.? != level) {
+                var sgr: [48]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&sgr);
+                write_style(&writer, render.shimmer_style(&self.theme, level)) catch return;
+                self.system.write(writer.buffered()) catch return;
+                current = level;
+            }
+            var encoded: [4]u8 = undefined;
+            const length = std.unicode.utf8Encode(codepoint, &encoded) catch continue;
+            self.system.write(encoded[0..length]) catch return;
+            cells += screen.cell_width(codepoint);
+        }
+        // Back to plain for the next frame's cursor moves.
+        self.system.write("\x1b[0m") catch return;
+    }
 };
+
+/// The words under the mark, lit by the same band the screen would draw.
+fn write_style(writer: *std.Io.Writer, style: screen.Style) std.Io.Writer.Error!void {
+    try writer.writeAll("\x1b[0m");
+    switch (style.fg) {
+        .rgb => |rgb| try writer.print("\x1b[38;2;{d};{d};{d}m", .{ rgb.r, rgb.g, rgb.b }),
+        .ansi256 => |index| try writer.print("\x1b[38;5;{d}m", .{index}),
+        .default => {},
+    }
+    if (style.attrs.bold) try writer.writeAll("\x1b[1m");
+    if (style.attrs.dim) try writer.writeAll("\x1b[2m");
+}
 
 fn write_sgr(writer: *std.Io.Writer, theme: theme_mod.Theme, level: f32) std.Io.Writer.Error!void {
     const style = render.breath_style(&theme, level);
@@ -136,7 +196,7 @@ test "the painter draws the mark where the splash put it, and stops" {
     var fake: system_mod.Fake = .{};
     var painter = Painter{};
 
-    painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0);
+    painter.start(fake.system(), .{ .columns = 100, .rows = 30 }, theme_mod.Theme.dark(), false, 0, "home");
     // Long enough for at least one frame, short enough not to slow the suite.
     _ = std.c.nanosleep(&std.posix.timespec{ .sec = 0, .nsec = 120 * std.time.ns_per_ms }, null);
     painter.finish();
@@ -146,13 +206,33 @@ test "the painter draws the mark where the splash put it, and stops" {
     try testing.expect(std.mem.indexOf(u8, written, "\x1b[") != null);
     try testing.expect(std.mem.indexOf(u8, written, "█") != null);
     try testing.expect(std.mem.indexOf(u8, written, "\x1b[38;") != null);
+    // The words under the mark are carried too: they move with it. Their runs are
+    // separated by colour changes, so the text is found with the escapes stripped.
+    var plain: [4096]u8 = undefined;
+    var length: usize = 0;
+    var index: usize = 0;
+    while (index < written.len and length < plain.len) {
+        if (written[index] == 0x1b) {
+            index += 1;
+            if (index < written.len and written[index] == '[') {
+                index += 1;
+                while (index < written.len and (written[index] < '@' or written[index] > '~')) index += 1;
+                index += 1;
+            }
+            continue;
+        }
+        plain[length] = written[index];
+        length += 1;
+        index += 1;
+    }
+    try testing.expect(std.mem.indexOf(u8, plain[0..length], "connecting to home") != null);
     try testing.expect(painter.thread == null);
 }
 
 test "with no room for a mark, nothing is painted" {
     var fake: system_mod.Fake = .{};
     var painter = Painter{};
-    painter.start(fake.system(), .{ .columns = 0, .rows = 0 }, theme_mod.Theme.dark(), false, 0);
+    painter.start(fake.system(), .{ .columns = 0, .rows = 0 }, theme_mod.Theme.dark(), false, 0, "");
     painter.finish();
     try testing.expectEqualStrings("", fake.output_text());
 }
@@ -173,4 +253,23 @@ test "the colour of one frame: truecolor, a palette index, or nothing at all" {
     try write_sgr(&writer, theme_mod.Theme.mono(), 1.0);
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;") == null);
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[1m") != null);
+}
+
+test "the line's three levels of light, in the three kinds of colour" {
+    var buffer: [64]u8 = undefined;
+
+    var writer = std.Io.Writer.fixed(&buffer);
+    const rgb_style = (screen.Style{}).with_fg(.{ .rgb = .{ .r = 1, .g = 2, .b = 3 } });
+    try write_style(&writer, rgb_style);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;2;1;2;3") != null);
+
+    writer = std.Io.Writer.fixed(&buffer);
+    const palette_style = (screen.Style{}).with_fg(.{ .ansi256 = 74 });
+    try write_style(&writer, palette_style);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;5;74") != null);
+
+    writer = std.Io.Writer.fixed(&buffer);
+    try write_style(&writer, (screen.Style{}).with_dim());
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "38;") == null);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "\x1b[2m") != null);
 }

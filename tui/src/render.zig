@@ -466,9 +466,25 @@ pub fn draw_shimmer(
     const width: u16 = @intCast(@min(screen.text_columns(text), out.columns -| x));
     if (width == 0) return 0;
 
-    // Left to right, then back from the right to the left: a band that reaches the
-    // end and turns round reads as one thing moving, where a band that wraps reads
-    // as a flicker back to the start.
+    var cells: u16 = 0;
+    var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
+    while (it.nextCodepoint()) |codepoint| {
+        if (cells >= width) break;
+        const level = shimmer_level(@intCast(cells), width, elapsed_ms);
+        out.put(x +| cells, y, codepoint, shimmer_style(theme, level));
+        cells += screen.cell_width(codepoint);
+    }
+    return cells;
+}
+
+/// How lit the cell at `cell` is: three levels, because a terminal has no alpha and
+/// the band needs an edge. One function, so the screen and the painter thread cannot
+/// disagree about where the light is.
+pub const shimmer_bright = 2;
+pub const shimmer_soft = 1;
+pub const shimmer_dim = 0;
+
+pub fn shimmer_level(cell: u16, width: u16, elapsed_ms: i64) u8 {
     const span: i64 = @as(i64, width) + shimmer_width;
     const travelled: i64 = @divTrunc(elapsed_ms * @as(i64, shimmer_speed), 1000);
     const phase: i64 = @mod(travelled, span * 2);
@@ -476,26 +492,44 @@ pub fn draw_shimmer(
     const band_start = offset - @as(i64, shimmer_width);
     const band_end = offset;
 
-    var cells: u16 = 0;
-    var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
-    while (it.nextCodepoint()) |codepoint| {
-        if (cells >= width) break;
-        const here: i64 = cells;
-        // One cell of bright text at each edge of the band, so the light has a
-        // soft edge instead of a hard one: a terminal has no alpha.
-        const style = if (here >= band_start and here < band_end)
-            theme.accent.with_bold()
-        else if ((here >= band_start - 1 and here < band_start) or (here >= band_end and here < band_end + 1))
-            theme.text
-        else
-            theme.dim;
-        out.put(x +| cells, y, codepoint, style);
-        cells += screen.cell_width(codepoint);
+    const here: i64 = cell;
+    if (here >= band_start and here < band_end) return shimmer_bright;
+    if ((here >= band_start - 1 and here < band_start) or (here >= band_end and here < band_end + 1)) {
+        return shimmer_soft;
     }
-    return cells;
+    return shimmer_dim;
 }
 
-fn account_labels(state: *const State, buffer: []u8) []const u8 {
+pub fn shimmer_style(theme: *const Theme, level: u8) Style {
+    return switch (level) {
+        shimmer_bright => theme.accent.with_bold(),
+        shimmer_soft => theme.text,
+        else => theme.dim,
+    };
+}
+
+/// The line under the mark, and where it sits: `connecting to <accounts>`.
+pub const SplashLine = struct {
+    row: u16,
+    left: u16,
+    text: []const u8,
+};
+
+pub fn splash_line(columns: u16, rows: u16, labels: []const u8, buffer: []u8) SplashLine {
+    const placement = splash_mark(columns, rows);
+    var line: [160]u8 = undefined;
+    const full = std.fmt.bufPrint(&line, "connecting to {s}", .{labels}) catch labels;
+    const width = screen.text_columns(full);
+    const length = @min(full.len, buffer.len);
+    @memcpy(buffer[0..length], full[0..length]);
+    return .{
+        .row = placement.top +| placement.height +| 2,
+        .left = (columns -| width) / 2,
+        .text = buffer[0..length],
+    };
+}
+
+pub fn account_labels(state: *const State, buffer: []u8) []const u8 {
     if (state.accounts.len == 0) return "mail";
     if (state.account_filter) |filter| {
         const label = state.accounts.label_for(filter);
