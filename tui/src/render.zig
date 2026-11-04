@@ -450,7 +450,9 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     // The two corners of the last row: what is happening on the left, the way out on
     // the right, and the middle kept clear so the row reads as a footer and not as a
     // sentence with something appended to it.
-    put_right(out, out.columns -| 2, footer_row, "Ctrl+C quits", theme.border);
+    var right_buffer: [32]u8 = undefined;
+    const corner = splash_right(out.columns, out.rows, &right_buffer);
+    _ = draw_shimmer(out, corner.left, corner.row, corner.text, @divTrunc(@as(i64, tick) * 55, 2), theme);
 
     const line_width = screen.text_columns(status.text);
     const right_width = screen.text_columns("Ctrl+C quits");
@@ -522,6 +524,19 @@ pub fn shimmer_level(cell: u16, width: u16, elapsed_ms: i64) u8 {
         return shimmer_soft;
     }
     return shimmer_dim;
+}
+
+/// The right corner of the footer, and where it sits: `Ctrl+C quits`, against the edge.
+pub fn splash_right(columns: u16, rows: u16, buffer: []u8) SplashLine {
+    const text = "Ctrl+C quits";
+    const width = screen.text_columns(text);
+    const length = @min(text.len, buffer.len);
+    @memcpy(buffer[0..length], text[0..length]);
+    return .{
+        .row = rows -| 1,
+        .left = columns -| 2 -| width,
+        .text = buffer[0..length],
+    };
 }
 
 pub fn shimmer_style(theme: *const Theme, level: u8) Style {

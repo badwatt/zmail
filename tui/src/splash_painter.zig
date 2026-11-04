@@ -32,6 +32,11 @@ pub const Painter = struct {
     line_row: u16 = 0,
     line_left: u16 = 0,
     line_len: usize = 0,
+    /// The right corner, `Ctrl+C quits`, lit the other way round.
+    right: [32]u8 = undefined,
+    right_row: u16 = 0,
+    right_left: u16 = 0,
+    right_len: usize = 0,
     theme: theme_mod.Theme = theme_mod.Theme.dark(),
     reduced_motion: bool = false,
     tick: u16 = 0,
@@ -55,6 +60,11 @@ pub const Painter = struct {
         self.line_row = line.row;
         self.line_left = line.left;
         self.line_len = line.text.len;
+
+        const corner = render.splash_right(size.columns, size.rows, &self.right);
+        self.right_row = corner.row;
+        self.right_left = corner.left;
+        self.right_len = corner.text.len;
         self.theme = theme;
         self.reduced_motion = reduced_motion;
         self.tick = from_tick;
@@ -100,6 +110,7 @@ pub const Painter = struct {
         // otherwise the wordmark is written in the terminal's default and the breath
         // is a shape that never changes.
         self.paint_line();
+        self.paint_corner();
 
         var sequence: [64]u8 = undefined;
         var writer = std.Io.Writer.fixed(&sequence);
@@ -168,9 +179,44 @@ pub const Painter = struct {
         // Back to plain for the next frame's cursor moves.
         self.system.write("\x1b[0m") catch return;
     }
+    fn paint_corner(self: *Painter) void {
+        if (self.right_len == 0) return;
+        const text = self.right[0..self.right_len];
+        const width: u16 = @intCast(@min(screen.text_columns(text), 32));
+
+        var move: [32]u8 = undefined;
+        const at = std.fmt.bufPrint(&move, "\x1b[{d};{d}H", .{
+            self.right_row + 1,
+            self.right_left + 1,
+        }) catch return;
+        self.system.write(at) catch return;
+
+        var elapsed: i64 = @intCast(self.tick);
+        elapsed *= frame_ms;
+        var current: ?u8 = null;
+        var cells: u16 = 0;
+        var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
+        while (it.nextCodepoint()) |codepoint| {
+            if (cells >= width) break;
+            const level = render.shimmer_level(cells, width, elapsed);
+            if (current == null or current.? != level) {
+                var sgr: [48]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&sgr);
+                write_style(&writer, render.shimmer_style(&self.theme, level)) catch return;
+                self.system.write(writer.buffered()) catch return;
+                current = level;
+            }
+            var encoded: [4]u8 = undefined;
+            const length = std.unicode.utf8Encode(codepoint, &encoded) catch continue;
+            self.system.write(encoded[0..length]) catch return;
+            cells += screen.cell_width(codepoint);
+        }
+        self.system.write("\x1b[0m") catch return;
+    }
 };
 
 /// The words under the mark, lit by the same band the screen would draw.
+/// `Ctrl+C quits`, with the band crossing it the other way.
 fn write_style(writer: *std.Io.Writer, style: screen.Style) std.Io.Writer.Error!void {
     try writer.writeAll("\x1b[0m");
     switch (style.fg) {
