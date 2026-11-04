@@ -1123,7 +1123,9 @@ pub const Session = struct {
     /// skip the fade would show a flash of the mark, which is worse than the second
     /// it costs; a start that takes longer than this keeps breathing for as long as
     /// it takes.
-    const boot_min_ticks: u16 = render_mod.breath_ticks;
+    /// Twenty ticks (about two seconds) of first screen, whatever the breath is
+    /// doing: the splash is not the animation, the animation just happens on it.
+    const boot_min_ticks: u16 = 20;
     /// Ticks the mark breathes before the first fetch starts. Small: it is there to
     /// make the movement visible before the one call that freezes the loop.
     const boot_warmup: u16 = 3;

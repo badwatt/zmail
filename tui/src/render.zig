@@ -282,7 +282,7 @@ fn masthead(
 
 /// One breath, in ticks. The splash repaints every 55ms and the loop's spinner
 /// advances by two per frame, so a full cycle is about 1.8 seconds: in, out, in.
-pub const breath_ticks: u16 = 26;
+pub const breath_ticks: u16 = 56;
 
 /// Below this a letter is not drawn at all. The fade is a mix towards the ground,
 /// which is invisible on the ground itself -- but only when the ground is known; a
@@ -294,15 +294,22 @@ pub const hidden_level: f32 = 0.02;
 /// whole word breathes together, which is what makes it read as one thing drawing
 /// breath rather than as letters flickering on their own.
 pub fn breath_level(tick: u16) f32 {
-    // Full on the first frame, and dimming by a visible amount on the next: a
-    // triangle, because a cosine spends its first quarter within a couple of per
-    // cent of the peak -- which is a mark that looks frozen for half a second and
-    // then starts to breathe. Constant speed, from the first tick.
+    // Full on the first frame, then a long, slow breath.
+    //
+    // A plain triangle this long would move by under two per cent a frame, which is
+    // the "it looks frozen" problem again. The travel is eased instead: steep at the
+    // ends of the breath and slow through the middle, so the first step after the
+    // first frame is already visible and the whole cycle still takes five seconds.
     const half: u16 = breath_ticks / 2;
     const phase = tick % breath_ticks;
     const travelled = if (phase <= half) phase else breath_ticks - phase;
-    return 1.0 - @as(f32, @floatFromInt(travelled)) / @as(f32, half);
+    const fraction = @as(f32, @floatFromInt(travelled)) / @as(f32, half);
+    return 1.0 - std.math.pow(f32, fraction, breath_ease);
 }
+
+/// Below one, so the ends of the breath are steep: the shape of air leaving slowly
+/// and coming back, not of a bar sliding.
+const breath_ease: f32 = 0.55;
 
 /// The style of one cell at `level` of opacity.
 ///
@@ -2814,7 +2821,9 @@ test "the breath moves from the first tick, at a speed the eye can see" {
     // And the way back is the same movement in reverse: empty at the trough, and up
     // again four ticks later.
     try testing.expectEqual(@as(f32, 0.0), breath_level(breath_ticks / 2));
-    try testing.expect(breath_level(breath_ticks / 2 + 4) > 0.2);
+    // And it climbs again on the way back, without a plateau at the bottom.
+    try testing.expect(breath_level(breath_ticks / 2 + 6) > breath_level(breath_ticks / 2 + 2));
+    try testing.expect(breath_level(breath_ticks / 2 + 6) > 0.1);
 }
 
 test "both sizes of the mark answer their own cells" {
