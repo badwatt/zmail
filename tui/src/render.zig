@@ -507,10 +507,12 @@ pub const shimmer_soft = 1;
 pub const shimmer_dim = 0;
 
 pub fn shimmer_level(cell: u16, width: u16, elapsed_ms: i64) u8 {
+    // One way only: the band enters from the left, crosses, and leaves by the right,
+    // then starts again at the left. It spends a moment off the line at each end,
+    // which is what keeps the restart from reading as a jump.
     const span: i64 = @as(i64, width) + shimmer_width;
     const travelled: i64 = @divTrunc(elapsed_ms * @as(i64, shimmer_speed), 1000);
-    const phase: i64 = @mod(travelled, span * 2);
-    const offset: i64 = if (phase <= span) phase else span * 2 - phase;
+    const offset: i64 = @mod(travelled, span);
     const band_start = offset - @as(i64, shimmer_width);
     const band_end = offset;
 
@@ -2645,7 +2647,7 @@ test "the band keeps its width and travels along the line" {
     try testing.expect(@as(u16, @intCast(before_len)) <= shimmer_width);
 }
 
-test "the band turns round at the end instead of jumping back" {
+test "the band crosses one way only" {
     const theme = theme_mod.Theme.dark();
     const text = "connecting to home";
     const width: u16 = @intCast(screen.text_columns(text));
@@ -2653,32 +2655,26 @@ test "the band turns round at the end instead of jumping back" {
     var buffer: [64]u16 = undefined;
     var previous: i64 = -1;
     var rising_seen = false;
-    var falling_seen = false;
-    var largest_step: i64 = 0;
+    var backward = false;
 
-    // One pixel every 20ms over two whole passes of the line.
+    // Five seconds of watching: several crossings, and never a step to the left
+    // while the band is on the line.
     var moment: i64 = 0;
-    while (moment < 6_000) : (moment += 20) {
+    while (moment < 5_000) : (moment += 20) {
         var out = Screen.init(60, 1);
         _ = draw_shimmer(&out, 0, 0, text, moment, &theme);
         const columns = shimmer_columns(&out, 0, &theme, &buffer);
-        // Where the band is, or off the line at the start of a pass.
         const position: i64 = if (columns.len > 0) columns[0] else -1;
         if (previous >= 0 and position >= 0) {
-            const step_by = position - previous;
-            if (step_by > 0) rising_seen = true;
-            if (step_by < 0) falling_seen = true;
-            largest_step = @max(largest_step, if (step_by < 0) -step_by else step_by);
+            if (position > previous) rising_seen = true;
+            if (position < previous) backward = true;
         }
         previous = position;
     }
-
-    // Both directions, and no jump back to the left edge: going back is the same
-    // trip in reverse, a cell at a time.
-    try testing.expect(rising_seen);
-    try testing.expect(falling_seen);
-    try testing.expect(largest_step <= @as(i64, shimmer_width));
     _ = width;
+    try testing.expect(rising_seen);
+    // Left to right, then it starts again: it never travels back.
+    try testing.expect(!backward);
 }
 
 test "the band leaves the line at both ends and comes round" {
