@@ -2232,6 +2232,35 @@ const Rig = struct {
         }
     }
 
+    /// Knobs the tests vary. Everything else -- the account, the system, the theme --
+    /// is the rig's, so a test cannot forget to wire one and pass for the wrong reason.
+    const Knobs = struct {
+        accounts: ?[]const MailSource = null,
+        cache: ?core.cache_port.Cache = null,
+        loading_ms: u32 = 90,
+        now: Now = fixed_now,
+        splash: bool = true,
+        scope: ?core.scope_port.Scope = null,
+        accounts_file: ?core.accounts_port.Accounts = null,
+        notice: ?[]const u8 = null,
+    };
+
+    /// The session over this rig's account and fake terminal.
+    fn arm(self: *Rig, knobs: Knobs) !void {
+        try self.session.init(testing.allocator, .{
+            .accounts = knobs.accounts orelse &.{},
+            .system = self.fake_system.system(),
+            .theme = theme_mod.Theme.dark(),
+            .now = knobs.now,
+            .loading_ms = knobs.loading_ms,
+            .splash = knobs.splash,
+            .cache = knobs.cache,
+            .scope = knobs.scope,
+            .accounts_file = knobs.accounts_file,
+            .notice = knobs.notice,
+        });
+    }
+
     fn start(self: *Rig) !void {
         try self.seed();
         self.sources[0] = .{
@@ -2240,13 +2269,7 @@ const Rig = struct {
             .from = core.address.Address.init("me@zmail.local") catch .{},
             .mail = self.fake_mail.mail(),
         };
-        try self.session.init(testing.allocator, .{
-            .accounts = &self.sources,
-            .system = self.fake_system.system(),
-            .theme = theme_mod.Theme.dark(),
-            .now = fixed_now,
-            .loading_ms = 0,
-        });
+        try self.arm(.{ .accounts = &self.sources, .loading_ms = 0 });
         // Tests exercise the steady state: the cache is empty, so boot fetches.
         // The first screen breathes while it does, one account per tick, so the rig
         // runs the ticks the real loop would until the inbox is here.
@@ -2319,12 +2342,7 @@ test "session paints the list before it touches the network" {
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
-        .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
-    });
+    try rig.arm(.{ .accounts = &rig.sources });
     defer rig.deinit();
 
     // Nothing has been fetched yet: an empty cache means "boot later".
@@ -2758,11 +2776,8 @@ test "starting from a cache does not touch the network, and R refreshes and save
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .cache = cache.cache(),
     });
     rig.session.boot();
@@ -2788,11 +2803,8 @@ test "switching to an unloaded mailbox reads the cache, not the network" {
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .cache = cache.cache(),
     });
     defer rig.deinit();
@@ -2829,11 +2841,8 @@ test "a cache miss falls back to the network and fills the cache" {
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .cache = cache.cache(),
     });
     rig.session.boot();
@@ -2857,11 +2866,8 @@ test "a failing cache degrades to the network" {
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .cache = cache.cache(),
     });
     rig.session.boot();
@@ -2978,11 +2984,8 @@ test "an in-memory source boots without a splash" {
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .splash = false,
     });
     defer rig.deinit();
@@ -3027,11 +3030,8 @@ test "loop without a splash paints only the data" {
         .mail = rig.fake_mail.mail(),
     };
     rig.fake_system.push_input("\x03"); // quit on the first step
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .splash = false,
     });
     defer rig.deinit();
@@ -3048,11 +3048,8 @@ test "a refused login explains the provider, when the provider is known" {
     source.hint = "Microsoft needs OAuth2 or an app password";
     rig.sources[0] = source;
 
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .loading_ms = 0,
     });
     defer rig.deinit();
@@ -3074,11 +3071,8 @@ test "a refused login is named, not hidden behind a generic error" {
         .label = "work",
         .mail = rig.rejecting_mail(),
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .loading_ms = 0,
     });
     defer rig.deinit();
@@ -3099,12 +3093,7 @@ test "a cold boot that cannot connect says so, and shows an empty list" {
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
-        .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
-    });
+    try rig.arm(.{ .accounts = &rig.sources });
     defer rig.deinit();
 
     rig.session.boot();
@@ -3208,11 +3197,8 @@ test "the form shows the servers the source reported" {
         .smtp_port = 587,
         .smtp = true,
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .loading_ms = 0,
     });
     defer rig.deinit();
@@ -3627,11 +3613,8 @@ test "removing an account rewrites the config and drops its mail" {
         .label = "home",
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .loading_ms = 0,
         .accounts_file = null,
     });
@@ -3723,11 +3706,7 @@ test "delete and empty report server errors and unknown accounts" {
 test "a notice is shown as an alert from the first frame" {
     var rig: Rig = .{};
     try rig.seed();
-    try rig.session.init(testing.allocator, .{
-        .accounts = &.{},
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
+    try rig.arm(.{
         .loading_ms = 0,
         .notice = "The config file is invalid",
     });
@@ -3745,11 +3724,8 @@ test "an effect paints the spinner, even when it is instant" {
         .label = "account",
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &rig.sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .loading_ms = 5,
     });
     defer rig.deinit();
@@ -4389,11 +4365,8 @@ test "the account picked last time is the one the reader opens on" {
         .mail = rig.fake_mail.mail(),
     };
     sources[1] = second_source;
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .loading_ms = 0,
         .scope = scope.scope(),
     });
@@ -5051,11 +5024,8 @@ test "the scope remembers a label no account has any more, as all accounts" {
         .from = core.address.Address.init("me@work.example") catch .{},
         .mail = rig.fake_mail.mail(),
     };
-    try rig.session.init(testing.allocator, .{
+    try rig.arm(.{
         .accounts = &sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
         .loading_ms = 0,
         .scope = scope.scope(),
     });
@@ -5284,14 +5254,7 @@ test "the splash breathes until the inbox is here, and then it is gone" {
         .{ .id = core.id.AccountId.from_int(1), .label = "one", .mail = rig.fake_mail.mail() },
         .{ .id = core.id.AccountId.from_int(2), .label = "two", .mail = rig.fake_mail.mail() },
     };
-    try rig.session.init(testing.allocator, .{
-        .accounts = &sources,
-        .system = rig.fake_system.system(),
-        .theme = theme_mod.Theme.dark(),
-        .now = fixed_now,
-        .loading_ms = 0,
-        .splash = true,
-    });
+    try rig.arm(.{ .accounts = &sources, .loading_ms = 0 });
     defer rig.deinit();
 
     try testing.expectEqual(@as(u8, 2), rig.session.source_count);
