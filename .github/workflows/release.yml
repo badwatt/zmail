@@ -42,6 +42,8 @@ jobs:
         with:
           fetch-depth: 0
       - id: extract
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=$(awk '/\.version/{gsub(/"/, "", $3); gsub(/,/, "", $3); print $3}' build.zig.zon)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -49,10 +51,14 @@ jobs:
             echo "Tag $VERSION already exists — skipping."
             echo "created=false" >> $GITHUB_OUTPUT
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag "$VERSION"
-            git push origin "$VERSION"
+            # The tag is created through the API, not by pushing it: `git push` of a
+            # ref whose commits touch a workflow file is refused for this token
+            # ("refusing to allow a GitHub App to create or update workflow ..."), and
+            # the commit that bumps the manifest can be right after one that does.
+            # The API asks for the permission this job actually has.
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/$VERSION" \
+              -f sha="$(git rev-parse HEAD)" > /dev/null
             echo "created=true" >> $GITHUB_OUTPUT
           fi
 
