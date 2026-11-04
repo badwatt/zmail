@@ -1071,8 +1071,8 @@ pub const Session = struct {
             if (self.progress_since_ms == 0) self.progress_since_ms = os.monotonic_ms();
             // The bar moves itself: the wait it reports is often one blocking
             // call that nothing here could tick through.
-            progress_mod.begin(self.deps.system);
-            progress_mod.unpause();
+            progress_mod.begin(self.deps.system, os.monotonic_ms());
+            progress_mod.keep_alive(os.monotonic_ms());
             return;
         }
         if (self.progress_since_ms == 0) return;
@@ -5053,7 +5053,7 @@ test "the terminal's bar goes up while loading, stays, and comes down after" {
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
-    try testing.expectEqualStrings("\x1b]9;4;1;8\x1b\\", rig.fake_system.output_text());
+    try testing.expectEqualStrings("\x1b]9;4;3;0\x1b\\", rig.fake_system.output_text());
 
     // Sixty ticks a second: the bar is not re-sent on every one of them.
     rig.session.needs_render = false;
@@ -5097,7 +5097,7 @@ test "the splash counts as loading, and so does a refresh" {
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
-    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;1;") != null);
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;3;0") != null);
 
     // A refresh in the background is work too, even with nothing booting: the bar
     // is already up, so it stays up and is not re-sent.
@@ -5106,7 +5106,7 @@ test "the splash counts as loading, and so does a refresh" {
     rig.session.start_refresh();
     rig.session.needs_render = false;
     _ = rig.session.step();
-    try testing.expectEqual(core.progress.State.normal, progress_mod.state());
+    try testing.expectEqual(core.progress.State.indeterminate, progress_mod.state());
 
     // And it comes down when the refresh does, once it has been up long enough
     // to be seen.
@@ -5136,15 +5136,15 @@ test "a wait raises the bar, keeps it for a moment, and takes it down" {
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
     // Up, and already moving: the number comes from the module's own thread.
-    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;1;") != null);
-    try testing.expectEqual(core.progress.State.normal, progress_mod.state());
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "\x1b]9;4;3;0") != null);
+    try testing.expectEqual(core.progress.State.indeterminate, progress_mod.state());
 
     // Work that took a blink still shows for the window, then goes.
     rig.session.state.loading = false;
     rig.session.needs_render = false;
     rig.fake_system.output_len = 0;
     _ = rig.session.step();
-    try testing.expectEqual(core.progress.State.normal, progress_mod.state());
+    try testing.expectEqual(core.progress.State.indeterminate, progress_mod.state());
 
     rig.session.progress_since_ms = os.monotonic_ms() - Session.progress_visible_ms - 1;
     rig.session.needs_render = false;

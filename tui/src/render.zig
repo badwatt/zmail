@@ -369,7 +369,15 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     var label_buffer: [96]u8 = undefined;
     const labels = account_labels(inputs.state, &label_buffer);
     const status_row = mark_top +| mark_rows +| 2;
-    const status_text = put_centered_marked(out, status_row, theme, labels);
+
+    // One line, and a band of light travelling across it: the splash is a loading
+    // screen, and this is what "still working" looks like on a terminal.
+    var line_buffer: [160]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buffer, "connecting to {s}", .{labels}) catch labels;
+    const line_width = screen.text_columns(line);
+    const status_text = (out.columns -| line_width) / 2;
+    // One frame of the splash is 55ms, and `tick` moves two per frame.
+    _ = draw_shimmer(out, status_text, status_row, line, @divTrunc(@as(i64, tick) * 55, 2), theme);
 
     const address_row = status_row +| 1;
     const footer_row = out.rows -| 1;
@@ -391,26 +399,60 @@ fn render_splash(inputs: Inputs, out: *Screen) void {
     put_right(out, out.columns -| 2, footer_row, "Ctrl+C quits", theme.border);
 }
 
-/// `connecting to <labels>`, centred, the words quiet and the account named in
-/// its own hue. Returns the column where the words start, so the address can
-/// line up under them.
-fn put_centered_marked(out: *Screen, row: u16, theme: *const Theme, labels: []const u8) u16 {
-    var line_buffer: [160]u8 = undefined;
-    const line = std.fmt.bufPrint(&line_buffer, "connecting to {s}", .{labels}) catch return 0;
+/// The shimmer: a band of light of one fixed width, travelling across a line of
+/// text from the left and wrapping round, the way Pi marks work that is still
+/// happening.
+///
+/// This is the one shape a "pulse" can take inside a terminal: the terminal's own
+/// progress bar (`OSC 9;4`) is a fill from zero to a percentage of the width, so a
+/// band that keeps its size and moves has to be drawn here. Fixed width, fixed
+/// speed, and the band never grows -- what travels is the light, not the amount of
+/// text it covers.
+pub const shimmer_width: u16 = 6;
+/// Cells per second. Pi uses ten on a line of prose; a splash is read from further
+/// away, so this is quicker without being a blur.
+pub const shimmer_speed: u16 = 18;
 
-    const width = screen.text_columns(line);
-    const start = (out.columns -| width) / 2;
-    _ = out.put_text(start, row, line[0.."connecting to ".len], out.columns -| start, theme.dim);
+/// Draws `text` with the band at `elapsed_ms`. Returns the columns used.
+pub fn draw_shimmer(
+    out: *Screen,
+    x: u16,
+    y: u16,
+    text: []const u8,
+    elapsed_ms: i64,
+    theme: *const Theme,
+) u16 {
+    if (y >= out.rows or x >= out.columns) return 0;
+    const width: u16 = @intCast(@min(screen.text_columns(text), out.columns -| x));
+    if (width == 0) return 0;
 
-    // One colour on this screen, the way the mark above it is one colour: the
-    // splash is a moment, not the mailbox, and a second hue would make it busy.
-    const labels_x = start +| @as(u16, "connecting to ".len);
-    _ = out.put_text(labels_x, row, labels, out.columns -| labels_x, theme.accent.with_bold());
-    return start;
+    // From fully off the left to fully off the right, then round again: the band
+    // enters and leaves instead of appearing in the middle of the words.
+    const span = width + shimmer_width;
+    const travelled: i64 = @divTrunc(elapsed_ms * @as(i64, shimmer_speed), 1000);
+    const offset: i64 = @mod(travelled, @as(i64, span));
+    const band_start = offset - @as(i64, shimmer_width);
+    const band_end = offset;
+
+    var cells: u16 = 0;
+    var it = std.unicode.Utf8Iterator{ .bytes = text, .i = 0 };
+    while (it.nextCodepoint()) |codepoint| {
+        if (cells >= width) break;
+        const here: i64 = cells;
+        // One cell of bright text at each edge of the band, so the light has a
+        // soft edge instead of a hard one: a terminal has no alpha.
+        const style = if (here >= band_start and here < band_end)
+            theme.accent.with_bold()
+        else if ((here >= band_start - 1 and here < band_start) or (here >= band_end and here < band_end + 1))
+            theme.text
+        else
+            theme.dim;
+        out.put(x +| cells, y, codepoint, style);
+        cells += screen.cell_width(codepoint);
+    }
+    return cells;
 }
 
-/// What the splash says it is connecting to: only the accounts in scope, since
-/// the others are not touched at all.
 fn account_labels(state: *const State, buffer: []u8) []const u8 {
     if (state.accounts.len == 0) return "mail";
     if (state.account_filter) |filter| {
@@ -2454,4 +2496,70 @@ test "a drag over the body paints only what the drag covers" {
         .selection = drag,
     };
     try testing.expect(!draw_line_selection(outside, &out, lines[0], 0, 20));
+}
+
+/// The columns of `row` painted as the band of light.
+fn shimmer_columns(out: *const Screen, row: u16, theme: *const Theme, buffer: []u16) []const u16 {
+    var count: usize = 0;
+    const band = theme.accent.with_bold();
+    for (0..out.columns) |x| {
+        if (!std.meta.eql(out.cells[row][x].style, band)) continue;
+        buffer[count] = @intCast(x);
+        count += 1;
+    }
+    return buffer[0..count];
+}
+
+test "the band keeps its width and travels along the line" {
+    const theme = theme_mod.Theme.dark();
+    var buffer: [64]u16 = undefined;
+
+    // Two moments where the band is fully over the text: it does not grow, it
+    // moves, which is what a pulse is and a fill is not.
+    var early = Screen.init(60, 1);
+    _ = draw_shimmer(&early, 0, 0, "connecting to home", 400, &theme);
+    const before = shimmer_columns(&early, 0, &theme, &buffer);
+    const before_len = before.len;
+    const before_start = if (before.len > 0) before[0] else 0;
+
+    var later = Screen.init(60, 1);
+    _ = draw_shimmer(&later, 0, 0, "connecting to home", 700, &theme);
+    const after = shimmer_columns(&later, 0, &theme, &buffer);
+
+    try testing.expect(before_len > 0);
+    try testing.expectEqual(before_len, after.len);
+    try testing.expect(before_start < after[0]);
+    // A band, never the whole line.
+    try testing.expect(@as(u16, @intCast(before_len)) <= shimmer_width);
+}
+
+test "the band leaves the line at both ends and comes round" {
+    const theme = theme_mod.Theme.dark();
+    const text = "connecting";
+    const width: u16 = @intCast(screen.text_columns(text));
+    const span: i64 = width + shimmer_width;
+
+    var seen_off = false;
+    var seen_on = false;
+    var buffer: [64]u16 = undefined;
+    var moment: i64 = 0;
+    const cycle_ms: i64 = @divTrunc(3 * span * 1000, @as(i64, shimmer_speed));
+    while (moment < cycle_ms) : (moment += 40) {
+        var out = Screen.init(40, 1);
+        _ = draw_shimmer(&out, 0, 0, text, moment, &theme);
+        const columns = shimmer_columns(&out, 0, &theme, &buffer);
+        if (columns.len == 0) seen_off = true;
+        if (columns.len == shimmer_width) seen_on = true;
+    }
+    // It enters, it crosses, it leaves, it starts again.
+    try testing.expect(seen_off);
+    try testing.expect(seen_on);
+}
+
+test "a shimmer with nothing to shine on draws nothing" {
+    const theme = theme_mod.Theme.dark();
+    var out = Screen.init(10, 1);
+    try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 0, 0, "", 0, &theme));
+    try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 0, 5, "text", 0, &theme));
+    try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 12, 0, "text", 0, &theme));
 }
