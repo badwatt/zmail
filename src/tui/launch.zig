@@ -207,7 +207,9 @@ fn run_session(
         .edit_text_context = &editor,
         .fetch_image = fetchImageThunk,
         .fetch_image_context = &browser,
-        .draw_image = drawImageThunk,
+        // Wired only where the terminal said it can paint: the session then has an
+        // honest answer for a key that asks for pictures.
+        .draw_image = if (graphics.supported()) drawImageThunk else null,
         .draw_image_context = &browser,
         .clear_images = clearImagesThunk,
         .clear_images_context = &browser,

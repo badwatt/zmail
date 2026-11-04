@@ -894,7 +894,11 @@ pub const Session = struct {
         // Whatever was decoded belongs to the frame that asked for it.
         self.image_slot_count = 0;
         self.image_painted = 0;
-        if (self.show_images) {
+        if (self.show_images and self.deps.draw_image == null) {
+            // Turning them on in a terminal that cannot paint them is worth saying
+            // once, instead of leaving a key that seems to do nothing.
+            self.state.set_status("This terminal cannot show pictures; o opens the mail", .{});
+        } else if (self.show_images) {
             self.state.set_status("Showing pictures", .{});
         } else {
             self.state.set_status("Pictures hidden", .{});
@@ -2186,6 +2190,10 @@ pub const Session = struct {
         // Pictures are off until asked for, and no frame ever opens a socket: a
         // picture with an address arrives here already decoded, from the worker.
         if (!self.show_images) return null;
+        // A picture with an address arrives from the worker, and this must not leave
+        // an empty slot behind for it: the queue reads "it has a slot" as "it is
+        // dealt with", and the picture would never be asked for at all.
+        if (media.is_remote_marker(key)) return null;
         var decoded: ?[]const u8 = null;
         if (media.is_local_image(key)) {
             decoded = core.mime.image_body(self.raw[0..self.raw_len], key, &self.image_buffer);
@@ -5277,6 +5285,22 @@ const OpenSink = struct {
     }
 };
 
+test "a terminal that cannot paint says so instead of doing nothing" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // No way to draw: the key still answers, with the truth.
+    try rig.open_reader("<p><img src=\"https://example.com/x.png\"></p>");
+    rig.fake_system.push_input("i");
+    _ = rig.session.step();
+    try testing.expectEqualStrings(
+        "This terminal cannot show pictures; o opens the mail",
+        rig.session.state.status.slice(),
+    );
+}
+
 test "pictures are off until asked for, and then they arrive off the loop" {
     // A 90x36 PNG, one pixel per byte of IHDR plus a body.
     // IHDR enough for the reader to place it: 90x36.
@@ -5295,6 +5319,7 @@ test "pictures are off until asked for, and then they arrive off the loop" {
     var sink: RemoteFetch = .{ .png = &png };
     rig.session.deps.fetch_image = RemoteFetch.fetch;
     rig.session.deps.fetch_image_context = &sink;
+    rig.session.deps.draw_image = ImageSink.draw;
 
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
@@ -5311,6 +5336,10 @@ test "pictures are off until asked for, and then they arrive off the loop" {
     rig.fake_system.push_input("i");
     _ = rig.session.step();
     try testing.expect(rig.session.show_images);
+    // A frame drawn before the picture arrives must not count as "dealt with".
+    rig.session.render();
+    try testing.expect(rig.session.image_slot_count == 0);
+
     // The next tick starts the worker; the one after takes its answer.
     var guard: u32 = 0;
     while (sink.fetches == 0 and guard < 500) : (guard += 1) {

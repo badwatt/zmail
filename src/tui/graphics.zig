@@ -47,11 +47,11 @@ pub fn probe(system: System) bool {
     var buffer: [128]u8 = undefined;
     var filled: usize = 0;
     var waits: u8 = 0;
-    // A terminal that speaks this answers in microseconds, and one that does not
-    // never answers at all: the wait is only ever spent on the second case, and it
-    // is spent before the first frame is painted. Two short tries, not three long
-    // ones.
-    while (waits < 1) : (waits += 1) {
+    // A terminal that speaks this answers in microseconds, and one that does not never
+    // answers at all: the wait is only ever spent on the second case, and it is spent
+    // before the first frame is painted. Three short tries, because a terminal under
+    // load is not a terminal that cannot draw.
+    while (waits < 2) : (waits += 1) {
         const read = system.read(buffer[filled..], 30) catch return false;
         if (read == 0) return false;
         filled += read;
