@@ -317,8 +317,14 @@ pub fn breath_level_at(elapsed_ms: i64) f32 {
     const phase = @mod(elapsed_ms, breath_ms);
     const travelled = if (phase <= half) phase else breath_ms - phase;
     const fraction = @as(f32, @floatFromInt(travelled)) / @as(f32, half);
-    return 1.0 - std.math.pow(f32, fraction, breath_ease);
+    const shape = 1.0 - std.math.pow(f32, fraction, breath_ease);
+    // Never fully transparent: the breath is the mark getting quieter, not the mark
+    // leaving. Below this it is a shape that appears and disappears.
+    return breath_floor + (1.0 - breath_floor) * shape;
 }
+
+/// How dim the mark is allowed to get.
+pub const breath_floor: f32 = 0.45;
 
 /// Below one, so the ends of the breath are steep: the shape of air leaving slowly
 /// and coming back, not of a bar sliding.
@@ -2182,7 +2188,7 @@ test "the splash breathes without color when color is off" {
     var other = Screen.init(80, 24);
     // Far enough into the breath for the two-step monochrome ramp to change: bold at
     // the top, dim once it is past half.
-    f.elapsed_ms = 1_600;
+    f.elapsed_ms = 2_400;
     frame(f.inputs(80, 24), &other);
     var moved = false;
     for (5..15) |y| {
@@ -2749,7 +2755,7 @@ test "a shimmer with nothing to shine on draws nothing" {
     try testing.expectEqual(@as(u16, 0), draw_shimmer(&out, 12, 0, "text", 0, &theme));
 }
 
-test "the wordmark breathes: it goes away and comes back" {
+test "the wordmark breathes: it dims and comes back, and never leaves" {
     var lowest: f32 = 1;
     var highest: f32 = 0;
     var moment: i64 = 0;
@@ -2758,12 +2764,14 @@ test "the wordmark breathes: it goes away and comes back" {
         lowest = @min(lowest, level);
         highest = @max(highest, level);
     }
-    // All the way: empty at the trough, solid at the peak.
-    try testing.expect(lowest <= hidden_level);
+    // Solid at the peak, quieter at the trough -- and never transparent enough to be
+    // gone: the mark stays readable while it breathes.
     try testing.expect(highest >= 0.99);
+    try testing.expect(lowest >= breath_floor - 0.01);
+    try testing.expect(lowest < 0.6);
 }
 
-test "at the trough the mark is gone, and at the peak it is whole" {
+test "at the trough the mark is dimmer, and at the peak it is whole" {
     var f = try fixture();
     defer f.deinit();
     f.state.booting = true;
@@ -2788,7 +2796,17 @@ test "at the trough the mark is gone, and at the peak it is whole" {
         }
     }
     try testing.expect(drawn_shown);
-    try testing.expect(!drawn_hidden);
+    // Still drawn at the trough: quieter, not gone.
+    try testing.expect(drawn_hidden);
+    var dimmer = false;
+    for (0..24) |y| {
+        for (0..80) |x| {
+            const before = shown.cells[y][x].style;
+            const after = hidden.cells[y][x].style;
+            if (!before.eql(after) and hidden.cells[y][x].ch == '█') dimmer = true;
+        }
+    }
+    try testing.expect(dimmer);
     // Nothing else moved: the words under it are still there while it is gone.
     try testing.expect(screen_contains(&hidden, "connecting to"));
 }
@@ -2839,10 +2857,10 @@ test "the breath moves from the first tick, at a speed the eye can see" {
     try testing.expect(first - second > 0.05);
     // And the way back is the same movement in reverse: empty at the trough, and up
     // again four ticks later.
-    try testing.expectEqual(@as(f32, 0.0), breath_level_at(breath_ms / 2));
+    try testing.expectEqual(breath_floor, breath_level_at(breath_ms / 2));
     // And it climbs again on the way back, without a plateau at the bottom.
     try testing.expect(breath_level_at(breath_ms / 2 + 540) > breath_level_at(breath_ms / 2 + 180));
-    try testing.expect(breath_level_at(breath_ms / 2 + 540) > 0.1);
+    try testing.expect(breath_level_at(breath_ms / 2 + 540) > breath_floor);
 }
 
 test "both sizes of the mark answer their own cells" {
