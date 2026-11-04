@@ -80,6 +80,8 @@ pub const Fake = struct {
     raw_calls: u32 = 0,
     closed: bool = false,
     read_failure: ?Error = null,
+    /// Bytes handed over per read; 0 means "whatever is there".
+    read_chunk: u32 = 0,
     size_failure: ?Error = null,
     write_failure: ?Error = null,
     raw_failure: ?Error = null,
@@ -119,7 +121,8 @@ pub const Fake = struct {
         if (self.input_pos == self.input_len) return 0;
 
         const available = self.input_len - self.input_pos;
-        const count = @min(@as(u32, @intCast(buffer.len)), available);
+        var count = @min(@as(u32, @intCast(buffer.len)), available);
+        if (self.read_chunk != 0) count = @min(count, self.read_chunk);
         @memcpy(buffer[0..count], self.input[self.input_pos..][0..count]);
         self.input_pos += count;
         return count;

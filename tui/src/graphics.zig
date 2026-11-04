@@ -239,6 +239,13 @@ test "clearing asks for every picture, silently" {
     try testing.expectEqualStrings("\x1b_Ga=d,d=a,q=2\x1b\\", fake.output_text());
 }
 
+test "a terminal that answers with something else, three times, cannot draw" {
+    // Noise instead of an answer to our id: three reads, and then it is a no.
+    var noisy: system_mod.Fake = .{ .read_chunk = 1 };
+    noisy.push_input("abc");
+    try testing.expect(!probe(noisy.system()));
+}
+
 test "the support flag is what the terminal answered, and nothing else" {
     var answering: system_mod.Fake = .{};
     answering.push_input("\x1b_Gi=31;OK\x1b\\");

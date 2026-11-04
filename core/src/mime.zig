@@ -1220,6 +1220,15 @@ test "an image inside the message is found by its Content-ID" {
     try testing.expect(image_body(raw, "", &out) == null);
 }
 
+test "a multipart that never closes still yields its image" {
+    // Cut off after the part: no `--b--`.
+    const raw = "Content-Type: multipart/related; boundary=b\r\n\r\n" ++
+        "--b\r\nContent-Type: image/png\r\nContent-ID: <logo@x>\r\n" ++
+        "Content-Transfer-Encoding: base64\r\n\r\naGk=\r\n";
+    var out: [32]u8 = undefined;
+    try testing.expectEqualStrings("hi", image_body(raw, "logo@x", &out).?);
+}
+
 test "a message with only images has no words to show" {
     const raw = "Content-Type: multipart/mixed; boundary=b\r\n\r\n" ++
         "--b\r\nContent-Type: image/png\r\n\r\nPNG\r\n--b--\r\n";

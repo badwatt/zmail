@@ -1990,7 +1990,8 @@ const FakeMail = struct {
     /// How many times the session asked this account for mail: the way to see
     /// that an account out of scope is never opened.
     fetch_calls: u32 = 0,
-    fail_fetch: bool = false,
+    /// What the server answered, when it answers at all.
+    fetch_failure: ?core.mail_port.Error = null,
     fail_body: bool = false,
     fail_flags: bool = false,
     fail_move: bool = false,
@@ -2010,7 +2011,7 @@ const FakeMail = struct {
     fn fetchThunk(context: *anyopaque, mailbox: Mailbox, out: []Message) core.mail_port.Error!u32 {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         self.fetch_calls += 1;
-        if (self.fail_fetch) return error.Unavailable;
+        if (self.fetch_failure) |failure| return failure;
         return self.inner.mail().fetch(mailbox, out);
     }
 
@@ -2048,44 +2049,6 @@ const FakeMail = struct {
         if (self.fail_move) return error.Rejected;
         return self.inner.mail().move_message(id, to);
     }
-};
-
-fn rejectFetch(_: *anyopaque, _: Mailbox, _: []Message) core.mail_port.Error!u32 {
-    return error.Rejected;
-}
-
-fn rejectBody(_: *anyopaque, _: Mailbox, _: MessageId, _: []u8) core.mail_port.Error![]const u8 {
-    return error.Rejected;
-}
-
-fn rejectRaw(_: *anyopaque, _: Mailbox, _: MessageId, _: []u8) core.mail_port.Error![]const u8 {
-    return error.Rejected;
-}
-
-fn rejectFlags(_: *anyopaque, _: MessageId, _: core.message.Flags) core.mail_port.Error!void {
-    return error.Rejected;
-}
-
-fn rejectMove(_: *anyopaque, _: MessageId, _: Mailbox) core.mail_port.Error!void {
-    return error.Rejected;
-}
-
-fn rejectDelete(_: *anyopaque, _: Mailbox, _: MessageId) core.mail_port.Error!void {
-    return error.Rejected;
-}
-
-fn rejectEmpty(_: *anyopaque, _: Mailbox) core.mail_port.Error!void {
-    return error.Rejected;
-}
-
-const reject_vtable = core.mail_port.Mail.VTable{
-    .fetch = rejectFetch,
-    .fetch_body = rejectBody,
-    .fetch_raw = rejectRaw,
-    .set_flags = rejectFlags,
-    .move_message = rejectMove,
-    .delete_message = rejectDelete,
-    .empty_mailbox = rejectEmpty,
 };
 
 const Rig = struct {
@@ -2159,9 +2122,10 @@ const Rig = struct {
         _ = self.session.step();
     }
 
+    /// A server that answers, and refuses.
     fn rejecting_mail(self: *Rig) core.mail_port.Mail {
-        _ = self;
-        return .{ .context = undefined, .vtable = &reject_vtable };
+        self.fake_mail.fetch_failure = error.Rejected;
+        return self.fake_mail.mail();
     }
 
     fn send_without_settle(self: *Rig, bytes: []const u8) void {
@@ -2955,7 +2919,7 @@ test "a refused login is named, not hidden behind a generic error" {
 test "a cold boot that cannot connect says so, and shows an empty list" {
     var rig: Rig = .{};
     try rig.seed();
-    rig.fake_mail.fail_fetch = true;
+    rig.fake_mail.fetch_failure = error.Unavailable;
     rig.sources[0] = .{
         .id = core.id.AccountId.from_int(1),
         .label = "account",
@@ -3747,7 +3711,7 @@ test "a failed refresh becomes an alert and keeps the cache" {
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
-    rig.fake_mail.fail_fetch = true;
+    rig.fake_mail.fetch_failure = error.Unavailable;
 
     rig.send("\x12");
     try testing.expectEqualStrings("Could not refresh Inbox", rig.session.state.status.slice());

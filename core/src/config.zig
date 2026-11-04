@@ -212,23 +212,20 @@ fn smtp_server(entry: *Entry) *account.Server {
 }
 
 /// The same file with one account's label changed.
-/// A label that is not taken yet: `alvaro`, `alvaro2`, `alvaro3`... Returns an
-/// empty slice when every candidate is used, which the caller reports.
-/// A label the file does not already use, so two accounts cannot be confused in
-/// the account list. `text` is the whole file: a label is only taken if it is
-/// there.
+/// A label that is not taken yet: `alvaro`, `alvaro2`, `alvaro3`... `text` is the
+/// whole file: a label is only taken if it is there.
 pub fn unique_label(text: []const u8, wanted: []const u8, buffer: []u8) []const u8 {
-    if (!has_label(text, wanted)) {
-        if (wanted.len > buffer.len) return "";
-        @memcpy(buffer[0..wanted.len], wanted);
-        return buffer[0..wanted.len];
-    }
+    if (wanted.len > buffer.len) return "";
+    @memcpy(buffer[0..wanted.len], wanted);
+    var candidate = buffer[0..wanted.len];
     var attempt: u8 = 2;
-    while (attempt < 100) : (attempt += 1) {
-        const candidate = std.fmt.bufPrint(buffer, "{s}{d}", .{ wanted, attempt }) catch return "";
-        if (!has_label(text, candidate)) return candidate;
+    // A config holds at most `max_accounts` labels, so one of these is free: the
+    // assert is the negative space, not a guess.
+    while (has_label(text, candidate)) : (attempt += 1) {
+        assert(attempt < max_accounts + 2);
+        candidate = std.fmt.bufPrint(buffer, "{s}{d}", .{ wanted, attempt }) catch return "";
     }
-    return "";
+    return candidate;
 }
 
 /// The label of an `[account <label>]` header line, if that is what it is.
