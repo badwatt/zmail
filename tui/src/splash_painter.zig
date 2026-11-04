@@ -185,7 +185,6 @@ pub const Painter = struct {
         // Back to plain for the next frame's cursor moves.
         self.system.write("\x1b[0m") catch return;
     }
-
 };
 
 /// The colour of the next step of the breath, through the screen's encoder so there

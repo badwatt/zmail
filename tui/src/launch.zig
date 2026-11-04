@@ -398,6 +398,31 @@ const max_accounts = core.config.max_accounts;
 /// cache the first frame is painted without a socket, and a connection that
 /// fails becomes an ordinary port error (cached mail stays readable) instead of
 /// a reason not to start.
+/// What a config entry says about an account, copied into the live one that will run
+/// it. The SMTP half is only filled when the entry has a server: an account that can
+/// read but not send leaves those fields empty.
+fn wire_account(
+    account: *LiveAccount,
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    id: core.id.AccountId,
+    entry: *const core.config.Entry,
+) void {
+    account.gpa = gpa;
+    account.io = io;
+    account.id = id;
+    account.from = entry.account.address;
+    account.port = entry.account.imap.port;
+    account.smtp_enabled = entry.smtp != null;
+    account.label.set(entry.label.slice());
+    account.host.set(entry.account.imap.host.slice());
+    account.username.set(entry.account.username.slice());
+    if (entry.smtp) |smtp| {
+        account.smtp_host.set(smtp.host.slice());
+        account.smtp_port = smtp.port;
+    }
+}
+
 const LiveAccount = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -627,11 +652,7 @@ pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
     };
 
     var path_buffer: [512]u8 = undefined;
-    const path = request.config_path orelse cli.default_config_path(
-        &path_buffer,
-        os.env("XDG_CONFIG_HOME"),
-        os.env("HOME"),
-    );
+    const path = config_path_in(&path_buffer, request.config_path);
     if (path.len == 0) {
         try stderr.print("{s}: no config path: pass --config or set XDG_CONFIG_HOME\n", .{core.meta.name});
         return 1;
@@ -663,15 +684,7 @@ pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
     defer live.close();
 
     const account = live.reserve(gpa, io) orelse return 1;
-    account.gpa = gpa;
-    account.io = io;
-    account.id = core.id.AccountId.from_int(1);
-    account.from = entry.account.address;
-    account.port = entry.account.imap.port;
-    account.smtp_enabled = true;
-    account.label.set(entry.label.slice());
-    account.host.set(entry.account.imap.host.slice());
-    account.username.set(entry.account.username.slice());
+    wire_account(account, gpa, io, core.id.AccountId.from_int(1), entry);
     const smtp = entry.smtp.?;
     if (smtp.security != .tls) {
         try stderr.print("{s}: only implicit TLS for SMTP (smtp_port = 465) today\n", .{core.meta.name});
@@ -744,13 +757,26 @@ fn read_stdin(io: std.Io, buffer: []u8) ![]const u8 {
     return buffer[0..total];
 }
 
+/// Where the config lives: what the command line said, or the usual place. Empty when
+/// there is nowhere to look -- no `--config`, no `XDG_CONFIG_HOME`, no `HOME`.
+fn config_path_in(buffer: *[512]u8, given: ?[]const u8) []const u8 {
+    return config_path_from(buffer, given, os.env("XDG_CONFIG_HOME"), os.env("HOME"));
+}
+
+/// The same, with the environment handed in so a test can say what it is.
+fn config_path_from(
+    buffer: *[512]u8,
+    given: ?[]const u8,
+    xdg_config_home: ?[]const u8,
+    home: ?[]const u8,
+) []const u8 {
+    if (given) |path| return path;
+    return cli.default_config_path(buffer, xdg_config_home, home);
+}
+
 fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
     var path_buffer: [512]u8 = undefined;
-    const path = options.config_path orelse cli.default_config_path(
-        &path_buffer,
-        os.env("XDG_CONFIG_HOME"),
-        os.env("HOME"),
-    );
+    const path = config_path_in(&path_buffer, options.config_path);
     if (path.len == 0) {
         return .{ .message = "No config path: pass --config or set XDG_CONFIG_HOME" };
     }
@@ -814,19 +840,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         // Built in place: the struct carries the client and its buffers.
         const account = live.reserve(gpa, io) orelse
             return .{ .message = "Too many accounts in one config file" };
-        account.gpa = gpa;
-        account.io = io;
-        account.id = core.id.AccountId.from_int(index + 1);
-        account.from = entry.account.address;
-        account.port = entry.account.imap.port;
-        account.smtp_enabled = entry.smtp != null;
-        account.label.set(entry.label.slice());
-        account.host.set(entry.account.imap.host.slice());
-        account.username.set(entry.account.username.slice());
-        if (entry.smtp) |smtp| {
-            account.smtp_host.set(smtp.host.slice());
-            account.smtp_port = smtp.port;
-        }
+        wire_account(account, gpa, io, core.id.AccountId.from_int(index + 1), &entry);
         read_password(gpa, io, path, entry.label.slice(), file.len == 1, entry.password_command.slice(), &account.password) catch {};
         account.password_ready = !account.password.is_empty();
         account.oauth_client_id.set(entry.oauth_client_id.slice());
@@ -1119,11 +1133,7 @@ const directory_mode: std.Io.Dir.Permissions = @fromBackingInt(@intCast(0o700));
 /// sealed next to the config and used at the next login.
 fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
     var path_buffer: [512]u8 = undefined;
-    const path = options.config_path orelse cli.default_config_path(
-        &path_buffer,
-        os.env("XDG_CACHE_HOME"),
-        os.env("HOME"),
-    );
+    const path = config_path_in(&path_buffer, options.config_path);
     if (path.len == 0) return .{ .message = "No config path" };
 
     var buffer: [8193]u8 = undefined;
@@ -1195,11 +1205,7 @@ fn run_oauth(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Se
 /// credential cannot be opened (a wiped key, a moved config).
 fn run_set_password(io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
     var path_buffer: [512]u8 = undefined;
-    const path = options.config_path orelse cli.default_config_path(
-        &path_buffer,
-        os.env("XDG_CONFIG_HOME"),
-        os.env("HOME"),
-    );
+    const path = config_path_in(&path_buffer, options.config_path);
     if (path.len == 0) return .{ .message = "No config path" };
 
     var config_buffer: [8193]u8 = undefined;
@@ -1613,11 +1619,7 @@ fn refuse(draft: core.accounts_port.Accounts.Draft, message: []const u8) void {
 /// Existing accounts, their credentials, and their cache are untouched.
 fn run_add_account(io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
     var path_buffer: [512]u8 = undefined;
-    const path = options.config_path orelse cli.default_config_path(
-        &path_buffer,
-        os.env("XDG_CONFIG_HOME"),
-        os.env("HOME"),
-    );
+    const path = config_path_in(&path_buffer, options.config_path);
     if (path.len == 0) {
         return .{ .message = "No config path: pass --config or set XDG_CONFIG_HOME" };
     }
@@ -1814,4 +1816,60 @@ test "Live keeps one label per account, not the last one parsed" {
 
     try testing.expectEqualStrings("work", live.sources[0].label);
     try testing.expectEqualStrings("home", live.sources[1].label);
+}
+
+test "the config path: what was asked for, then the environment" {
+    var buffer: [512]u8 = undefined;
+    try testing.expectEqualStrings(
+        "/given/config",
+        config_path_from(&buffer, "/given/config", "/xdg", "/home/me"),
+    );
+    try testing.expectEqualStrings(
+        "/xdg/zmail/config",
+        config_path_from(&buffer, null, "/xdg", "/home/me"),
+    );
+    try testing.expectEqualStrings(
+        "/home/me/.config/zmail/config",
+        config_path_from(&buffer, null, null, "/home/me"),
+    );
+    // Nothing to go on: the caller says so, rather than looking in the dark.
+    try testing.expectEqualStrings("", config_path_from(&buffer, null, null, null));
+    // And the wrapper is only the environment, read once.
+    try testing.expectEqualStrings("/given/config", config_path_in(&buffer, "/given/config"));
+}
+
+test "an account is wired from its config entry, SMTP only when there is one" {
+    const file = try core.config.parse(
+        \\[account work]
+        \\address = me@work.example
+        \\imap_host = imap.work.example
+        \\imap_port = 993
+        \\imap_security = tls
+        \\username = me
+        \\smtp_host = smtp.work.example
+        \\smtp_port = 465
+        \\smtp_security = tls
+    );
+    var account: LiveAccount = .{ .gpa = testing.allocator, .io = undefined };
+    wire_account(&account, testing.allocator, undefined, core.id.AccountId.from_int(2), &file.items()[0]);
+    try testing.expectEqual(core.id.AccountId.from_int(2), account.id);
+    try testing.expectEqualStrings("work", account.label.slice());
+    try testing.expectEqualStrings("imap.work.example", account.host.slice());
+    try testing.expectEqualStrings("smtp.work.example", account.smtp_host.slice());
+    try testing.expectEqual(@as(u16, 465), account.smtp_port);
+    try testing.expect(account.smtp_enabled);
+
+    // No SMTP server: the account reads, and does not claim it can send.
+    const read_only = try core.config.parse(
+        \\[account home]
+        \\address = me@home.example
+        \\imap_host = imap.home.example
+        \\imap_port = 993
+        \\imap_security = tls
+        \\username = me
+    );
+    var other: LiveAccount = .{ .gpa = testing.allocator, .io = undefined };
+    wire_account(&other, testing.allocator, undefined, core.id.AccountId.from_int(1), &read_only.items()[0]);
+    try testing.expect(!other.smtp_enabled);
+    try testing.expectEqual(@as(u16, 0), other.smtp_port);
 }
