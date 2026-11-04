@@ -1,6 +1,6 @@
 .{
     .name = .zmail,
-    .version = "0.5.1",
+    .version = "0.6.0",
     .fingerprint = 0x5227c277bb400ed,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{},
