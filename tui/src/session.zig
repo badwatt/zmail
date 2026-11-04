@@ -231,6 +231,8 @@ pub const Session = struct {
     /// `boot_cursor` is how far it got; `booting_now` says it is still going.
     boot_cursor: u8 = 0,
     boot_ticks: u16 = 0,
+    /// Whether the first connection still has accounts to fetch.
+    boot_pending: bool = false,
     booting_now: bool = false,
     reload_loaded: bool = false,
     reload_failed: bool = false,
@@ -495,36 +497,36 @@ pub const Session = struct {
     /// Runs once, right after the first frame: opens the connections the cache
     /// could not replace. The splash is on screen while this blocks.
     pub fn boot(self: *Session) void {
-        if (!self.needs_boot) {
-            self.stop_splash();
-            return;
-        }
+        if (!self.needs_boot) return;
         self.needs_boot = false;
-        if (self.source_count == 0) {
-            // Nothing to connect to (a broken config, no accounts): do not sit
-            // on the splash. The notice is what the user needs to read.
-            self.stop_splash();
-            return;
-        }
+        // Nothing to connect to (a broken config, no accounts): the welcome screen
+        // still shows, and the notice under it is what the user needs to read.
+        if (self.source_count == 0) return;
 
         // The first connection must be made on this thread: the transport's
         // Io belongs to the event loop, and opening it from the worker leaves
         // both waiting forever (no mail, spinner forever). Later refreshes
         // reuse the open connection, so those can run in the background.
         if (!self.deps.splash) {
-            self.state.booting = false;
             self.reload(self.state.mailbox);
             return;
         }
 
-        // The splash is on screen, so the connection is made one account per tick
-        // instead of all at once: the first screen keeps breathing for as long as
-        // the network takes, and it goes away on the tick the inbox is ready --
-        // not a moment before, and not a moment after.
+        // With a splash on screen the fetching happens in `boot_step`, one account
+        // per tick, so the first screen keeps breathing for as long as the network
+        // takes.
+        self.boot_pending = true;
+        self.boot_cursor = 0;
+    }
+
+    /// The welcome screen, on every start: there is always a first screen, whether
+    /// the cache has the mail already or the network has to be asked for it.
+    fn splash_on(self: *Session) void {
+        if (!self.deps.splash) return;
         self.state.booting = true;
         self.booting_now = true;
-        self.boot_cursor = 0;
         self.boot_ticks = 0;
+        self.boot_cursor = 0;
         self.sync_progress();
         self.repaint();
     }
@@ -539,7 +541,7 @@ pub const Session = struct {
         // with several accounts breathes between fetches instead of freezing
         // through all of them.
         const sources = self.live_sources();
-        while (self.boot_cursor < sources.len) {
+        while (self.boot_pending and self.boot_cursor < sources.len) {
             const index = self.boot_cursor;
             self.boot_cursor += 1;
             const source = sources[index];
@@ -549,7 +551,8 @@ pub const Session = struct {
             break;
         }
 
-        if (self.boot_cursor < sources.len) return;
+        if (self.boot_pending and self.boot_cursor < sources.len) return;
+        self.boot_pending = false;
 
         // The mail is here. If the connection was quick, the mark still gets one
         // breath -- a fade nobody sees is not a fade -- and if it was slow, this is
@@ -621,9 +624,10 @@ pub const Session = struct {
     pub fn loop(self: *Session) void {
         const needs_network = self.needs_boot;
         if (self.deps.splash) {
-            // The welcome screen shows on every start, and it breathes while the
-            // connection is made: `boot` starts it, `step` advances it one account
-            // per tick, and the mark fades in and out until the inbox is here.
+            // Every start has its first screen, and it breathes while the connection
+            // is made: `splash_on` puts it up, `boot` decides what to fetch, and
+            // `step` advances that one account per tick.
+            self.splash_on();
             self.boot();
         } else {
             // Nothing here can block: no empty frame, no splash.
@@ -1130,6 +1134,9 @@ pub const Session = struct {
 
     /// Test hook: the ticks the loop would run, so the first screen finishes.
     pub fn settle_boot_for_test(self: *Session) void {
+        // A test does not paint the welcome screen, but the fetching happens in the
+        // same place it does: the ticks the loop would run.
+        self.booting_now = true;
         var ticks: u16 = 0;
         while (self.booting_now and ticks < boot_min_ticks * 2) : (ticks += 1) {
             _ = self.step();
@@ -5255,6 +5262,7 @@ test "the splash breathes until the inbox is here, and then it is gone" {
     // inside `boot` any more, so the mark can breathe while it does.
     rig.session.needs_boot = true;
     rig.session.boot();
+    rig.session.splash_on();
     try testing.expect(rig.session.state.booting);
     try testing.expectEqual(@as(u32, 0), rig.session.store.len);
     const mark_before = rig.session.state.spinner;
