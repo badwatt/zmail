@@ -275,7 +275,7 @@ fn doubled(
 
 /// One breath, in ticks. The splash repaints every 55ms and the loop's spinner
 /// advances by two per frame, so a full cycle is about 1.8 seconds: in, out, in.
-pub const breath_ticks: u16 = 16;
+pub const breath_ticks: u16 = 26;
 
 /// Below this a letter is not drawn at all. The fade is a mix towards the ground,
 /// which is invisible on the ground itself -- but only when the ground is known; a
