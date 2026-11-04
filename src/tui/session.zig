@@ -22,6 +22,7 @@ const system_mod = @import("system.zig");
 const theme_mod = @import("theme.zig");
 const os = @import("os.zig");
 const refresh_mod = @import("refresh.zig");
+const net = @import("net");
 const wrap = @import("wrap.zig");
 
 const Mailbox = core.mailbox.Mailbox;
@@ -976,14 +977,17 @@ pub const Session = struct {
         if (slot.len > 0 and media.png_size(slot.bytes[0..slot.len]) == null) {
             // Downloaded, and unusable: a terminal paints PNG, and what the server
             // actually sent is the one thing worth saying.
-            self.state.set_status("That picture is {s}; o opens the mail", .{picture_kind(slot.bytes[0..slot.len])});
+            var kind_buffer: [48]u8 = undefined;
+            self.state.set_status("That picture is {s}; o opens the mail", .{
+                picture_kind(slot.bytes[0..slot.len], &kind_buffer),
+            });
         }
         self.repaint();
     }
 
     /// What the bytes call themselves. Enough to say why a terminal that paints PNG
     /// cannot paint this, without a decoder for every format on the web.
-    fn picture_kind(bytes: []const u8) []const u8 {
+    fn picture_kind(bytes: []const u8, out: []u8) []const u8 {
         if (bytes.len < 4) return "empty";
         if (std.mem.eql(u8, bytes[0..4], "\x89PNG")) return "a PNG the terminal refused";
         if (std.mem.eql(u8, bytes[0..3], "GIF")) return "a GIF";
@@ -991,7 +995,11 @@ pub const Session = struct {
         if (std.mem.eql(u8, bytes[0..4], "RIFF")) return "a WebP";
         if (bytes[0] == '<') return "an SVG or a web page";
         if (std.mem.startsWith(u8, bytes, "BM")) return "a BMP";
-        return "not an image";
+        // Not a format we recognise: the first three bytes say what the server sent
+        // instead, which is the difference between a bug here and a wrong address.
+        return std.fmt.bufPrint(out, "not an image ({x:0>2} {x:0>2} {x:0>2})", .{
+            bytes[0], bytes[1], bytes[2],
+        }) catch "not an image";
     }
 
     /// A picture of the mail, drawn in the terminal: what a mail client shows,
@@ -5419,14 +5427,15 @@ test "a picture that is not a PNG is downloaded once and named as such" {
 
 test "a picture is named by what its bytes are" {
     // The message is the diagnosis: "not a PNG" is not enough to know what to do.
-    try testing.expectEqualStrings("a JPEG", Session.picture_kind(&[_]u8{ 0xff, 0xd8, 0, 0 }));
-    try testing.expectEqualStrings("a WebP", Session.picture_kind("RIFF0000WEBP"));
-    try testing.expectEqualStrings("an SVG or a web page", Session.picture_kind("<svg xmlns"));
-    try testing.expectEqualStrings("a BMP", Session.picture_kind("BM000000"));
-    try testing.expectEqualStrings("a GIF", Session.picture_kind("GIF89a"));
-    try testing.expectEqualStrings("not an image", Session.picture_kind("\x00\x01\x02\x03"));
-    try testing.expectEqualStrings("empty", Session.picture_kind(""));
-    try testing.expectEqualStrings("a PNG the terminal refused", Session.picture_kind("\x89PNG0000"));
+    var out: [48]u8 = undefined;
+    try testing.expectEqualStrings("a JPEG", Session.picture_kind(&[_]u8{ 0xff, 0xd8, 0, 0 }, &out));
+    try testing.expectEqualStrings("a WebP", Session.picture_kind("RIFF0000WEBP", &out));
+    try testing.expectEqualStrings("an SVG or a web page", Session.picture_kind("<svg xmlns", &out));
+    try testing.expectEqualStrings("a BMP", Session.picture_kind("BM000000", &out));
+    try testing.expectEqualStrings("a GIF", Session.picture_kind("GIF89a", &out));
+    try testing.expectEqualStrings("not an image (00 01 02)", Session.picture_kind("\x00\x01\x02\x03", &out));
+    try testing.expectEqualStrings("empty", Session.picture_kind("", &out));
+    try testing.expectEqualStrings("a PNG the terminal refused", Session.picture_kind("\x89PNG0000", &out));
 }
 
 const RemoteFetch = struct {

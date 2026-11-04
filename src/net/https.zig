@@ -70,6 +70,56 @@ pub fn get(
     path: []const u8,
     out: []u8,
 ) Error!Response {
+    const first = try getOnce(gpa, io, host, path, out);
+    // A picture that moved: one hop, and only to https. The body of a 301 is a note
+    // to the browser, not the picture, and a terminal cannot paint a note.
+    if (first.status == 301 or first.status == 302 or first.status == 307 or first.status == 308) {
+        const moved = location(out) orelse return first;
+        var host_buffer: [256]u8 = undefined;
+        var path_buffer: [1024]u8 = undefined;
+        const target = splitUrl(moved, &host_buffer, &path_buffer) orelse return first;
+        if (target.host.len == 0) return first;
+        return getOnce(gpa, io, target.host, target.path, out);
+    }
+    return first;
+}
+
+/// The `Location:` header of a response, or null.
+fn location(raw: []u8) ?[]const u8 {
+    const split = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse return null;
+    var lines = std.mem.splitSequence(u8, raw[0..split], "\r\n");
+    _ = lines.next();
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " "), "location")) continue;
+        return std.mem.trim(u8, line[colon + 1 ..], " ");
+    }
+    return null;
+}
+
+const Target = struct { host: []const u8, path: []const u8 };
+
+/// `https://host/path` into its two halves. Anything else is refused: this client
+/// opens one kind of door.
+fn splitUrl(url: []const u8, host_buffer: []u8, path_buffer: []u8) ?Target {
+    const rest = if (std.mem.startsWith(u8, url, "https://")) url["https://".len..] else return null;
+    const cut = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
+    const host = rest[0..cut];
+    if (host.len == 0 or host.len > host_buffer.len or rest.len > 2048) return null;
+    if (rest[cut..].len > path_buffer.len) return null;
+    @memcpy(host_buffer[0..host.len], host);
+    const path = rest[cut..];
+    @memcpy(path_buffer[0..path.len], path);
+    return .{ .host = host_buffer[0..host.len], .path = path_buffer[0..path.len] };
+}
+
+fn getOnce(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    host: []const u8,
+    path: []const u8,
+    out: []u8,
+) Error!Response {
     var tls = TlsTransport{};
     defer tls.deinit();
     tls.open(gpa, io, host, 443) catch return error.Unavailable;
