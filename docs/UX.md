@@ -132,37 +132,43 @@ body in when the fetch lands; a message you have opened before comes from the
 sealed body cache and never touches a socket.
 
 Without a cache (first run, or a new account) the network is unavoidable, so
-the first frame is a splash instead of an empty list:
+the first frame is the splash instead of an empty list:
 
 ```
-                   ██████████  ██      ██    ██████    ▀▀  ██
-                   ██████████  ██      ██    ██████    ▀▀  ██
-                         ████  ████  ████  ██      ██      ██
-                         ████  ████  ████  ██      ██      ██
-                       ████    ██  ██  ██  ██████████  ██  ██
-                       ████    ██  ██  ██  ██████████  ██  ██
-                     ████      ██      ██  ██      ██  ██  ██
-                     ████      ██      ██  ██      ██  ██  ██
-                   ██████████  ██      ██    ██████    ██  ██
-                   ██████████  ██      ██    ██████    ██  ██
+     ██████████████  ████      ████  ██████████████  ██████  ██████
+     ██████████████  ████      ████  ██████████████  ██████  ██████
+           ██████    ██████  ██████  ██████  ██████  ██████  ██████
+           ██████    ██████  ██████  ██████  ██████  ██████  ██████
+         ██████      ████  ██  ████  ██████████████  ██████  ██████
+         ██████      ████  ██  ████  ██████████████  ██████  ██████
+       ██████        ████      ████  ██████  ██████  ██████  ██████
+       ██████        ████      ████  ██████  ██████  ██████  ██████
+     ██████████████  ████      ████  ██████  ██████  ██████  ████████████
+     ██████████████  ████      ████  ██████  ██████  ██████  ████████████
 
-                             connecting to work
-                             alice@example.com
+                                                             version: 0.5.1
 
- cached mail opens instantly                                       Ctrl+C quits
+                                                          alice@example.com
+
+ connecting to work                                               Ctrl+C quits
 ```
 
 The wordmark is drawn, not typed: a terminal cannot set type, and blocks are
-the closest it gets. It is one shape stored once — the doubled size is the small
-one with every cell drawn twice, so the two can never drift apart — and it is
-used at that size when the terminal has room for it.
+the closest it gets. It is one shape stored once, five cells high and
+thirty-five wide, and the size on screen is that shape with every cell drawn
+twice, three times, or four -- whichever still leaves three columns of air at
+each side. The picture above is the twice size, which is what an eighty-column
+terminal gets; a narrow one gets the small mark rather than a cropped one.
 
-Its light moves: a ramp one step apart in lightness, crossing the letters once
-every three seconds. Nothing else on the screen moves. That is the whole
-animation budget, and it buys the one thing a cold start needs — a still frame
-that says "alive" without a spinner, because the first connection blocks the loop
-a spinner would have needed, so a spinner here freezes mid-turn and reads as a
-hang.
+It breathes: the whole word dims and comes back over four seconds, between its
+full brightness and forty-five per cent, so the letters stay readable while the
+light moves through them. The two corner sentences are the only other thing that
+moves -- a band of light crossing them left to right. That is the whole
+animation budget, and it buys the one thing a cold start needs: a frame that is
+already alive when the connection is still being made.
+
+The version comes from the manifest, and the address is the account's own. Both
+are right-aligned together under the mark's right edge.
 
 `ZMAIL_NO_MOTION` draws the still frame, which is a lit wordmark and not a blank
 one.

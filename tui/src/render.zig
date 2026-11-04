@@ -257,21 +257,22 @@ fn decode(
     return out;
 }
 
-/// One breath, in ticks. The splash repaints every 55ms and the loop's spinner
-/// advances by two per frame, so a full cycle is about 1.8 seconds: in, out, in.
+/// One breath, in ticks of the first screen's clock. A tick is one frame of the
+/// loop, 90ms: forty-four of them is a four-second breath, in and out.
 pub const breath_ticks: u16 = 44;
 
-/// Below this a letter is not drawn at all. The fade is a mix towards the ground,
-/// which is invisible on the ground itself -- but only when the ground is known; a
-/// cell that is not painted is gone on every terminal, so the mark hides and shows
-/// the same way everywhere.
+/// Below this a letter is not drawn at all. The breath bottoms out well above it
+/// (`breath_floor`), so this only bites if that floor is set to nothing: the fade is
+/// a mix towards the ground, which is invisible on the ground itself, and only when
+/// the ground is known -- a cell that is not painted is gone on every terminal.
 pub const hidden_level: f32 = 0.02;
 
-/// How solid the wordmark is at `tick`: one at the peak, zero at the trough. The
-/// whole word breathes together, which is what makes it read as one thing drawing
-/// breath rather than as letters flickering on their own.
 /// How long one breath takes, in milliseconds.
 pub const breath_ms: i64 = @as(i64, breath_ticks) * 90;
+
+/// How solid the wordmark is, one at the peak. The whole word breathes together,
+/// which is what makes it read as one thing drawing breath rather than as letters
+/// flickering on their own.
 
 /// The breath at a moment in the first screen's life, from zero upwards.
 ///
@@ -285,7 +286,7 @@ pub fn breath_level_at(elapsed_ms: i64) f32 {
     // A plain triangle this long would move by under two per cent a frame, which is
     // the "it looks frozen" problem again. The travel is eased instead: steep at the
     // ends of the breath and slow through the middle, so the first step after the
-    // first frame is already visible and the whole cycle still takes five seconds.
+    // first frame is already visible and the whole cycle still takes its four.
     const half = breath_ms / 2;
     const phase = @mod(elapsed_ms, breath_ms);
     const travelled = if (phase <= half) phase else breath_ms - phase;
