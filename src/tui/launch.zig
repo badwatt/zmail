@@ -205,8 +205,6 @@ fn run_session(
         .open_external_context = &browser,
         .edit_text = editTextThunk,
         .edit_text_context = &editor,
-        .fetch_image = fetchImageThunk,
-        .fetch_image_context = &browser,
         .draw_image = drawImageThunk,
         .draw_image_context = &browser,
         .clear_images = clearImagesThunk,
@@ -251,20 +249,6 @@ const Browser = struct {
 
 /// Writes the page a second time with each anchor's address in the text, for
 /// the browsers whose dump prints no references.
-/// Downloads one picture the message points at. Only what can be painted is
-/// kept: a PNG that fits, from an https address.
-fn fetchImageThunk(context: *anyopaque, url: []const u8, out: []u8) ?[]const u8 {
-    const self = browser_of(context);
-    const rest = if (std.mem.startsWith(u8, url, "https://")) url["https://".len..] else return null;
-    const host_end = std.mem.indexOfScalar(u8, rest, '/') orelse return null;
-    const host = rest[0..host_end];
-    const path = rest[host_end..];
-
-    const response = net.https.get(self.gpa, self.io, host, path, out) catch return null;
-    if (response.status != 200 or response.body.len == 0) return null;
-    return response.body;
-}
-
 /// One image of the message, painted where the layout left its marker.
 fn drawImageThunk(
     context: *anyopaque,
