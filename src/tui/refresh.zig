@@ -114,6 +114,9 @@ pub const Job = struct {
 /// wrapped lines and the links are only ever built by the thread that draws them.
 pub const BodyRequest = struct {
     account: AccountId,
+    /// The folder the message is in: its UID means nothing outside it, and one of
+    /// the account's own folders is a folder too.
+    folder: core.state.MoveTarget = .{ .mailbox = .inbox },
     place: port.Place,
     id: core.id.MessageId,
     mail: core.mail_port.Mail,

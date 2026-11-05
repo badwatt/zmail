@@ -276,9 +276,9 @@ fn apply_open(state: *State, store: *Store, effects: *Effects) void {
 
     if (message.is_unread()) {
         message.flags = message.flags.mark_read();
-        effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
+        effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags, .folder = folder_of(message) } });
     }
-    effects.add(.{ .fetch_body = .{ .account = message.account, .mailbox = message.mailbox, .id = message.id } });
+    effects.add(.{ .fetch_body = .{ .account = message.account, .id = message.id, .folder = folder_of(message) } });
 }
 
 fn apply_dismiss(state: *State, store: *Store) void {
@@ -329,7 +329,7 @@ fn toggle_unread(state: *State, store: *Store, effects: *Effects) void {
     };
 
     message.flags = message.flags.toggle_unread();
-    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
+    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags, .folder = folder_of(message) } });
     if (message.is_unread()) {
         state.set_status("Marked unread", .{});
     } else {
@@ -344,7 +344,7 @@ fn toggle_flag(state: *State, store: *Store, effects: *Effects) void {
     };
 
     message.flags = message.flags.toggle_flagged();
-    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
+    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags, .folder = folder_of(message) } });
     if (message.is_flagged()) {
         state.set_status("Starred", .{});
     } else {
@@ -461,7 +461,7 @@ fn delete_forever(state: *State, store: *Store, effects: *Effects) void {
         state.view = .list;
         state.reader_scroll = 0;
     }
-    effects.add(.{ .delete_message = .{ .account = account, .mailbox = .trash, .id = id } });
+    effects.add(.{ .delete_message = .{ .account = account, .id = id, .folder = .{ .mailbox = .trash } } });
     state.set_status("Deleted for good", .{});
 }
 
@@ -491,7 +491,7 @@ fn empty_trash(state: *State, store: *Store, effects: *Effects) void {
     }
     state.pending_empty = false;
 
-    effects.add(.{ .empty_mailbox = .{ .account = state.account_filter, .mailbox = .trash } });
+    effects.add(.{ .empty_mailbox = .{ .account = state.account_filter, .folder = .{ .mailbox = .trash } } });
     if (state.account_filter) |filter| {
         _ = store.remove_in(filter, .trash);
     } else {
@@ -1082,7 +1082,7 @@ test "delete_forever removes the message and asks the server, in Trash only" {
     const effects = apply(&fixture.state, &fixture.store, .delete_forever);
     try expect_effects(&effects, &.{.{ .delete_message = .{
         .account = AccountId.from_int(1),
-        .mailbox = .trash,
+        .folder = .{ .mailbox = .trash },
         .id = MessageId.from_int(1),
     } }});
     try testing.expectEqual(before - 1, fixture.store.len);
@@ -1136,7 +1136,7 @@ test "empty_trash asks once, then empties the scope" {
 
     _ = apply(&fixture.state, &fixture.store, .empty_trash);
     const effects = apply(&fixture.state, &fixture.store, .empty_trash);
-    try expect_effects(&effects, &.{.{ .empty_mailbox = .{ .account = null, .mailbox = .trash } }});
+    try expect_effects(&effects, &.{.{ .empty_mailbox = .{ .account = null, .folder = .{ .mailbox = .trash } } }});
     try testing.expectEqual(@as(u32, 0), fixture.state.visible_len);
     try testing.expectEqualStrings("Trash emptied", fixture.state.status.slice());
 }
@@ -1183,7 +1183,7 @@ test "empty_trash honours the account filter" {
     const effects = apply(&fixture.state, &fixture.store, .empty_trash);
     try expect_effects(&effects, &.{.{ .empty_mailbox = .{
         .account = AccountId.from_int(1),
-        .mailbox = .trash,
+        .folder = .{ .mailbox = .trash },
     } }});
 
     // Only account 1's trash went away.
@@ -1320,8 +1320,8 @@ test "open: marks an unread message read, fetches the body, and switches view" {
     try testing.expect(!fixture.store.at(0).is_unread());
 
     try expect_effects(&effects, &.{
-        .{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false } } },
-        .{ .fetch_body = .{ .account = AccountId.from_int(1), .mailbox = .inbox, .id = MessageId.from_int(1) } },
+        .{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false }, .folder = .{ .mailbox = .inbox } } },
+        .{ .fetch_body = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .folder = .{ .mailbox = .inbox } } },
     });
 }
 
@@ -1331,7 +1331,7 @@ test "open: an already-read message only fetches the body" {
     fixture.store.at(0).flags = .{ .unread = false };
 
     const effects = apply(&fixture.state, &fixture.store, .open_selected);
-    try expect_effects(&effects, &.{.{ .fetch_body = .{ .account = AccountId.from_int(1), .mailbox = .inbox, .id = MessageId.from_int(1) } }});
+    try expect_effects(&effects, &.{.{ .fetch_body = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .folder = .{ .mailbox = .inbox } } }});
 }
 
 test "open: an empty list explains itself and stays put" {
@@ -1442,7 +1442,7 @@ test "toggle_unread flips the flag, syncs it, and reports the new state" {
     var effects = apply(&fixture.state, &fixture.store, .toggle_unread);
     try testing.expect(!fixture.store.at(0).is_unread());
     try testing.expectEqualStrings("Marked read", fixture.state.status.slice());
-    try expect_effects(&effects, &.{.{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false } } }});
+    try expect_effects(&effects, &.{.{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false }, .folder = .{ .mailbox = .inbox } } }});
 
     effects = apply(&fixture.state, &fixture.store, .toggle_unread);
     try testing.expect(fixture.store.at(0).is_unread());
