@@ -2596,6 +2596,8 @@ const FakeMail = struct {
 const Rig = struct {
     fake_system: Fake = .{ .size_value = .{ .columns = 100, .rows = 24 } },
     fake_mail: FakeMail = .{},
+    /// Where `start_with_images` paints: the rig's, so it outlives the session.
+    images: ImageSink = .{},
     sources: [1]MailSource = undefined,
     session: Session = undefined,
 
@@ -2673,6 +2675,17 @@ const Rig = struct {
         try self.start();
         self.session.deps.open_url = LinkSink.open;
         self.session.deps.open_url_context = sink;
+    }
+
+    /// A started session that paints pictures into a sink the rig owns. The
+    /// function and its context are wired together here because arming one
+    /// without the other is a call through a null pointer: it reads as a crash
+    /// on the machine where the stack slot is not zero, and as a passing test
+    /// on the machine where it is.
+    fn start_with_images(self: *Rig) !void {
+        try self.start();
+        self.session.deps.draw_image = ImageSink.draw;
+        self.session.deps.draw_image_context = &self.images;
     }
 
     /// Puts `raw` in the reader, without going through the network.
@@ -5274,7 +5287,7 @@ test "the same marker in another message gets another picture id" {
 
 test "a marker with the same name in another message is another picture" {
     var rig: Rig = .{};
-    try rig.start();
+    try rig.start_with_images();
     defer rig.deinit();
 
     // Two parts, both called "logo", with different bytes.
@@ -5550,11 +5563,10 @@ test "a terminal that cannot paint says so instead of doing nothing" {
 
 test "a big html mail with many links and pictures renders without arithmetic surprises" {
     var rig: Rig = .{};
-    try rig.start();
+    try rig.start_with_images();
     defer rig.deinit();
     _ = rig.session.step();
     rig.session.show_images = true;
-    rig.session.deps.draw_image = ImageSink.draw;
 
     var raw_buffer: [400 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&raw_buffer);
@@ -5585,10 +5597,9 @@ test "a big html mail with many links and pictures renders without arithmetic su
 
 test "turning pictures off repaints the rows they were drawn over" {
     var rig: Rig = .{};
-    try rig.start();
+    try rig.start_with_images();
     defer rig.deinit();
     _ = rig.session.step();
-    rig.session.deps.draw_image = ImageSink.draw;
     try rig.open_reader("<p>hello</p>");
 
     rig.fake_system.push_input("i");
@@ -5609,14 +5620,13 @@ test "turning pictures off repaints the rows they were drawn over" {
 
 test "a picture makes the body longer instead of hiding the words after it" {
     var rig: Rig = .{};
-    try rig.start();
+    try rig.start_with_images();
     defer rig.deinit();
     _ = rig.session.step();
 
     // A picture the message carries, decoded from its own bytes: 90x36 at this cell
     // size is ten columns by two rows.
     rig.session.show_images = true;
-    rig.session.deps.draw_image = ImageSink.draw;
     const png_base64 = "iVBORw0KGgoAAAANSUhEUgAAAFoAAAAkCAYAAABlLQxSAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
     const raw = "Content-Type: multipart/related; boundary=\"b\"\n\n--b\nContent-Type: text/html\n\n" ++
         "<p><img src=\"cid:logo@x\"></p><p>the paragraph after the picture</p>\n" ++
@@ -5645,11 +5655,10 @@ test "the ground a picture is drawn over is the terminal's own background" {
 
 test "pictures moving the text do not move the link off its words" {
     var rig: Rig = .{};
-    try rig.start();
+    try rig.start_with_images();
     defer rig.deinit();
     _ = rig.session.step();
     rig.session.show_images = true;
-    rig.session.deps.draw_image = ImageSink.draw;
 
     // A picture the message carries, then a link: the gap it needs pushes the link's
     // line down, and the underline has to go with it.
@@ -5712,14 +5721,13 @@ test "pictures are off until asked for, and then they arrive off the loop" {
     };
 
     var rig: Rig = .{};
-    try rig.start();
+    try rig.start_with_images();
     defer rig.deinit();
     _ = rig.session.step();
 
     var sink: RemoteFetch = .{ .png = &png };
     rig.session.deps.fetch_image = RemoteFetch.fetch;
     rig.session.deps.fetch_image_context = &sink;
-    rig.session.deps.draw_image = ImageSink.draw;
 
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
@@ -5764,7 +5772,7 @@ test "pictures are off until asked for, and then they arrive off the loop" {
 
 test "a picture that is not a PNG is downloaded once and named as such" {
     var rig: Rig = .{};
-    try rig.start();
+    try rig.start_with_images();
     defer rig.deinit();
     _ = rig.session.step();
 
@@ -5776,7 +5784,6 @@ test "a picture that is not a PNG is downloaded once and named as such" {
     var sink: RemoteFetch = .{ .png = &gif, .lead = 20 };
     rig.session.deps.fetch_image = RemoteFetch.fetch;
     rig.session.deps.fetch_image_context = &sink;
-    rig.session.deps.draw_image = ImageSink.draw;
 
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
@@ -6303,7 +6310,7 @@ test "the splash breathes until the inbox is here, and then it is gone" {
 
 test "the picture worker and the body worker never run at once" {
     var rig: Rig = .{};
-    try rig.start();
+    try rig.start_with_images();
     defer rig.deinit();
     _ = rig.session.step();
 
@@ -6313,7 +6320,6 @@ test "the picture worker and the body worker never run at once" {
     var fetch_sink: RemoteFetch = .{ .png = "PNG", .lead = 8 };
     rig.session.deps.fetch_image = RemoteFetch.fetch;
     rig.session.deps.fetch_image_context = &fetch_sink;
-    rig.session.deps.draw_image = ImageSink.draw;
 
     // A body is in the air: the picture worker waits its turn instead of opening a
     // second connection with the same IO handle underneath it.

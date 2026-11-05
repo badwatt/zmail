@@ -126,6 +126,11 @@ pub const Posix = struct {
 
     fn enterRawThunk(context: *anyopaque) system_mod.Error!void {
         const self: *Posix = @ptrCast(@alignCast(context));
+        // Asked before the call, not after: macOS answers `tcgetattr` on a pipe
+        // with ENODEV, which the standard library treats as an error that cannot
+        // happen and aborts on. A mail client with its input redirected would die
+        // instead of saying it needs a terminal.
+        if (std.c.isatty(self.stdin) == 0) return error.NotATerminal;
         self.original = std.posix.tcgetattr(self.stdin) catch return error.NotATerminal;
 
         var raw = self.original;
