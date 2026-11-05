@@ -22,6 +22,7 @@ const Effects = @import("effect.zig").Effects;
 const State = @import("state.zig").State;
 const MoveTarget = @import("state.zig").MoveTarget;
 const folder_of = @import("state.zig").folder_of;
+const same_folder = @import("state.zig").same_folder;
 const MoveRow = @import("state.zig").MoveRow;
 const folder = @import("../domain/folder.zig");
 const View = @import("state.zig").View;
@@ -57,9 +58,9 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .move => |move| apply_move(state, move),
         .open_selected => apply_open(state, store, &effects),
         .dismiss => apply_dismiss(state, store),
-        .next_mailbox => switch_mailbox(state, store, state.mailbox.next(), &effects),
+        .next_folder => step_folder(state, store, &effects, true),
         .begin_move => begin_move(state, store),
-        .previous_mailbox => switch_mailbox(state, store, state.mailbox.previous(), &effects),
+        .previous_folder => step_folder(state, store, &effects, false),
         .select_mailbox => |mailbox| switch_mailbox(state, store, mailbox, &effects),
         .toggle_unread => toggle_unread(state, store, &effects),
         .toggle_flag => toggle_flag(state, store, &effects),
@@ -151,6 +152,55 @@ fn cycle_account(state: *State, store: *Store) void {
     }
     state.cursor = 0;
     state.offset = 0;
+    state.rebuild(store);
+}
+
+/// The folder on screen, as a target.
+fn current_folder(state: *const State) MoveTarget {
+    if (state.named) |ref| return .{ .named = ref };
+    return .{ .mailbox = state.mailbox };
+}
+
+/// Walks the folders in the order the sidebar shows them, which is the order the
+/// server listed them -- not the order of the six in the code. `J` from Inbox goes
+/// to whatever the sidebar drew under it.
+fn step_folder(state: *State, store: *Store, effects: *Effects, forward: bool) void {
+    var rows: [32]MoveRow = undefined;
+    const count = state.folder_rows(&rows);
+    if (count == 0) return;
+
+    const current = current_folder(state);
+    var index: usize = if (forward) 0 else count - 1;
+    for (rows[0..count], 0..) |row, position| {
+        if (!same_folder(current, row.target)) continue;
+        index = if (forward) (position + 1) % count else (position + count - 1) % count;
+        break;
+    }
+    go_to(state, store, effects, rows[index].target);
+}
+
+/// Goes to one folder: one of the six is a mailbox, the rest are the account's.
+fn go_to(state: *State, store: *Store, effects: *Effects, target: MoveTarget) void {
+    switch (target) {
+        .mailbox => |mailbox| switch_mailbox(state, store, mailbox, effects),
+        .named => |ref| switch_named(state, store, ref, effects),
+    }
+}
+
+fn switch_named(state: *State, store: *Store, ref: folder.Ref, effects: *Effects) void {
+    if (state.named) |current| {
+        if (current.eql(ref)) return;
+    }
+    state.named = ref;
+    effects.add(.{ .refresh = .{ .account = ref.account, .mailbox = state.mailbox, .force = false } });
+    state.query.clear();
+    state.draft.clear();
+    state.mode = .normal;
+    state.view = .list;
+    state.cursor = 0;
+    state.offset = 0;
+    state.reader_scroll = 0;
+    state.opened = .unknown;
     state.rebuild(store);
 }
 
@@ -1338,12 +1388,12 @@ test "next and previous mailbox cycle and ask the adapter to load them" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
 
-    const effects = apply(&fixture.state, &fixture.store, .next_mailbox);
+    const effects = apply(&fixture.state, &fixture.store, .next_folder);
     try testing.expectEqual(Mailbox.sent, fixture.state.mailbox);
     try testing.expectEqual(@as(u32, 1), fixture.state.visible_len);
     try expect_effects(&effects, &.{.{ .refresh = .{ .account = null, .mailbox = .sent, .force = false } }});
 
-    _ = apply(&fixture.state, &fixture.store, .previous_mailbox);
+    _ = apply(&fixture.state, &fixture.store, .previous_folder);
     try testing.expectEqual(Mailbox.inbox, fixture.state.mailbox);
 }
 
@@ -2229,4 +2279,43 @@ test "moving from the reader goes back to the list it just changed" {
     try testing.expectEqual(View.list, fixture.state.view);
     try testing.expectEqual(@as(u32, 0), fixture.state.reader_scroll);
     try testing.expectEqual(@as(usize, 1), effects.len);
+}
+
+test "J walks the folders in the order the sidebar shows them" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    const account = AccountId.from_int(1);
+    // The server's order is not the order of the six: Archive, Inbox, Trash.
+    _ = fixture.state.folders.add(account, "Archive", .archive);
+    _ = fixture.state.folders.add(account, "INBOX", .inbox);
+    _ = fixture.state.folders.add(account, "Trash", .trash);
+    fixture.state.account_filter = account;
+    fixture.state.mailbox = .inbox;
+    fixture.state.rebuild(&fixture.store);
+
+    // From Inbox, J goes to the row drawn under it: Trash.
+    _ = apply(&fixture.state, &fixture.store, .next_folder);
+    try testing.expectEqual(Mailbox.trash, fixture.state.mailbox);
+
+    // And K comes back.
+    _ = apply(&fixture.state, &fixture.store, .previous_folder);
+    try testing.expectEqual(Mailbox.inbox, fixture.state.mailbox);
+
+    // Wrap around both ends.
+    _ = apply(&fixture.state, &fixture.store, .previous_folder);
+    try testing.expectEqual(Mailbox.archive, fixture.state.mailbox);
+    _ = apply(&fixture.state, &fixture.store, .previous_folder);
+    try testing.expectEqual(Mailbox.trash, fixture.state.mailbox);
+}
+
+test "stepping onto the folder you are already in is not a step" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    const account = AccountId.from_int(1);
+    // One folder of its own, and the screen is on it: J wraps onto itself.
+    _ = fixture.state.folders.add(account, "Clients", null);
+    fixture.state.select_named(&fixture.store, .{ .account = account, .slot = 0 });
+    const effects = apply(&fixture.state, &fixture.store, .next_folder);
+    try testing.expectEqual(@as(usize, 0), effects.len);
+    try testing.expectEqual(folder.Ref{ .account = account, .slot = 0 }, fixture.state.named.?);
 }

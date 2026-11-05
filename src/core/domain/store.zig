@@ -143,6 +143,17 @@ pub const Store = struct {
     }
 
     /// Removes every message of `account` in one of its own folders.
+    /// Renumbers one account's named folder: a slot is a position in the list the
+    /// server last sent, and that list can change order under the mail.
+    pub fn reslot(self: *Store, account: AccountId, from: u8, to: u8) void {
+        if (from == to) return;
+        for (self.messages[0..self.len]) |*message| {
+            if (message.account != account) continue;
+            if (message.named != from) continue;
+            message.named = to;
+        }
+    }
+
     pub fn remove_named(self: *Store, account: AccountId, slot: u8) u32 {
         var read: u32 = 0;
         var write: u32 = 0;
@@ -429,4 +440,37 @@ test "Store: a message in one of the account's folders is not in a mailbox" {
     try testing.expectEqual(@as(u32, 0), store.count_in(.inbox, null));
     try testing.expectEqual(@as(u32, 0), store.unread_in(.inbox, null));
     try testing.expectEqual(@as(u32, 1), store.len);
+}
+
+test "Store: reslot renumbers one account's named folder" {
+    var store = try Store.init(testing.allocator, 4);
+    defer store.deinit(testing.allocator);
+    var first = message_with(1, .inbox, 100);
+    first.named = 1;
+    var other_account = message_with(2, .inbox, 200);
+    other_account.account = AccountId.from_int(2);
+    other_account.named = 1;
+    const canonical = message_with(3, .inbox, 300);
+    for ([_]Message{ first, other_account, canonical }) |message| try store.insert(&message);
+
+    store.reslot(AccountId.from_int(1), 1, 4);
+    var index: u32 = 0;
+    while (index < store.len) : (index += 1) {
+        const message = store.at(index);
+        switch (message.id.to_int()) {
+            1 => try testing.expectEqual(@as(u8, 4), message.named),
+            // Another account's folder of the same slot is not touched, and
+            // neither is a message that was never named.
+            2 => try testing.expectEqual(@as(u8, 1), message.named),
+            else => try testing.expectEqual(folder.none, message.named),
+        }
+    }
+    // Asking for the same slot twice changes nothing.
+    store.reslot(AccountId.from_int(1), 4, 4);
+    index = 0;
+    while (index < store.len) : (index += 1) {
+        const message = store.at(index);
+        if (message.id.to_int() != 1) continue;
+        try testing.expectEqual(@as(u8, 4), message.named);
+    }
 }

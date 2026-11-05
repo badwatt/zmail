@@ -245,6 +245,9 @@ pub const State = struct {
     account_filter: ?AccountId = null,
     compose: Compose = .{},
 
+    /// A folder list is in flight: the sidebar says so instead of pretending the
+    /// six are all there is.
+    listing: bool = false,
     /// Choosing where the selected message goes: the chooser is open, and this
     /// is the row under its cursor.
     moving: bool = false,
@@ -279,6 +282,9 @@ pub const State = struct {
     /// Shows one of the account's other folders. `mailbox` is left where it was:
     /// leaving the folder returns to it.
     pub fn select_named(self: *State, store: *const Store, ref: folder.Ref) void {
+        // A named folder is one account's: the scope follows it, or the rows
+        // below the rule would be somebody else's folders.
+        self.account_filter = ref.account;
         self.named = ref;
         self.query.clear();
         self.draft.clear();
@@ -294,6 +300,43 @@ pub const State = struct {
     /// The folder on screen, canonical or named.
     pub fn folder_on_screen(self: *const State) ?folder.Ref {
         return self.named;
+    }
+
+    /// The folders the sidebar shows for the scope on screen, in its order: the
+    /// account's own list when the server gave one, the six the app knows when
+    /// it did not.
+    pub fn folder_rows(self: *const State, rows: []MoveRow) usize {
+        // Nothing to walk while the list is on its way: the order is about to
+        // change under the key.
+        if (self.listing) return 0;
+        var count: usize = 0;
+        if (self.account_filter) |account| {
+            if (!self.folders.is_empty(account)) {
+                var slot: u8 = 0;
+                while (slot < self.folders.count(account) and count < rows.len) : (slot += 1) {
+                    count += self.write_row(account, slot, rows, count);
+                }
+                return count;
+            }
+        }
+        for (Mailbox.all) |mailbox| {
+            if (count == rows.len) break;
+            rows[count] = .{ .target = .{ .mailbox = mailbox }, .title = mailbox.title() };
+            count += 1;
+        }
+        return count;
+    }
+
+    /// Writes one row of an account's list, unless there is no room.
+    fn write_row(self: *const State, account: AccountId, slot: u8, rows: []MoveRow, at: usize) usize {
+        if (at == rows.len) return 0;
+        const entry = self.folders.at(account, slot).?;
+        const target: MoveTarget = if (entry.canonical) |mailbox|
+            .{ .mailbox = mailbox }
+        else
+            .{ .named = .{ .account = account, .slot = slot } };
+        rows[at] = .{ .target = target, .title = entry.display() };
+        return 1;
     }
 
     /// The folders a message can be moved to, in the order the chooser shows

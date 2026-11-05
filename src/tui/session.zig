@@ -701,6 +701,13 @@ pub const Session = struct {
         self.load_cached(self.screen_target(), false);
 
         self.refresh_target = self.screen_target();
+        // An account whose folders nobody has listed yet says so in the sidebar:
+        // the six the app knows are a placeholder, not an answer.
+        if (self.refresh_target.named == null) {
+            if (self.state.account_filter) |account| {
+                self.state.listing = self.state.folders.is_empty(account);
+            }
+        }
         self.refresh_job.start(
             self.refresh_sources[0..count],
             self.place_of(self.refresh_target),
@@ -742,6 +749,7 @@ pub const Session = struct {
         }
 
         const failures = self.refresh_job.failures;
+        self.state.listing = false;
         self.state.booting = false;
         self.refreshing = false;
         self.state.refreshing = false;
@@ -766,10 +774,37 @@ pub const Session = struct {
     /// an empty sidebar would look like a broken account.
     fn adopt_folders(self: *Session, account: core.id.AccountId, offset: u32, count: u32) void {
         if (count == 0) return;
+
+        // A slot is a position in this list, and the list is about to be replaced:
+        // remember the name of the folder on screen to find it again.
+        var open_name: core.text.Text(core.folder.name_max) = .{};
+        var old_slot: u8 = 0;
+        if (self.state.named) |ref| {
+            if (ref.account == account) {
+                old_slot = ref.slot;
+                if (self.state.folders.at(account, ref.slot)) |entry| open_name.set(entry.name.slice());
+            }
+        }
+
         self.state.folders.reset(account);
         for (self.folder_scratch[offset..][0..count]) |listed| {
             _ = self.state.folders.add_counted(account, listed.name, listed.title, listed.canonical, listed.unread);
         }
+
+        if (open_name.is_empty()) return;
+        // The folder on screen moved, kept its place, or is gone.
+        var slot: u8 = 0;
+        while (slot < self.state.folders.count(account)) : (slot += 1) {
+            const entry = self.state.folders.at(account, slot).?;
+            if (!std.mem.eql(u8, entry.name.slice(), open_name.slice())) continue;
+            core.sync.reslot(&self.store, account, old_slot, slot);
+            self.state.named = .{ .account = account, .slot = slot };
+            self.state.rebuild(&self.store);
+            return;
+        }
+        // Not in the list any more: the list goes back to the mailbox it was on.
+        self.state.named = null;
+        self.state.rebuild(&self.store);
     }
 
     /// Waits for an in-flight refresh, then applies its results. Used when a
@@ -991,6 +1026,7 @@ pub const Session = struct {
             &self.state.accounts,
             &self.state.folders,
             self.state.account_filter,
+            self.state.listing,
             mouse.y,
         ) orelse return false;
         switch (entry) {
@@ -1019,7 +1055,6 @@ pub const Session = struct {
         // A folder that is really one of the six is a mailbox, and the caller
         // routes it there: this is the other kind or nothing.
         std.debug.assert(entry.canonical == null);
-        self.state.account_filter = ref.account;
         self.state.select_named(&self.store, ref);
         self.load_cached(.{ .named = ref }, false);
         self.start_refresh();
@@ -6783,4 +6818,70 @@ test "a move target whose folder is gone falls back to a mailbox" {
         rig.session.place_named(.{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 3 } }),
     );
     try testing.expectEqual(core.mail_port.Place.sent, rig.session.place_named(.{ .mailbox = .sent }));
+}
+
+test "the folders load in the order J walks them, and the sidebar says when they are coming" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    // A server whose list is not the order of the six: Archive first, then Inbox.
+    _ = try rig.fake_mail.inner.add_folder("Archive", .archive);
+    _ = try rig.fake_mail.inner.add_folder("INBOX", .inbox);
+    _ = try rig.fake_mail.inner.add_folder("Clients", null);
+    rig.session.state.folders.reset(account);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // Choosing the account has to ask, and says so while it waits.
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    try testing.expect(rig.session.state.listing);
+    // The sidebar offers no rows yet: what it would draw is about to change.
+    var rows: [32]core.state.MoveRow = undefined;
+    try testing.expectEqual(@as(usize, 0), rig.session.state.folder_rows(&rows));
+
+    rig.session.settle_refresh_for_test();
+    try testing.expect(!rig.session.state.listing);
+    try testing.expectEqual(@as(u8, 3), rig.session.state.folders.count(account));
+
+    // The list says Archive, INBOX, Clients, and the screen is on Inbox: J goes to
+    // the row drawn under it, which is Clients.
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+    rig.send("J");
+    const named = rig.session.state.named orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(named.account, named.slot).?.display());
+
+    // K goes back the way it came.
+    rig.send("K");
+    try testing.expect(rig.session.state.named == null);
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+}
+
+test "a named folder that disappears from the list goes back to a mailbox" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    _ = try rig.fake_mail.inner.add_folder("Clients", null);
+    rig.session.state.folders.reset(account);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // Open it: the scope follows the folder, as it must.
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    rig.session.settle_refresh_for_test();
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 3, .kind = .press, .button = .left });
+    rig.session.settle_refresh_for_test();
+    try testing.expect(rig.session.state.named != null);
+
+    // The server stops listing it: the next refresh has nowhere to leave the list.
+    rig.fake_mail.inner.folder_count = 0;
+    rig.session.start_refresh_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expect(rig.session.state.named == null);
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
 }

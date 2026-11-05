@@ -26,6 +26,11 @@ pub fn replace_mailbox(store: *Store, account: AccountId, mailbox: Mailbox, fetc
     }
 }
 
+/// Renumbers a named folder after the server's list changed order under it.
+pub fn reslot(store: *Store, account: AccountId, from: u8, to: u8) void {
+    store.reslot(account, from, to);
+}
+
 /// The same, for one of the account's own folders: the messages are stamped with
 /// the slot they were asked for, never with a canonical mailbox.
 pub fn replace_named(store: *Store, account: AccountId, slot: u8, fetched: []const Message) void {

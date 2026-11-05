@@ -47,10 +47,10 @@ pub const Command = union(enum) {
     /// `q`/`Esc`: leaves the current layer (search, help, reader) or quits from
     /// the top level.
     dismiss,
-    next_mailbox,
+    next_folder,
     /// Open the chooser that puts the selected message in another folder.
     begin_move,
-    previous_mailbox,
+    previous_folder,
     select_mailbox: Mailbox,
     toggle_unread,
     toggle_flag,
@@ -139,8 +139,8 @@ test "every command is classified for status clearing" {
         .{ .command = .{ .move = .down }, .clears = true },
         .{ .command = .open_selected, .clears = true },
         .{ .command = .dismiss, .clears = true },
-        .{ .command = .next_mailbox, .clears = true },
-        .{ .command = .previous_mailbox, .clears = true },
+        .{ .command = .next_folder, .clears = true },
+        .{ .command = .previous_folder, .clears = true },
         .{ .command = .{ .select_mailbox = .sent }, .clears = true },
         .{ .command = .toggle_unread, .clears = true },
         .{ .command = .toggle_flag, .clears = true },

@@ -127,8 +127,8 @@ fn char_command(codepoint: u21, view: View) ?Command {
         'A' => .open_accounts,
         // Folders are a column in the sidebar, so they are walked with the same
         // letters that walk the rows, shifted one level down.
-        'J' => .next_mailbox,
-        'K' => .previous_mailbox,
+        'J' => .next_folder,
+        'K' => .previous_folder,
         '1'...'6' => .{ .select_mailbox = Mailbox.from_index(@intCast(codepoint - '1')) },
         else => null,
     };
@@ -274,8 +274,8 @@ test "in the reader, escape, left, h and q go back; right does nothing" {
 
 test "mailbox switching" {
     const cases = [_]Case{
-        .{ .key = .{ .char = 'J' }, .expected = .next_mailbox },
-        .{ .key = .{ .char = 'K' }, .expected = .previous_mailbox },
+        .{ .key = .{ .char = 'J' }, .expected = .next_folder },
+        .{ .key = .{ .char = 'K' }, .expected = .previous_folder },
         .{ .key = .{ .char = '1' }, .expected = .{ .select_mailbox = .inbox } },
         .{ .key = .{ .char = '2' }, .expected = .{ .select_mailbox = .sent } },
         .{ .key = .{ .char = '3' }, .expected = .{ .select_mailbox = .drafts } },
