@@ -512,6 +512,11 @@ pub const Session = struct {
     pub fn boot(self: *Session) void {
         if (!self.needs_boot) return;
         self.needs_boot = false;
+
+        // The sidebar before the network: the folder lists the last run kept are
+        // small, and the accounts should not all look like the six placeholders
+        // while the first connection is made.
+        self.load_cached_folders();
         // Nothing to connect to (a broken config, no accounts): the welcome screen
         // still shows, and the notice under it is what the user needs to read.
         if (self.source_count == 0) return;
@@ -522,6 +527,7 @@ pub const Session = struct {
         // reuse the open connection, so those can run in the background.
         if (!self.deps.splash) {
             self.reload(self.state.mailbox);
+            self.list_missing_folders();
             return;
         }
 
@@ -583,6 +589,9 @@ pub const Session = struct {
         self.state.booting = false;
         self.finish_reload(self.state.mailbox);
         self.sync_progress();
+        // The mail is here; the folders may not be. Ask for the ones the disk did
+        // not have, now, instead of waiting for the first key to move.
+        self.list_missing_folders();
     }
 
     pub fn deinit(self: *Session) void {
@@ -724,6 +733,7 @@ pub const Session = struct {
             self.place_of(self.refresh_target),
             self.refresh_scratch,
             &self.folder_scratch,
+            false,
         );
         self.refreshing = true;
         self.state.refreshing = true;
@@ -839,6 +849,42 @@ pub const Session = struct {
         // Not in the list any more: the list goes back to the mailbox it was on.
         self.state.named = null;
         self.state.rebuild(&self.store);
+    }
+
+    /// Starts a listing when some account's folders are still unknown: the
+    /// sidebar is part of the first screen, and a key press should not be what
+    /// makes it appear. Only the lists are asked for -- the mail on screen came
+    /// from the cache, and a folder listing is not a reason to fetch it again.
+    fn list_missing_folders(self: *Session) void {
+        if (self.refreshing) return;
+        var missing = false;
+        for (self.live_sources()) |source| {
+            if (!self.state.folders.is_empty(source.id)) continue;
+            missing = true;
+        }
+        if (!missing) return;
+
+        var count: u8 = 0;
+        for (self.live_sources(), 0..) |source, index| {
+            if (!self.in_scope(source.id)) continue;
+            self.refresh_sources[count] = .{ .id = source.id, .mail = source.mail };
+            self.refresh_index[count] = @intCast(index);
+            count += 1;
+        }
+        if (count == 0) return;
+        self.refresh_count = count;
+        self.refresh_target = self.screen_target();
+        self.state.listing = true;
+        self.refresh_job.start(
+            self.refresh_sources[0..count],
+            self.place_of(self.refresh_target),
+            self.refresh_scratch,
+            &self.folder_scratch,
+            true,
+        );
+        self.refreshing = true;
+        self.state.refreshing = true;
+        self.repaint();
     }
 
     /// Fills the sidebar from the folder list kept on disk, for the accounts in
@@ -3829,6 +3875,8 @@ test "a cold boot that cannot connect says so, and shows an empty list" {
     rig.session.boot();
 
     rig.session.settle_boot_for_test();
+    // The listing the boot asked for is its own round trip, and it fails too.
+    rig.session.settle_refresh_for_test();
     try testing.expectEqualStrings("Could not load Inbox", rig.session.state.status.slice());
     try testing.expectEqual(@as(u32, 0), rig.session.store.len);
 
@@ -3934,6 +3982,7 @@ test "the form shows the servers the source reported" {
     defer rig.deinit();
     rig.session.boot();
     rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
 
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = core.id.AccountId.from_int(1) } }});
     const form = &rig.session.settings.?;
@@ -4351,6 +4400,7 @@ test "removing an account rewrites the config and drops its mail" {
     defer rig.deinit();
     rig.session.boot();
     rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
     rig.session.render();
 
     // No port: refuse and say so.
@@ -7027,4 +7077,35 @@ test "opening another message gives the pointer back" {
     rig.send("\r");
     rig.session.settle_body_for_test();
     try testing.expect(rig.session.hovered == null);
+}
+
+test "the folders are there at startup, without a key to ask for them" {
+    var rig: Rig = .{};
+    // A cache that already knows the folders, the way the second run does.
+    var cache: core.cache_port.Memory = .{ .load_count = 1 };
+    const account = core.id.AccountId.from_int(1);
+    try cache.cache().save_folders(account, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox, .unread = 1 },
+        .{ .name = "Clients", .title = "Clients" },
+    });
+    for (0..2) |index| _ = index;
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = account,
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    rig.session.needs_boot = true;
+
+    rig.session.boot();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+
+    // No scope change, no key: the sidebar's table is already the account's.
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+    try testing.expect(!rig.session.state.listing);
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, 1).?.display());
 }

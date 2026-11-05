@@ -41,6 +41,9 @@ pub const Job = struct {
     /// One region per account for the folders its server listed. Asking is a
     /// round trip like any other, so it happens on the worker too.
     folders: []port.Listed = &.{},
+    /// Only ask for the folder lists: the mail on screen came from the cache, and
+    /// a listing is not a reason to fetch it again.
+    list_only: bool = false,
     folder_offsets: [max_accounts]u32 = @splat(0),
     folder_counts: [max_accounts]u32 = @splat(0),
     /// Per account: did the fetch succeed? A failed account keeps its old mail.
@@ -55,11 +58,13 @@ pub const Job = struct {
         place: port.Place,
         buffer: []Message,
         folders: []port.Listed,
+        list_only: bool,
     ) void {
         job.sources = sources;
         job.place = place;
         job.buffer = buffer;
         job.folders = folders;
+        job.list_only = list_only;
         job.folder_counts = @splat(0);
         job.folder_offsets = @splat(0);
         job.failures = 0;
@@ -93,6 +98,11 @@ pub const Job = struct {
                 job.folder_counts[index] = listed;
                 folder_offset += listed;
             }
+            // A listing-only job leaves the mail alone: what is on screen came
+            // from the cache a moment ago, and asking again would be a socket for
+            // something nobody asked to refresh.
+            if (job.list_only) continue;
+
             const slice = job.buffer[offset..];
             const count = source.mail.fetch(job.place, slice) catch {
                 job.failures += 1;
