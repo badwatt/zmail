@@ -112,7 +112,16 @@ pub const Job = struct {
             if (job.list_only) continue;
 
             const slice = job.buffer[offset..];
-            const place = if (index < job.places.len) job.places[index] else port.Place.inbox;
+            var place = if (index < job.places.len) job.places[index] else port.Place.inbox;
+            // The list just came back, so the name to use is the one it carried --
+            // not the one the sidebar had a second ago. That is what makes a folder
+            // work the first time whether it is Sent, Trash, or one of the account's
+            // own, and whether the saved list was written before or after the folder
+            // was renamed.
+            if (place.mailbox) |mailbox| {
+                const listed = job.folders[job.folder_offsets[index]..][0..job.folder_counts[index]];
+                if (listed_name(listed, mailbox)) |fresh| place.name = fresh;
+            }
             const count = source.mail.fetch(place, slice) catch {
                 job.failures += 1;
                 continue;
@@ -124,6 +133,17 @@ pub const Job = struct {
         job.state.store(@backingInt(State.done), .release);
     }
 };
+
+/// The name the server just listed for a canonical mailbox, when it listed one.
+pub fn listed_name(listed: []const port.Listed, mailbox: core.mailbox.Mailbox) ?[]const u8 {
+    for (listed) |folder| {
+        const canonical = folder.canonical orelse continue;
+        if (canonical != mailbox) continue;
+        if (folder.name.len == 0) continue;
+        return folder.name;
+    }
+    return null;
+}
 
 /// One message's body, fetched off the loop.
 ///
@@ -247,3 +267,21 @@ pub const ImageJob = struct {
         job.state.store(@backingInt(State.done), .release);
     }
 };
+
+const testing = std.testing;
+
+test "the name to fetch by is the one the listing just brought" {
+    const listed = [_]port.Listed{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox },
+        .{ .name = "[Gmail]/Sent Mail", .title = "Sent Mail", .canonical = .sent },
+        .{ .name = "Clients", .title = "Clients" },
+    };
+    try testing.expectEqualStrings("[Gmail]/Sent Mail", listed_name(&listed, .sent).?);
+    try testing.expectEqualStrings("INBOX", listed_name(&listed, .inbox).?);
+    // A folder this server does not have is not invented: the caller keeps what
+    // it had and lets the SELECT say so.
+    try testing.expectEqual(@as(?[]const u8, null), listed_name(&listed, .trash));
+    // A folder with no name of its own cannot be selected by one.
+    const nameless = [_]port.Listed{.{ .name = "", .canonical = .junk }};
+    try testing.expectEqual(@as(?[]const u8, null), listed_name(&nameless, .junk));
+}
