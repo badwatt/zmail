@@ -153,6 +153,7 @@ pub const Client = struct {
                         out[count] = .{
                             .name = slot[0..entry.name.len],
                             .mailbox = entry.mailbox,
+                            .selectable = entry.selectable,
                         };
                         count += 1;
                     }

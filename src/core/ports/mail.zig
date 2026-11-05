@@ -15,7 +15,11 @@ const AccountId = @import("../domain/id.zig").AccountId;
 /// One folder, as the server listed it, with the numbers it reports about
 /// itself when the server said them.
 pub const Listed = struct {
+    /// The name the server knows the folder by: what a port call must send.
     name: []const u8,
+    /// What to show instead, when the name carries a namespace that is only
+    /// layout ("[Gmail]/All Mail" is "All Mail"). Empty means the name itself.
+    title: []const u8 = "",
     canonical: ?Mailbox = null,
     unread: u32 = 0,
 };

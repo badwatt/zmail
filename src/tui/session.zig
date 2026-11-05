@@ -768,7 +768,7 @@ pub const Session = struct {
         if (count == 0) return;
         self.state.folders.reset(account);
         for (self.folder_scratch[offset..][0..count]) |listed| {
-            _ = self.state.folders.add_counted(account, listed.name, listed.canonical, listed.unread);
+            _ = self.state.folders.add_counted(account, listed.name, listed.title, listed.canonical, listed.unread);
         }
     }
 

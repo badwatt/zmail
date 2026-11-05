@@ -93,6 +93,12 @@ pub const ImapMail = struct {
     const Entry = struct {
         mailbox: ?Mailbox = null,
         name: Text(limits.mailbox_name_max) = .{},
+        /// What the sidebar shows: the name without the namespace that only
+        /// holds it. `[Gmail]/All Mail` is a folder called "All Mail".
+        title: Text(limits.mailbox_name_max) = .{},
+        /// False for a name Gmail-style servers use as a heading ("[Gmail]"):
+        /// it cannot be selected, so it is not a folder of its own.
+        selectable: bool = true,
     };
 
     fn listOnce(self: *ImapMail) void {
@@ -103,10 +109,28 @@ pub const ImapMail = struct {
         const count = self.client.list(&raw) catch return;
         const bounded = @min(count, @as(u32, raw.len));
         for (raw[0..bounded], 0..) |entry, index| {
-            self.entries[index] = .{ .mailbox = entry.mailbox };
+            // INBOX is Inbox by definition (RFC 3501 §5.1), whether the server
+            // bothered to flag it or not: without this it becomes a folder named
+            // "INBOX" that the app treats as a stranger.
+            const mailbox = entry.mailbox orelse if (std.ascii.eqlIgnoreCase(entry.name, "INBOX")) Mailbox.inbox else null;
+            self.entries[index] = .{ .mailbox = mailbox, .selectable = entry.selectable };
             self.entries[index].name.set(entry.name);
         }
         self.entry_count = bounded;
+
+        // A folder under a heading shows without the heading: the row is the
+        // folder, not the path to it.
+        for (self.entries[0..bounded]) |*entry| {
+            entry.title.set(entry.name.slice());
+            for (self.entries[0..bounded]) |heading| {
+                if (heading.selectable) continue;
+                const prefix = heading.name.slice();
+                if (entry.name.slice().len <= prefix.len + 1) continue;
+                if (!std.ascii.startsWithIgnoreCase(entry.name.slice(), prefix)) continue;
+                if (entry.name.slice()[prefix.len] != '/') continue;
+                entry.title.set(entry.name.slice()[prefix.len + 1 ..]);
+            }
+        }
     }
 
     /// The server's name for a logical mailbox, or null when LIST says the
@@ -167,21 +191,25 @@ pub const ImapMail = struct {
     fn foldersThunk(context: *anyopaque, out: []port.Listed) port.Error!u32 {
         const self: *ImapMail = @ptrCast(@alignCast(context));
         self.listOnce();
-        const count = @min(self.entry_count, @as(u32, @intCast(out.len)));
         var index: u32 = 0;
-        while (index < count) : (index += 1) {
+        var written: u32 = 0;
+        while (index < self.entry_count and written < out.len) : (index += 1) {
             const entry = &self.entries[index];
+            // A heading holds folders; it is not one.
+            if (!entry.selectable) continue;
             // The numbers come from STATUS, one round trip per folder, and a
             // folder whose count failed is still a folder: zero unread, not an
             // error that loses the list.
             const numbers = self.client.status(entry.name.slice()) catch response_mod.Status{};
-            out[index] = .{
+            out[written] = .{
                 .name = entry.name.slice(),
+                .title = entry.title.slice(),
                 .canonical = entry.mailbox,
                 .unread = numbers.unseen,
             };
+            written += 1;
         }
-        return count;
+        return written;
     }
 
     fn fetchThunk(context: *anyopaque, place: port.Place, out: []Message) port.Error!u32 {
@@ -650,4 +678,53 @@ test "a folder the server named itself is selected by that name" {
     // The folder is not one of the six, so the name is the whole address.
     try testing.expectEqual(@as(u32, 0), try imap.mail().fetch(port.Place.named("Clients"), &messages));
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "SELECT \"Clients\"") != null);
+}
+
+test "a Gmail-shaped LIST gives folders, not the namespace that holds them" {
+    var scripted: Scripted = .{
+        .input = login_ok ++
+            "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n" ++
+            "* LIST (\\Noselect \\HasChildren) \"/\" \"[Gmail]\"\r\n" ++
+            "* LIST (\\Drafts \\HasNoChildren) \"/\" \"[Gmail]/Drafts\"\r\n" ++
+            "* LIST (\\Sent \\HasNoChildren) \"/\" \"[Gmail]/Sent Mail\"\r\n" ++
+            "* LIST (\\All \\HasNoChildren) \"/\" \"[Gmail]/All Mail\"\r\n" ++
+            "* LIST (\\Trash \\HasNoChildren) \"/\" \"[Gmail]/Trash\"\r\n" ++
+            "a2 OK LIST done\r\n" ++
+            // One STATUS per selectable folder, in the order they were listed.
+            "* STATUS \"INBOX\" (UNSEEN 4 MESSAGES 100)\r\n" ++
+            "a3 OK done\r\n" ++
+            "* STATUS \"[Gmail]/Drafts\" (UNSEEN 0 MESSAGES 2)\r\n" ++
+            "a4 OK done\r\n" ++
+            "* STATUS \"[Gmail]/Sent Mail\" (UNSEEN 0 MESSAGES 9)\r\n" ++
+            "a5 OK done\r\n" ++
+            "* STATUS \"[Gmail]/All Mail\" (UNSEEN 7 MESSAGES 900)\r\n" ++
+            "a6 OK done\r\n" ++
+            "* STATUS \"[Gmail]/Trash\" (UNSEEN 0 MESSAGES 1)\r\n" ++
+            "a7 OK done\r\n",
+    };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var out: [8]port.Listed = undefined;
+    const count = try imap.mail().folders(&out);
+    // Five: the heading is not a folder, and INBOX is Inbox.
+    try testing.expectEqual(@as(u32, 5), count);
+
+    try testing.expectEqualStrings("INBOX", out[0].name);
+    try testing.expectEqual(Mailbox.inbox, out[0].canonical.?);
+    try testing.expectEqual(@as(u32, 4), out[0].unread);
+
+    // The children show without the name of the heading they sit under, and keep
+    // the full name for the port: that is what the server answers to.
+    try testing.expectEqualStrings("[Gmail]/All Mail", out[3].name);
+    try testing.expectEqualStrings("All Mail", out[3].title);
+    try testing.expectEqual(@as(u32, 7), out[3].unread);
+    try testing.expectEqualStrings("Sent Mail", out[2].title);
+    // Nothing offers "[Gmail]" as somewhere to go.
+    for (out[0..count]) |listed| {
+        try testing.expect(!std.mem.eql(u8, listed.name, "[Gmail]"));
+    }
 }

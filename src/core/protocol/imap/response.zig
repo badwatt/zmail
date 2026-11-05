@@ -53,6 +53,9 @@ pub const Fetch = struct {
 pub const ListEntry = struct {
     name: []const u8 = "",
     mailbox: ?Mailbox = null,
+    /// False for a name that only holds other folders ("[Gmail]"): it cannot be
+    /// selected, so it is a heading, not a folder.
+    selectable: bool = true,
 };
 
 pub const Untagged = union(enum) {
@@ -191,6 +194,7 @@ fn parseList(text: []const u8, scratch: []u8, scratch_len: *usize) Error!ListEnt
             .close_paren => break,
             .atom => |flag| {
                 if (specialUse(flag)) |mailbox| entry.mailbox = mailbox;
+                if (std.ascii.eqlIgnoreCase(flag, "\\Noselect")) entry.selectable = false;
             },
             else => {},
         }
@@ -214,6 +218,7 @@ fn parseList(text: []const u8, scratch: []u8, scratch_len: *usize) Error!ListEnt
 }
 
 fn specialUse(flag: []const u8) ?Mailbox {
+    if (std.ascii.eqlIgnoreCase(flag, "\\Inbox")) return .inbox;
     if (std.ascii.eqlIgnoreCase(flag, "\\Sent")) return .sent;
     if (std.ascii.eqlIgnoreCase(flag, "\\Drafts")) return .drafts;
     if (std.ascii.eqlIgnoreCase(flag, "\\Trash")) return .trash;

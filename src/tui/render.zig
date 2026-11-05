@@ -391,7 +391,7 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
                 var named_title: []const u8 = "";
                 if (folder.slot) |slot| {
                     const account = folder.account orelse continue;
-                    named_title = if (inputs.state.folders.at(account, slot)) |entry| entry.name.slice() else "";
+                    named_title = if (inputs.state.folders.at(account, slot)) |entry| entry.display() else "";
                 }
                 // The six are counted from the store, the others from what the
                 // server said about them.
@@ -1061,6 +1061,7 @@ const list_hints = [_]Hint{
     .{ .keys = "c", .action = "compose" },
     .{ .keys = "r", .action = "reply" },
     .{ .keys = "d", .action = "archive" },
+    .{ .keys = "m", .action = "move to another folder" },
     .{ .keys = "^R", .action = "refresh" },
     .{ .keys = "?", .action = "help" },
 };
@@ -1213,6 +1214,7 @@ const help_rows = [_]Hint{
     .{ .keys = "u", .action = "read or unread" },
     .{ .keys = "s / *", .action = "star or unstar" },
     .{ .keys = "d", .action = "archive" },
+    .{ .keys = "m", .action = "move to another folder" },
     .{ .keys = "# / Delete", .action = "move to Trash" },
     .{ .keys = "X", .action = "delete for good (Trash only)" },
     .{ .keys = "E", .action = "empty Trash" },
@@ -1247,12 +1249,12 @@ const help_rows = [_]Hint{
 /// What the card must mention, checked by a test: a key that works and is not
 /// here is a key nobody will find.
 const required_in_help = [_][]const u8{
-    "Ctrl+C",    "Ctrl+R", "Tab",    "1 - 6",      "a",      "A",        "/",     "j",
-    "k",         "g",      "G",      "Ctrl+D",     "Ctrl+F", "PageDown", "Space", "Enter",
-    "l",         "o",      "c",      "r",          "u",      "s",        "d",     "#",
-    "X",         "E",      "q",      "h",          "Esc",    "H",        "i",     "drag",
-    "Shift+Tab", "Ctrl+S", "Ctrl+U", "Ctrl+E",     "n",      "e",        "Up",    "Down",
-    "Home",      "End",    "Delete", "Ctrl+click",
+    "Ctrl+C", "Ctrl+R",    "Tab",    "1 - 6",  "a",          "A",        "/",     "j",
+    "k",      "g",         "G",      "Ctrl+D", "Ctrl+F",     "PageDown", "Space", "Enter",
+    "l",      "o",         "c",      "r",      "u",          "s",        "d",     "#",
+    "m",      "X",         "E",      "q",      "h",          "Esc",      "H",     "i",
+    "drag",   "Shift+Tab", "Ctrl+S", "Ctrl+U", "Ctrl+E",     "n",        "e",     "Up",
+    "Down",   "Home",      "End",    "Delete", "Ctrl+click",
 };
 
 const account_rows_max = 8;
@@ -3077,7 +3079,7 @@ test "a named folder with more unread than fits is counted as 999" {
     defer f.deinit();
     const account = core.id.AccountId.from_int(1);
     f.state.accounts.add(account, "work", .{}, .{});
-    _ = f.state.folders.add_counted(account, "Clients", null, 1500);
+    _ = f.state.folders.add_counted(account, "Clients", "", null, 1500);
     f.state.account_filter = account;
 
     var inputs = f.inputs(100, 24);
@@ -3091,4 +3093,30 @@ test "a named folder with more unread than fits is counted as 999" {
     try testing.expect(std.mem.indexOf(u8, row, "999") != null);
     // Its name is still readable: the count does not eat the folder.
     try testing.expect(std.mem.indexOf(u8, row, "15") == null);
+}
+
+test "a server that calls the inbox INBOX still lights the folder you are in" {
+    var f = try fixture();
+    defer f.deinit();
+    const account = core.id.AccountId.from_int(1);
+    f.state.accounts.add(account, "work", .{}, .{});
+    // Gmail's shape: the name is INBOX, the flag may not say so, and the app
+    // still knows it is the Inbox -- so the row is the one the list is on.
+    _ = f.state.folders.add(account, "INBOX", .inbox);
+    _ = f.state.folders.add(account, "Clients", null);
+    f.state.account_filter = account;
+    f.state.mailbox = .inbox;
+    f.state.named = null;
+
+    var inputs = f.inputs(120, 30);
+    inputs.sidebar = true;
+    var out = Screen.init(120, 30);
+    frame(inputs, &out);
+
+    // Rows: 0 all accounts, 1 the account, 2 the rule, 3 Inbox, 4 Clients. The
+    // six keep the app's own words: "INBOX" is Inbox, like "[Gmail]/Sent Mail"
+    // is Sent.
+    try row_contains(&out, 3, "Inbox");
+    try testing.expectEqual(f.theme.selection.bg, out.cells[3][1].style.bg);
+    try testing.expect(!std.meta.eql(out.cells[4][1].style.bg, f.theme.selection.bg));
 }

@@ -27,11 +27,21 @@ pub const none: u8 = 0xff;
 /// One folder of one account: what the server calls it, and which of the six it
 /// is, when it is one.
 pub const Entry = struct {
+    /// The name the server knows this folder by, which is what a port call sends.
     name: Text(name_max) = .{},
+    /// What the sidebar shows: the name without the namespace it sits in, when
+    /// the server has one. Empty means "the name".
+    title: Text(name_max) = .{},
     /// The mailbox this folder *is*: "Sent Items" is Sent, "INBOX" is Inbox.
     canonical: ?Mailbox = null,
     /// What the server said `STATUS` reports: mail nobody has read yet.
     unread: u32 = 0,
+
+    /// The words this folder goes by on screen.
+    pub fn display(self: *const Entry) []const u8 {
+        if (!self.title.is_empty()) return self.title.slice();
+        return self.name.slice();
+    }
 };
 
 /// Identifies one named folder: whose, and which slot of its list.
@@ -68,11 +78,18 @@ pub const Table = struct {
     /// null when the account already has as many as we keep. A repeated name is
     /// the same folder, and keeps its place.
     pub fn add(self: *Table, account: AccountId, name: []const u8, canonical: ?Mailbox) ?u8 {
-        return self.add_counted(account, name, canonical, 0);
+        return self.add_counted(account, name, "", canonical, 0);
     }
 
-    /// The same, with the folder's unread count when the server gave one.
-    pub fn add_counted(self: *Table, account: AccountId, name: []const u8, canonical: ?Mailbox, unread: u32) ?u8 {
+    /// The same, with the words to show and the unread count the server gave.
+    pub fn add_counted(
+        self: *Table,
+        account: AccountId,
+        name: []const u8,
+        title: []const u8,
+        canonical: ?Mailbox,
+        unread: u32,
+    ) ?u8 {
         const position = index(account);
         const used = self.len[position];
         var slot: u8 = 0;
@@ -81,11 +98,13 @@ pub const Table = struct {
             if (!std.mem.eql(u8, entry.name.slice(), name)) continue;
             if (entry.canonical == null) entry.canonical = canonical;
             if (unread > 0) entry.unread = unread;
+            if (entry.title.is_empty() and title.len > 0) entry.title.set(title);
             return slot;
         }
         if (used == per_account_max) return null;
         self.entries[position][used] = .{ .canonical = canonical, .unread = unread };
         self.entries[position][used].name.set(name);
+        self.entries[position][used].title.set(title);
         self.len[position] = used + 1;
         return used;
     }

@@ -2087,7 +2087,7 @@ test "moving to a folder the six do not cover uses its slot, and names both ends
     defer fixture.store.deinit(testing.allocator);
     // The account has one folder of its own, holding one message.
     _ = fixture.state.folders.add(AccountId.from_int(1), "Clients", null);
-    _ = fixture.state.folders.add_counted(AccountId.from_int(1), "Clients", null, 1);
+    _ = fixture.state.folders.add_counted(AccountId.from_int(1), "Clients", "", null, 1);
     fixture.store.at(0).mailbox = .inbox;
     _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
     const effects = apply(&fixture.state, &fixture.store, .begin_move);
