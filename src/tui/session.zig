@@ -345,6 +345,9 @@ pub const Session = struct {
     pending_effects: [pending_effects_max]core.effect.Effect = undefined,
     pending_len: u8 = 0,
     refresh_scratch: []Message = undefined,
+    /// What each source is asked for, named the way that account's server names
+    /// it. A field, not a local: the worker reads it after the call returns.
+    refresh_places: [refresh_mod.max_accounts]core.mail_port.Place = @splat(.inbox),
     /// Where a folder list read from disk lands before it goes into the table.
     cached_folders: [core.folder.per_account_max]core.cache_port.Folder = @splat(.{}),
     /// Where the worker writes the folders each account listed.
@@ -725,7 +728,7 @@ pub const Session = struct {
         }
         self.refresh_job.start(
             self.refresh_sources[0..count],
-            self.place_of(self.refresh_target),
+            self.places_for(self.refresh_target, &self.refresh_places),
             self.refresh_scratch,
             &self.folder_scratch,
             false,
@@ -887,7 +890,7 @@ pub const Session = struct {
         self.refresh_key = core.text.Text(core.folder.name_max).init(self.folder_key(self.refresh_target));
         self.refresh_job.start(
             self.refresh_sources[0..count],
-            self.place_of(self.refresh_target),
+            self.places_for(self.refresh_target, &self.refresh_places),
             self.refresh_scratch,
             &self.folder_scratch,
             true,
@@ -1105,13 +1108,33 @@ pub const Session = struct {
     }
 
     fn place_of(self: *Session, want: Target) core.mail_port.Place {
+        return self.place_for(null, want);
+    }
+
+    /// The port's name for a folder, with the account's saved list to say what the
+    /// server calls it: "Sent" is "[Gmail]/Sent Mail" on one server and "Sent" on
+    /// the next, and the sidebar already knows which.
+    fn place_for(self: *Session, account: ?core.id.AccountId, want: Target) core.mail_port.Place {
         return switch (want) {
-            .mailbox => |mailbox| .{ .mailbox = mailbox },
+            .mailbox => |mailbox| blk: {
+                const id = account orelse break :blk .{ .mailbox = mailbox };
+                const name = self.state.folders.name_of(id, mailbox) orelse break :blk .{ .mailbox = mailbox };
+                break :blk .{ .mailbox = mailbox, .name = name };
+            },
             .named => |ref| if (self.state.folders.at(ref.account, ref.slot)) |entry|
                 .named(entry.name.slice())
             else
                 .{ .mailbox = self.state.mailbox },
         };
+    }
+
+    /// The folder each source in scope is asked for, named the way that account's
+    /// server names it.
+    fn places_for(self: *Session, want: Target, places: []core.mail_port.Place) []const core.mail_port.Place {
+        for (self.refresh_sources[0..self.refresh_count], 0..) |source, index| {
+            places[index] = self.place_for(source.id, want);
+        }
+        return places[0..self.refresh_count];
     }
 
     /// The key the caches keep a folder under: a canonical mailbox by its title,
@@ -1905,7 +1928,7 @@ pub const Session = struct {
             .account = account,
             .folder = folder,
             .key = core.text.Text(core.folder.name_max).init(self.folder_key(folder)),
-            .place = self.place_of(folder),
+            .place = self.place_for(account, folder),
             .id = id,
             .mail = mail,
         };

@@ -163,7 +163,10 @@ pub const ImapMail = struct {
         }
 
         if (place.mailbox) |mailbox| {
-            const name = self.serverName(mailbox) orelse return false;
+            // The caller may already know what this server calls the folder -- the
+            // sidebar's list is saved for exactly that -- and then there is nothing
+            // to discover: no refused SELECT, no LIST, no second round trip.
+            const name = if (place.name.len > 0) place.name else self.serverName(mailbox) orelse return false;
             self.exists = self.client.select_name(name) catch |err| switch (err) {
                 error.NotFound => blk: {
                     if (self.listed) return false;
@@ -772,4 +775,26 @@ test "a mailbox with more folders than the sidebar shows does not ask about all 
     try testing.expectEqual(@as(u32, 8), out[ImapMail.max_status_per_listing - 1].unread);
     try testing.expectEqual(@as(u32, 0), out[ImapMail.max_status_per_listing].unread);
     try testing.expectEqualStrings("I", out[ImapMail.max_status_per_listing].name);
+}
+
+test "a folder the caller can name is selected by that name, without a LIST" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "* SELECT \"[Gmail]/Sent Mail\"\r\n" ++
+        "* 0 EXISTS\r\n" ++
+        "a2 OK [READ-WRITE] selected\r\n" };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    // "Sent" is "[Gmail]/Sent Mail" here, and the sidebar's saved list is what
+    // says so: one SELECT, and no LIST to discover it after a refusal.
+    var messages: [1]Message = undefined;
+    try testing.expectEqual(@as(u32, 0), try imap.mail().fetch(
+        .{ .mailbox = .sent, .name = "[Gmail]/Sent Mail" },
+        &messages,
+    ));
+    try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "SELECT \"[Gmail]/Sent Mail\"") != null);
+    try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "LIST") == null);
 }

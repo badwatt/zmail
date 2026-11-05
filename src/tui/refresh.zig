@@ -30,8 +30,10 @@ pub const Job = struct {
     thread: std.Thread = undefined,
     state: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(State.done)),
     sources: []const Source = &.{},
-    /// Which folder every source is asked for: a port is one account's, so one
-    /// place is the whole answer.
+    /// Which folder each source is asked for, one per source: two accounts can
+    /// call the same folder by different names ("Sent" and "[Gmail]/Sent Mail"),
+    /// and the caller knows both.
+    places: []const port.Place = &.{},
     place: port.Place = port.Place.inbox,
     /// One slot per account: the worker writes each account's envelopes into
     /// its own region so the UI never reads a half-written mailbox.
@@ -59,14 +61,14 @@ pub const Job = struct {
     pub fn start(
         job: *Job,
         sources: []const Source,
-        place: port.Place,
+        places: []const port.Place,
         buffer: []Message,
         folders: []port.Listed,
         list_only: bool,
         list_folders: bool,
     ) void {
         job.sources = sources;
-        job.place = place;
+        job.places = places;
         job.buffer = buffer;
         job.folders = folders;
         job.list_only = list_only;
@@ -110,7 +112,8 @@ pub const Job = struct {
             if (job.list_only) continue;
 
             const slice = job.buffer[offset..];
-            const count = source.mail.fetch(job.place, slice) catch {
+            const place = if (index < job.places.len) job.places[index] else port.Place.inbox;
+            const count = source.mail.fetch(place, slice) catch {
                 job.failures += 1;
                 continue;
             };
