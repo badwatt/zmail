@@ -31,7 +31,6 @@ pub const LazyMail = struct {
     pub fn mail(self: *LazyMail) port.Mail {
         return .{ .context = self, .vtable = &.{
             .connected = connectedThunk,
-            .open = openThunk,
             .folders = foldersThunk,
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
@@ -83,11 +82,6 @@ pub const LazyMail = struct {
             const again = self.ensure() catch |second| return second;
             return call(args, again);
         };
-    }
-
-    fn openThunk(context: *anyopaque) void {
-        const self: *LazyMail = @ptrCast(@alignCast(context));
-        _ = self.ensure() catch {};
     }
 
     fn connectedThunk(context: *anyopaque) bool {
