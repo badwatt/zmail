@@ -12,10 +12,12 @@ const Flags = @import("../domain/message.zig").Flags;
 const MessageId = @import("../domain/id.zig").MessageId;
 const AccountId = @import("../domain/id.zig").AccountId;
 
-/// One folder, as the server listed it.
+/// One folder, as the server listed it, with the numbers it reports about
+/// itself when the server said them.
 pub const Listed = struct {
     name: []const u8,
     canonical: ?Mailbox = null,
+    unread: u32 = 0,
 };
 
 /// Which folder. A canonical mailbox is named by the mailbox the app knows;

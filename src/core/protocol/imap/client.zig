@@ -163,6 +163,26 @@ pub const Client = struct {
         return count;
     }
 
+    /// What a folder holds, without selecting it: `UNSEEN` and `MESSAGES`.
+    /// A server that refuses says so; the caller keeps the folder either way.
+    pub fn status(self: *Client, folder: []const u8) Error!response.Status {
+        var tag_buffer: [16]u8 = undefined;
+        const tag = self.beginCommand(&tag_buffer);
+        const bytes = command.status(self.command_slice(), tag, folder) catch return error.ProtocolError;
+        try self.send(bytes);
+
+        var found: ?response.Status = null;
+        while (true) {
+            const maybe = try self.pump(tag);
+            const untagged = maybe orelse break;
+            switch (untagged) {
+                .status => |numbers| found = numbers,
+                else => {},
+            }
+        }
+        return found orelse error.NotFound;
+    }
+
     /// Fetches envelopes for `first..last` (1-based sequence numbers) into
     /// `out`. Entries without a UID are skipped: we cannot address them later.
     pub fn fetch_envelopes(self: *Client, mailbox: Mailbox, first: u32, last: u32, out: []Message) Error!u32 {
@@ -802,4 +822,22 @@ test "message_from defaults missing fields instead of failing" {
     try testing.expectEqual(Mailbox.sent, message.mailbox);
     try testing.expectEqual(@as(i64, 0), message.timestamp_unix);
     try testing.expect(message.subject.is_empty());
+}
+
+test "status reads the folder's numbers without selecting it" {
+    var scripted: Scripted = .{ .input = "* STATUS \"Clients\" (UNSEEN 2 MESSAGES 9)\r\na1 OK done\r\n" };
+    var client = Client.init(scripted.transport());
+    defer client.close();
+
+    const numbers = try client.status("Clients");
+    try testing.expectEqual(@as(u32, 2), numbers.unseen);
+    try testing.expectEqual(@as(u32, 9), numbers.messages);
+    try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "STATUS \"Clients\"") != null);
+
+    // A server that answers without numbers is a folder whose count we do not
+    // know, which the caller turns into zero rather than into an error it shows.
+    var silent: Scripted = .{ .input = "a1 OK done\r\n" };
+    var other = Client.init(silent.transport());
+    defer other.close();
+    try testing.expectError(error.NotFound, other.status("Clients"));
 }

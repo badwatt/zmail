@@ -225,6 +225,7 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
             render_accounts(inputs, lay, out);
         },
     }
+    if (inputs.state.moving) render_move(inputs, lay, out);
     render_footer(inputs, lay, out);
 }
 
@@ -392,8 +393,16 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
                     const account = folder.account orelse continue;
                     named_title = if (inputs.state.folders.at(account, slot)) |entry| entry.name.slice() else "";
                 }
+                // The six are counted from the store, the others from what the
+                // server said about them.
+                const named_entry = if (folder.slot) |slot|
+                    (if (folder.account) |account| inputs.state.folders.at(account, slot) else null)
+                else
+                    null;
                 const unread = if (folder.mailbox) |mailbox|
                     inputs.store.unread_in(mailbox, folder.account)
+                else if (named_entry) |entry|
+                    entry.unread
                 else
                     0;
                 const style = if (active)
@@ -406,6 +415,10 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
                 out.put_text_truncated(3, row.y, title, width -| 4, style);
                 if (folder.mailbox) |mailbox| {
                     render_sidebar_count(inputs, out, row.y, width, mailbox, folder.account);
+                } else if (unread > 0) {
+                    var unread_buffer: [8]u8 = undefined;
+                    const number = if (unread > 999) "999" else std.fmt.bufPrint(&unread_buffer, "{d}", .{unread}) catch "";
+                    put_right(out, width -| 2, row.y, number, inputs.theme.accent);
                 }
             },
         }
@@ -436,6 +449,40 @@ fn render_sidebar_count(
     var buffer: [8]u8 = undefined;
     const count = if (unread > 999) "999" else std.fmt.bufPrint(&buffer, "{d}", .{unread}) catch "";
     put_right(out, width -| 2, y, count, inputs.theme.accent);
+}
+
+/// The "move to" chooser: the account's folders, the selected one marked, over
+/// the list it is about.
+fn render_move(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    const message = inputs.state.selected_const(inputs.store) orelse return;
+    var rows: [16]core.state.MoveRow = undefined;
+
+    const count = inputs.state.move_rows(message, &rows);
+    if (count == 0) return;
+
+    const visible: u16 = @intCast(@min(count, 12));
+    const card_width: u16 = @min(44, lay.columns -| 4);
+    // Title on the top border, one row per folder, the hint, the bottom border.
+    const card_height: u16 = visible + 3;
+    const rect = Rect{
+        .x = (lay.columns -| card_width) / 2,
+        .y = (lay.rows -| card_height) / 2,
+        .width = card_width,
+        .height = card_height,
+    };
+    out.card(rect, inputs.theme.text, inputs.theme.border);
+    _ = out.put_text(rect.x + 2, rect.y, " Move to ", card_width -| 4, inputs.theme.accent.with_bold());
+
+    const cursor = @min(@as(usize, inputs.state.move_cursor), count - 1);
+    for (rows[0..visible], 0..) |row, index| {
+        const y = rect.y + 1 + @as(u16, @intCast(index));
+        const style = if (index == cursor) inputs.theme.accent.with_bold() else inputs.theme.text;
+        if (index == cursor) {
+            out.fill_rect(.{ .x = rect.x + 1, .y = y, .width = card_width -| 2, .height = 1 }, ' ', inputs.theme.selection);
+        }
+        out.put_text_truncated(rect.x + 2, y, row.title, card_width -| 4, style);
+    }
+    _ = out.put_text(rect.x + 2, rect.y + 1 + visible, "Enter move · Esc cancel", card_width -| 4, inputs.theme.dim);
 }
 
 fn render_tabs(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
@@ -2992,4 +3039,56 @@ test "the sidebar draws the server's own name for a folder the six do not cover"
     // The active folder is the named one, so its row carries the selection.
     try testing.expectEqual(f.theme.selection.bg, out.cells[4][1].style.bg);
     try testing.expect(!std.meta.eql(out.cells[3][1].style.bg, f.theme.selection.bg));
+}
+
+test "the move chooser lists the account's folders over the list" {
+    var f = try fixture();
+    defer f.deinit();
+    const account = core.id.AccountId.from_int(1);
+    f.state.accounts.add(account, "work", .{}, .{});
+    _ = f.state.folders.add(account, "Inbox", .inbox);
+    _ = f.state.folders.add(account, "Clients", null);
+    // The first message is in Inbox, so the chooser offers Clients.
+    f.store.at(0).account = account;
+    f.state.moving = true;
+    f.state.move_cursor = 1;
+
+    var inputs = f.inputs(100, 24);
+    inputs.sidebar = true;
+    var out = Screen.init(100, 24);
+    frame(inputs, &out);
+
+    try row_contains(&out, 0, "Alice Rivera");
+    // The card says what it is, and where the cursor is.
+    var found = false;
+    var line: u16 = 0;
+    var buffer: [512]u8 = undefined;
+    while (line < out.rows) : (line += 1) {
+        const text = out.row_text(line, &buffer);
+        if (std.mem.indexOf(u8, text, "Move to") != null) found = true;
+        if (std.mem.indexOf(u8, text, "Enter move") != null) found = true;
+    }
+    try testing.expect(found);
+    try testing.expect(std.mem.indexOf(u8, out.row_text(0, &buffer), "Inbox") == null);
+}
+
+test "a named folder with more unread than fits is counted as 999" {
+    var f = try fixture();
+    defer f.deinit();
+    const account = core.id.AccountId.from_int(1);
+    f.state.accounts.add(account, "work", .{}, .{});
+    _ = f.state.folders.add_counted(account, "Clients", null, 1500);
+    f.state.account_filter = account;
+
+    var inputs = f.inputs(100, 24);
+    inputs.sidebar = true;
+    var out = Screen.init(100, 24);
+    frame(inputs, &out);
+
+    var buffer: [512]u8 = undefined;
+    const row = out.row_text(3, &buffer);
+    try testing.expect(std.mem.indexOf(u8, row, "Clients") != null);
+    try testing.expect(std.mem.indexOf(u8, row, "999") != null);
+    // Its name is still readable: the count does not eat the folder.
+    try testing.expect(std.mem.indexOf(u8, row, "15") == null);
 }

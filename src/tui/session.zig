@@ -26,6 +26,7 @@ const net = @import("net");
 const wrap = @import("wrap.zig");
 
 const Mailbox = core.mailbox.Mailbox;
+const MoveTarget = core.state.MoveTarget;
 const Message = core.message.Message;
 const MessageId = core.id.MessageId;
 const Screen = screen_mod.Screen;
@@ -767,7 +768,7 @@ pub const Session = struct {
         if (count == 0) return;
         self.state.folders.reset(account);
         for (self.folder_scratch[offset..][0..count]) |listed| {
-            _ = self.state.folders.add(account, listed.name, listed.canonical);
+            _ = self.state.folders.add_counted(account, listed.name, listed.canonical, listed.unread);
         }
     }
 
@@ -1627,7 +1628,7 @@ pub const Session = struct {
         const timer = self.begin_loading();
         switch (effect) {
             .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags),
-            .move_message => |args| self.move_message(args.account, args.id, args.to),
+            .move_message => |args| self.move_message(args.account, args.id, args.from, args.to),
             .delete_message => |args| self.delete_message(args.account, args.mailbox, args.id),
             .empty_mailbox => |args| self.empty_mailbox(args.account, args.mailbox),
             .remove_account => |args| self.remove_account(args.account),
@@ -2326,10 +2327,22 @@ pub const Session = struct {
         };
     }
 
-    fn move_message(self: *Session, account: core.id.AccountId, id: MessageId, to: Mailbox) void {
+    fn move_message(self: *Session, account: core.id.AccountId, id: MessageId, from: MoveTarget, to: MoveTarget) void {
         const mail = self.source_for(account) orelse return;
-        mail.move_message(self.place_of(self.screen_target()), id, .{ .mailbox = to }) catch {
+        mail.move_message(self.place_named(from), id, self.place_named(to)) catch {
             self.state.set_alert("Could not move the message", .{});
+        };
+    }
+
+    /// The port's name for a move target: a canonical mailbox, or the server's
+    /// name of one of the account's own folders.
+    fn place_named(self: *Session, target: MoveTarget) core.mail_port.Place {
+        return switch (target) {
+            .mailbox => |mailbox| .{ .mailbox = mailbox },
+            .named => |ref| if (self.state.folders.at(ref.account, ref.slot)) |entry|
+                .named(entry.name.slice())
+            else
+                .{ .mailbox = .inbox },
         };
     }
 
@@ -6757,4 +6770,17 @@ test "a folder the six do not cover keeps its own mail, and a canonical one jump
     rig.session.start_refresh_for_test();
     rig.session.settle_refresh_for_test();
     try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Clients") != null);
+}
+
+test "a move target whose folder is gone falls back to a mailbox" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    try testing.expectEqual(
+        core.mail_port.Place.inbox,
+        rig.session.place_named(.{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 3 } }),
+    );
+    try testing.expectEqual(core.mail_port.Place.sent, rig.session.place_named(.{ .mailbox = .sent }));
 }

@@ -170,6 +170,7 @@ const entries = [_]Entry{
         .size_bytes = 41_200,
         .account = 2,
         .flagged = true,
+        .unread = true,
     },
     .{
         .id = 23,

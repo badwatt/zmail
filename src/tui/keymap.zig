@@ -122,6 +122,7 @@ fn char_command(codepoint: u21, view: View) ?Command {
         '#' => .delete_selected,
         '/' => .begin_search,
         '?' => .toggle_help,
+        'm' => .begin_move,
         'a' => .cycle_account,
         'A' => .open_accounts,
         // Folders are a column in the sidebar, so they are walked with the same
@@ -327,6 +328,7 @@ test "actions: unread, flag, archive, delete, search, help, refresh" {
         .{ .key = .{ .char = '?' }, .expected = .toggle_help },
         .{ .key = .{ .ctrl = 'r' }, .expected = .refresh },
         .{ .key = .{ .char = 'a' }, .expected = .cycle_account },
+        .{ .key = .{ .char = 'm' }, .expected = .begin_move },
     };
     for (cases) |case| try check(case);
 }

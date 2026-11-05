@@ -48,6 +48,8 @@ pub const Command = union(enum) {
     /// the top level.
     dismiss,
     next_mailbox,
+    /// Open the chooser that puts the selected message in another folder.
+    begin_move,
     previous_mailbox,
     select_mailbox: Mailbox,
     toggle_unread,

@@ -171,7 +171,15 @@ pub const ImapMail = struct {
         var index: u32 = 0;
         while (index < count) : (index += 1) {
             const entry = &self.entries[index];
-            out[index] = .{ .name = entry.name.slice(), .canonical = entry.mailbox };
+            // The numbers come from STATUS, one round trip per folder, and a
+            // folder whose count failed is still a folder: zero unread, not an
+            // error that loses the list.
+            const numbers = self.client.status(entry.name.slice()) catch response_mod.Status{};
+            out[index] = .{
+                .name = entry.name.slice(),
+                .canonical = entry.mailbox,
+                .unread = numbers.unseen,
+            };
         }
         return count;
     }

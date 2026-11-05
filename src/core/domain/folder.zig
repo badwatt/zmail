@@ -30,6 +30,8 @@ pub const Entry = struct {
     name: Text(name_max) = .{},
     /// The mailbox this folder *is*: "Sent Items" is Sent, "INBOX" is Inbox.
     canonical: ?Mailbox = null,
+    /// What the server said `STATUS` reports: mail nobody has read yet.
+    unread: u32 = 0,
 };
 
 /// Identifies one named folder: whose, and which slot of its list.
@@ -66,6 +68,11 @@ pub const Table = struct {
     /// null when the account already has as many as we keep. A repeated name is
     /// the same folder, and keeps its place.
     pub fn add(self: *Table, account: AccountId, name: []const u8, canonical: ?Mailbox) ?u8 {
+        return self.add_counted(account, name, canonical, 0);
+    }
+
+    /// The same, with the folder's unread count when the server gave one.
+    pub fn add_counted(self: *Table, account: AccountId, name: []const u8, canonical: ?Mailbox, unread: u32) ?u8 {
         const position = index(account);
         const used = self.len[position];
         var slot: u8 = 0;
@@ -73,10 +80,11 @@ pub const Table = struct {
             const entry = &self.entries[position][slot];
             if (!std.mem.eql(u8, entry.name.slice(), name)) continue;
             if (entry.canonical == null) entry.canonical = canonical;
+            if (unread > 0) entry.unread = unread;
             return slot;
         }
         if (used == per_account_max) return null;
-        self.entries[position][used] = .{ .canonical = canonical };
+        self.entries[position][used] = .{ .canonical = canonical, .unread = unread };
         self.entries[position][used].name.set(name);
         self.len[position] = used + 1;
         return used;

@@ -108,6 +108,7 @@ pub const MemoryMail = struct {
             for (Mailbox.all) |mailbox| {
                 if (written == out.len) break;
                 out[written] = .{ .name = mailbox.title(), .canonical = mailbox };
+                out[written].unread = self.unread_in(.{ .mailbox = mailbox });
                 written += 1;
             }
             return written;
@@ -116,7 +117,26 @@ pub const MemoryMail = struct {
         var index: u32 = 0;
         while (index < count) : (index += 1) {
             const listed = &self.folders[index];
-            out[index] = .{ .name = listed.name.slice(), .canonical = listed.canonical };
+            const place: port.Place = if (listed.canonical) |mailbox|
+                .{ .mailbox = mailbox }
+            else
+                .named(listed.name.slice());
+            out[index] = .{
+                .name = listed.name.slice(),
+                .canonical = listed.canonical,
+                .unread = self.unread_in(place),
+            };
+        }
+        return count;
+    }
+
+    /// How many unread messages this fake server holds in one folder: what a
+    /// real one answers to `STATUS`.
+    fn unread_in(self: *MemoryMail, place: port.Place) u32 {
+        var count: u32 = 0;
+        for (self.messages[0..self.len]) |*message| {
+            if (!self.in_place(message, place)) continue;
+            if (message.is_unread()) count += 1;
         }
         return count;
     }

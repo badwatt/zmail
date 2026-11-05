@@ -162,6 +162,37 @@ pub const Accounts = struct {
 };
 pub const Mode = enum { normal, search, help_search };
 
+/// Where mail can be put: one of the six, or one of the account's own folders.
+pub const MoveTarget = union(enum) {
+    mailbox: Mailbox,
+    named: folder.Ref,
+};
+
+/// The folder a message is in, as a move target.
+pub fn folder_of(message: *const Message) MoveTarget {
+    return if (message.named == folder.none)
+        .{ .mailbox = message.mailbox }
+    else
+        .{ .named = .{ .account = message.account, .slot = message.named } };
+}
+
+/// Whether two targets name the same folder.
+pub fn same_folder(first: MoveTarget, second: MoveTarget) bool {
+    if (first != std.meta.activeTag(second)) return false;
+    return switch (first) {
+        .mailbox => |mailbox| mailbox == second.mailbox,
+        .named => |ref| ref.eql(second.named),
+    };
+}
+
+/// One row of the "move to" chooser.
+pub const MoveRow = struct {
+    target: MoveTarget,
+    title: []const u8,
+    /// The folder the message is already in: moving there is not moving.
+    current: bool = false,
+};
+
 pub const State = struct {
     view: View = .list,
     mode: Mode = .normal,
@@ -214,6 +245,11 @@ pub const State = struct {
     account_filter: ?AccountId = null,
     compose: Compose = .{},
 
+    /// Choosing where the selected message goes: the chooser is open, and this
+    /// is the row under its cursor.
+    moving: bool = false,
+    move_cursor: u8 = 0,
+
     /// True while the first network load runs: the frame becomes a splash.
     booting: bool = false,
     /// True while a background refresh runs: the footer shows a spinner.
@@ -258,6 +294,40 @@ pub const State = struct {
     /// The folder on screen, canonical or named.
     pub fn folder_on_screen(self: *const State) ?folder.Ref {
         return self.named;
+    }
+
+    /// The folders a message can be moved to, in the order the chooser shows
+    /// them: the account's own list when the server gave one, the six the app
+    /// knows when it did not. The folder the message is already in is not one of
+    /// them -- moving there is not moving -- and the chooser and the command that
+    /// applies it walk this same list, so the row under the cursor is the row that
+    /// is used.
+    pub fn move_rows(self: *const State, message: *const Message, rows: []MoveRow) usize {
+        const current = folder_of(message);
+        var count: usize = 0;
+
+        if (!self.folders.is_empty(message.account)) {
+            var slot: u8 = 0;
+            while (slot < self.folders.count(message.account) and count < rows.len) : (slot += 1) {
+                const entry = self.folders.at(message.account, slot).?;
+                const target: MoveTarget = if (entry.canonical) |mailbox|
+                    .{ .mailbox = mailbox }
+                else
+                    .{ .named = .{ .account = message.account, .slot = slot } };
+                if (same_folder(current, target)) continue;
+                rows[count] = .{ .target = target, .title = entry.name.slice() };
+                count += 1;
+            }
+            return count;
+        }
+        for (Mailbox.all) |mailbox| {
+            if (count == rows.len) break;
+            const target = MoveTarget{ .mailbox = mailbox };
+            if (same_folder(current, target)) continue;
+            rows[count] = .{ .target = target, .title = mailbox.title() };
+            count += 1;
+        }
+        return count;
     }
 
     pub fn rebuild(self: *State, store: *const Store) void {

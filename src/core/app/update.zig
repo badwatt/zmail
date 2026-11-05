@@ -20,6 +20,10 @@ const Viewport = @import("command.zig").Viewport;
 const Effect = @import("effect.zig").Effect;
 const Effects = @import("effect.zig").Effects;
 const State = @import("state.zig").State;
+const MoveTarget = @import("state.zig").MoveTarget;
+const folder_of = @import("state.zig").folder_of;
+const MoveRow = @import("state.zig").MoveRow;
+const folder = @import("../domain/folder.zig");
 const View = @import("state.zig").View;
 
 pub fn apply(state: *State, store: *Store, command: Command) Effects {
@@ -34,6 +38,19 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
     // A confirmation only survives the command that asked for it.
     if (command != .empty_trash) state.pending_empty = false;
 
+    // The chooser takes Enter and Esc, and gives them back when it closes.
+    if (state.moving) switch (command) {
+        .open_selected => {
+            confirm_move(state, store, &effects);
+            return effects;
+        },
+        .dismiss => {
+            cancel_move(state);
+            return effects;
+        },
+        else => {},
+    };
+
     switch (command) {
         .noop => {},
         .quit => state.quit = true,
@@ -41,6 +58,7 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .open_selected => apply_open(state, store, &effects),
         .dismiss => apply_dismiss(state, store),
         .next_mailbox => switch_mailbox(state, store, state.mailbox.next(), &effects),
+        .begin_move => begin_move(state, store),
         .previous_mailbox => switch_mailbox(state, store, state.mailbox.previous(), &effects),
         .select_mailbox => |mailbox| switch_mailbox(state, store, mailbox, &effects),
         .toggle_unread => toggle_unread(state, store, &effects),
@@ -137,6 +155,9 @@ fn cycle_account(state: *State, store: *Store) void {
 }
 
 fn apply_move(state: *State, move: Move) void {
+    // The chooser owns the movement keys while it is open: the list under it
+    // does not move.
+    if (state.moving) return move_chooser(state, move);
     switch (state.view) {
         .list => move_cursor(state, move),
         .reader => scroll_reader(state, move),
@@ -440,6 +461,75 @@ fn empty_trash(state: *State, store: *Store, effects: *Effects) void {
     state.set_status("Trash emptied", .{});
 }
 
+fn begin_move(state: *State, store: *Store) void {
+    const message = state.selected(store) orelse {
+        state.set_status("No message selected", .{});
+        return;
+    };
+    var rows: [8]MoveRow = undefined;
+    if (state.move_rows(message, &rows) == 0) {
+        state.set_status("No folders to move to", .{});
+        return;
+    }
+    state.moving = true;
+    state.move_cursor = 0;
+    state.set_status("Move to: j/k choose, Enter moves, Esc cancels", .{});
+}
+
+fn move_chooser(state: *State, move: Move) void {
+    switch (move) {
+        .down => state.move_cursor +|= 1,
+        .up => state.move_cursor -|= 1,
+        .top => state.move_cursor = 0,
+        .bottom => state.move_cursor = 15,
+        else => {},
+    }
+}
+
+fn cancel_move(state: *State) void {
+    state.moving = false;
+    state.set_status("Move cancelled", .{});
+}
+
+fn confirm_move(state: *State, store: *Store, effects: *Effects) void {
+    const message = state.selected(store) orelse {
+        state.moving = false;
+        state.set_status("No message selected", .{});
+        return;
+    };
+    var rows: [16]MoveRow = undefined;
+    const count = state.move_rows(message, &rows);
+    if (count == 0) {
+        state.moving = false;
+        state.set_status("No folders to move to", .{});
+        return;
+    }
+    const index = @min(@as(usize, state.move_cursor), count - 1);
+    const target = rows[index].target;
+
+    const from = folder_of(message);
+    switch (target) {
+        .mailbox => |mailbox| {
+            message.mailbox = mailbox;
+            message.named = folder.none;
+        },
+        .named => |ref| message.named = ref.slot,
+    }
+    effects.add(.{ .move_message = .{
+        .account = message.account,
+        .id = message.id,
+        .from = from,
+        .to = target,
+    } });
+    state.moving = false;
+    if (state.view == .reader) {
+        state.view = .list;
+        state.reader_scroll = 0;
+    }
+    state.rebuild(store);
+    state.set_status("Moved to {s}", .{rows[index].title});
+}
+
 fn move_selected(state: *State, store: *Store, target: Mailbox, status_text: []const u8, effects: *Effects) void {
     const message = state.selected(store) orelse {
         state.set_status("No message selected", .{});
@@ -451,8 +541,15 @@ fn move_selected(state: *State, store: *Store, target: Mailbox, status_text: []c
         return;
     }
 
+    const from = folder_of(message);
     message.mailbox = target;
-    effects.add(.{ .move_message = .{ .account = message.account, .id = message.id, .to = target } });
+    message.named = folder.none;
+    effects.add(.{ .move_message = .{
+        .account = message.account,
+        .id = message.id,
+        .from = from,
+        .to = .{ .mailbox = target },
+    } });
     if (state.view == .reader) {
         state.view = .list;
         state.reader_scroll = 0;
@@ -1346,7 +1443,7 @@ test "archive moves the message out of the list and syncs the server" {
     try testing.expectEqual(Mailbox.archive, fixture.store.at(0).mailbox);
     try testing.expectEqual(@as(u32, 2), fixture.state.visible_len);
     try testing.expectEqualStrings("Archived", fixture.state.status.slice());
-    try expect_effects(&effects, &.{.{ .move_message = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .to = .archive } }});
+    try expect_effects(&effects, &.{.{ .move_message = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .from = .{ .mailbox = .inbox }, .to = .{ .mailbox = .archive } } }});
 }
 
 test "archive from the reader returns to the list" {
@@ -1983,4 +2080,153 @@ test "a user command clears the status, a viewport update does not" {
 
     _ = apply(&fixture.state, &fixture.store, .{ .move = .down });
     try testing.expect(fixture.state.status.is_empty());
+}
+
+test "moving to a folder the six do not cover uses its slot, and names both ends" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    // The account has one folder of its own, holding one message.
+    _ = fixture.state.folders.add(AccountId.from_int(1), "Clients", null);
+    _ = fixture.state.folders.add_counted(AccountId.from_int(1), "Clients", null, 1);
+    fixture.store.at(0).mailbox = .inbox;
+    _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
+    const effects = apply(&fixture.state, &fixture.store, .begin_move);
+    try testing.expect(fixture.state.moving);
+    try testing.expectEqual(@as(usize, 0), effects.len);
+
+    const moved = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expect(!fixture.state.moving);
+    try testing.expectEqual(@as(u8, 0), fixture.store.at(0).named);
+    // The two ends of the move are both named: where it was, and where it goes.
+    try expect_effects(&moved, &.{.{ .move_message = .{
+        .account = AccountId.from_int(1),
+        .id = MessageId.from_int(1),
+        .from = .{ .mailbox = .inbox },
+        .to = .{ .named = .{ .account = AccountId.from_int(1), .slot = 0 } },
+    } }});
+}
+
+test "the chooser leaves out the folder the message is already in" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
+
+    var rows: [16]MoveRow = undefined;
+    const count = fixture.state.move_rows(fixture.store.at(0), &rows);
+    // Five of the six: Inbox is where it is.
+    try testing.expectEqual(@as(usize, 5), count);
+    for (rows[0..count]) |row| {
+        try testing.expect(row.target != .mailbox or row.target.mailbox != .inbox);
+    }
+
+    // Esc closes without moving anything.
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    try testing.expect(fixture.state.moving);
+    const none = apply(&fixture.state, &fixture.store, .dismiss);
+    try testing.expect(!fixture.state.moving);
+    try testing.expectEqual(@as(usize, 0), none.len);
+    try testing.expectEqual(Mailbox.inbox, fixture.store.at(0).mailbox);
+}
+
+test "moving a message that is in one of the account's folders names that folder" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = fixture.state.folders.add(AccountId.from_int(1), "Clients", null);
+    _ = fixture.state.folders.add(AccountId.from_int(1), "Sent", .sent);
+    fixture.store.at(0).named = 0;
+    fixture.state.select_named(&fixture.store, .{ .account = AccountId.from_int(1), .slot = 0 });
+    try testing.expectEqual(@as(u32, 1), fixture.state.visible_len);
+
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    const moved = apply(&fixture.state, &fixture.store, .open_selected);
+    // It leaves the named folder for the first one the chooser offers, and the
+    // effect says where it came from -- the folder of its slot, not the mailbox.
+    try testing.expectEqual(Mailbox.sent, fixture.store.at(0).mailbox);
+    try testing.expectEqual(
+        MoveTarget{ .named = .{ .account = AccountId.from_int(1), .slot = 0 } },
+        moved.slice()[0].move_message.from,
+    );
+}
+
+test "the chooser refuses to open when there is nowhere to go" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    // No message selected: nothing to move.
+    fixture.state.visible_len = 0;
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    try testing.expect(!fixture.state.moving);
+    try testing.expectEqualStrings("No message selected", fixture.state.status.slice());
+
+    // One folder, and the message is already in it: no chooser either.
+    var store = try Store.init(testing.allocator, 2);
+    defer store.deinit(testing.allocator);
+    var state: State = .{ .list_rows = 4 };
+    var lonely = message_with(1, "only", .inbox, 100);
+    lonely.named = 0;
+    try store.insert(&lonely);
+    _ = state.folders.add(AccountId.from_int(1), "Clients", null);
+    state.select_named(&store, .{ .account = AccountId.from_int(1), .slot = 0 });
+    _ = apply(&state, &store, .begin_move);
+    try testing.expect(!state.moving);
+    try testing.expectEqualStrings("No folders to move to", state.status.slice());
+
+    // Enter with nothing to choose from closes it and moves nothing.
+    state.moving = true;
+    const effects = apply(&state, &store, .open_selected);
+    try testing.expect(!state.moving);
+    try testing.expectEqual(@as(usize, 0), effects.len);
+}
+
+test "the chooser walks with j/k, Home and End, and stays in range" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    try testing.expect(fixture.state.moving);
+
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .down });
+    try testing.expectEqual(@as(u8, 1), fixture.state.move_cursor);
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .up });
+    try testing.expectEqual(@as(u8, 0), fixture.state.move_cursor);
+    // Up at the top stays at the top.
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .up });
+    try testing.expectEqual(@as(u8, 0), fixture.state.move_cursor);
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .bottom });
+    try testing.expect(fixture.state.move_cursor > 0);
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .top });
+    try testing.expectEqual(@as(u8, 0), fixture.state.move_cursor);
+    // A page movement does nothing to the chooser.
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .page_down });
+    try testing.expectEqual(@as(u8, 0), fixture.state.move_cursor);
+
+    // Confirm past the end uses the last row, not a row that is not there.
+    fixture.state.move_cursor = 15;
+    const effects = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expectEqual(@as(usize, 1), effects.len);
+}
+
+test "confirming a move with no message selected closes the chooser" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.moving = true;
+    fixture.state.visible_len = 0;
+    const effects = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expect(!fixture.state.moving);
+    try testing.expectEqual(@as(usize, 0), effects.len);
+    try testing.expectEqualStrings("No message selected", fixture.state.status.slice());
+}
+
+test "moving from the reader goes back to the list it just changed" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
+    _ = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expectEqual(View.reader, fixture.state.view);
+
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    const effects = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expectEqual(View.list, fixture.state.view);
+    try testing.expectEqual(@as(u32, 0), fixture.state.reader_scroll);
+    try testing.expectEqual(@as(usize, 1), effects.len);
 }

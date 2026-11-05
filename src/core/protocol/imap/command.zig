@@ -129,6 +129,13 @@ pub fn list(buffer: []u8, tag: []const u8) Error![]const u8 {
     return render.finish();
 }
 
+pub fn status(buffer: []u8, tag: []const u8, folder: []const u8) Error![]const u8 {
+    var render = Render.begin(buffer, tag, "STATUS ");
+    render.astring(folder);
+    render.text(" (UNSEEN MESSAGES)");
+    return render.finish();
+}
+
 pub fn select(buffer: []u8, tag: []const u8, mailbox: []const u8) Error![]const u8 {
     var render = Render.begin(buffer, tag, "SELECT ");
     render.astring(mailbox);
@@ -465,4 +472,14 @@ test "quoted output is a valid single line for every printable input" {
     try testing.expect(std.mem.indexOf(u8, command, "\r\n") == command.len - 2);
     assert(command[command.len - 2] == '\r');
     assert(command[command.len - 1] == '\n');
+}
+
+test "STATUS quotes the folder and asks only for what the sidebar needs" {
+    var buffer: [128]u8 = undefined;
+    const bytes = try status(&buffer, "a1", "Clients");
+    try testing.expectEqualStrings("a1 STATUS \"Clients\" (UNSEEN MESSAGES)\r\n", bytes);
+
+    // A name with a quote in it is escaped, not a second argument.
+    const quoted = try status(&buffer, "a2", "Odd \"name\"");
+    try testing.expect(std.mem.indexOf(u8, quoted, "Odd \\\"name\\\"") != null);
 }

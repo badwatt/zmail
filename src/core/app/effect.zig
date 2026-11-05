@@ -10,13 +10,16 @@ const assert = std.debug.assert;
 const limits = @import("../limits.zig");
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
 const MessageId = @import("../domain/id.zig").MessageId;
+const MoveTarget = @import("state.zig").MoveTarget;
 const Flags = @import("../domain/message.zig").Flags;
 const AccountId = @import("../domain/id.zig").AccountId;
 const Outgoing = @import("../domain/outgoing.zig").Outgoing;
 
 pub const Effect = union(enum) {
     sync_flags: struct { account: AccountId, id: MessageId, flags: Flags },
-    move_message: struct { account: AccountId, id: MessageId, to: Mailbox },
+    /// Where a message goes, and where it was: a move needs both, because the
+    /// message may not be in the folder on screen.
+    move_message: struct { account: AccountId, id: MessageId, from: MoveTarget, to: MoveTarget },
     fetch_body: struct { account: AccountId, mailbox: Mailbox, id: MessageId },
     /// Null account means every account (the unified view).
     refresh: struct { account: ?AccountId, mailbox: Mailbox, force: bool = false },
