@@ -132,7 +132,7 @@ fn char_command(codepoint: u21, view: View) ?Command {
         // letters that walk the rows, shifted one level down.
         'J' => .next_folder,
         'K' => .previous_folder,
-        '1'...'6' => .{ .select_mailbox = Mailbox.from_index(@intCast(codepoint - '1')) },
+        '1'...'9' => .{ .select_folder = @intCast(codepoint - '1') },
         else => null,
     };
 }
@@ -279,13 +279,14 @@ test "mailbox switching" {
     const cases = [_]Case{
         .{ .key = .{ .char = 'J' }, .expected = .next_folder },
         .{ .key = .{ .char = 'K' }, .expected = .previous_folder },
-        .{ .key = .{ .char = '1' }, .expected = .{ .select_mailbox = .inbox } },
-        .{ .key = .{ .char = '2' }, .expected = .{ .select_mailbox = .sent } },
-        .{ .key = .{ .char = '3' }, .expected = .{ .select_mailbox = .drafts } },
-        .{ .key = .{ .char = '4' }, .expected = .{ .select_mailbox = .archive } },
-        .{ .key = .{ .char = '5' }, .expected = .{ .select_mailbox = .trash } },
-        .{ .key = .{ .char = '6' }, .expected = .{ .select_mailbox = .junk } },
-        .{ .key = .{ .char = '7' }, .expected = null },
+        .{ .key = .{ .char = '1' }, .expected = .{ .select_folder = 0 } },
+        .{ .key = .{ .char = '2' }, .expected = .{ .select_folder = 1 } },
+        .{ .key = .{ .char = '3' }, .expected = .{ .select_folder = 2 } },
+        .{ .key = .{ .char = '4' }, .expected = .{ .select_folder = 3 } },
+        .{ .key = .{ .char = '5' }, .expected = .{ .select_folder = 4 } },
+        .{ .key = .{ .char = '6' }, .expected = .{ .select_folder = 5 } },
+        // The sidebar can show more than six folders on a real server.
+        .{ .key = .{ .char = '9' }, .expected = .{ .select_folder = 8 } },
         .{ .key = .{ .char = '0' }, .expected = null },
     };
     for (cases) |case| try check(case);

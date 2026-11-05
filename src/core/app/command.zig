@@ -52,6 +52,9 @@ pub const Command = union(enum) {
     begin_move,
     previous_folder,
     select_mailbox: Mailbox,
+    /// The Nth folder the sidebar shows (0-based). The sidebar's order is the
+    /// server's, so this is the only numbering a reader can see.
+    select_folder: u8,
     toggle_unread,
     toggle_flag,
     archive_selected,

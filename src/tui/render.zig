@@ -1202,7 +1202,7 @@ const help_rows = [_]Hint{
     .{ .keys = "/", .action = "search the list" },
     .{ .keys = "Ctrl+R", .action = "refresh from the server" },
     .{ .keys = "J / K", .action = "next / previous folder" },
-    .{ .keys = "1 - 6", .action = "the six mailboxes, in order" },
+    .{ .keys = "1 - 9", .action = "the folder in that position, as the sidebar lists it" },
     .{ .keys = "a / A", .action = "next account / accounts overlay" },
     .{ .keys = "", .action = "-- the list" },
     .{ .keys = "Enter / l / →", .action = "open the message" },
@@ -1250,7 +1250,7 @@ const help_rows = [_]Hint{
 /// What the card must mention, checked by a test: a key that works and is not
 /// here is a key nobody will find.
 const required_in_help = [_][]const u8{
-    "Ctrl+C", "Ctrl+R",    "Tab",    "1 - 6",  "a",          "A",        "/",     "j",
+    "Ctrl+C", "Ctrl+R",    "Tab",    "1 - 9",  "a",          "A",        "/",     "j",
     "k",      "g",         "G",      "Ctrl+D", "Ctrl+F",     "PageDown", "Space", "Enter",
     "l",      "o",         "c",      "r",      "u",          "s",        "d",     "#",
     "m",      "X",         "E",      "q",      "h",          "Esc",      "H",     "i",

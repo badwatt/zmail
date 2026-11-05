@@ -62,6 +62,7 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
         .begin_move => begin_move(state, store),
         .previous_folder => step_folder(state, store, &effects, false),
         .select_mailbox => |mailbox| switch_mailbox(state, store, mailbox, &effects),
+        .select_folder => |index| select_folder(state, store, &effects, index),
         .toggle_unread => toggle_unread(state, store, &effects),
         .toggle_flag => toggle_flag(state, store, &effects),
         .archive_selected => move_selected(state, store, .archive, "Archived", &effects),
@@ -153,6 +154,15 @@ fn cycle_account(state: *State, store: *Store) void {
     state.cursor = 0;
     state.offset = 0;
     state.rebuild(store);
+}
+
+/// The Nth folder the sidebar shows, by the number the reader pressed: the
+/// sidebar's order is the server's, and it is the only numbering on screen.
+fn select_folder(state: *State, store: *Store, effects: *Effects, index: u8) void {
+    var rows: [32]MoveRow = undefined;
+    const count = state.folder_rows(&rows);
+    if (index >= count) return;
+    go_to(state, store, effects, rows[index].target);
 }
 
 /// The folder on screen, as a target.
@@ -2318,4 +2328,34 @@ test "stepping onto the folder you are already in is not a step" {
     const effects = apply(&fixture.state, &fixture.store, .next_folder);
     try testing.expectEqual(@as(usize, 0), effects.len);
     try testing.expectEqual(folder.Ref{ .account = account, .slot = 0 }, fixture.state.named.?);
+}
+
+test "the number keys follow the sidebar, not the order of the six in the code" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    const account = AccountId.from_int(1);
+    // A server whose list is its own: Inbox, Drafts, Destacados, Sent, ...
+    _ = fixture.state.folders.add(account, "INBOX", .inbox);
+    _ = fixture.state.folders.add(account, "Drafts", .drafts);
+    _ = fixture.state.folders.add(account, "Destacados", null);
+    _ = fixture.state.folders.add(account, "Sent", .sent);
+    fixture.state.account_filter = account;
+    fixture.state.rebuild(&fixture.store);
+
+    // 2 is the second row on screen: Drafts, not Sent.
+    _ = apply(&fixture.state, &fixture.store, .{ .select_folder = 1 });
+    try testing.expectEqual(Mailbox.drafts, fixture.state.mailbox);
+
+    // 4 is Sent, because that is where the sidebar put it.
+    _ = apply(&fixture.state, &fixture.store, .{ .select_folder = 3 });
+    try testing.expectEqual(Mailbox.sent, fixture.state.mailbox);
+
+    // 3 is a folder of the account's own.
+    _ = apply(&fixture.state, &fixture.store, .{ .select_folder = 2 });
+    try testing.expectEqualStrings("Destacados", fixture.state.folders.at(account, fixture.state.named.?.slot).?.display());
+
+    // Past the end: nothing happens, and nothing breaks.
+    const before = fixture.state.mailbox;
+    _ = apply(&fixture.state, &fixture.store, .{ .select_folder = 20 });
+    try testing.expectEqual(before, fixture.state.mailbox);
 }

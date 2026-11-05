@@ -110,7 +110,7 @@ them.
 | `Ctrl+R` | refresh from the server |
 | `/` | search the list |
 | `J` / `K` | next / previous folder, in the order the sidebar shows them |
-| `1`–`6` | Inbox, Sent, Drafts, Archive, Trash, Junk |
+| `1`–`9` | the folder in that position in the sidebar |
 | `a` / `A` | next account scope / the accounts overlay |
 | `j` `k` `g` `G`, `↑` `↓` `Home` `End` | move: down, up, first, last |
 | `Ctrl+D` `Ctrl+U` / `Ctrl+F` `Ctrl+B`, `PageDown` `PageUp` | half a page / a page |

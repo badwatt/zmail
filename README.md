@@ -157,7 +157,7 @@ The card behind `?` is the whole map, per screen. The short version:
 | `m` | move to another folder |
 | `H` `i` `\` | HTML view, pictures, every header |
 | `J` / `K` | next / previous folder |
-| `1`–`6` | mailbox |
+| `1`–`9` | the folder in that position, as the sidebar shows them |
 | `a` / `A` | next account / accounts overlay |
 | `Ctrl+R` | refresh from the server |
 | `Ctrl+C` | quit |
