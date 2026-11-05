@@ -328,6 +328,10 @@ pub const Session = struct {
     /// Whether the reader is showing the pictures. Off until asked: a receipt full of
     /// tracking pixels is not downloaded because a key was pressed to open it.
     show_images: bool = false,
+    /// The folder sidebar: off until the program that owns the terminal asks
+    /// for it, so a fixture drawing 100x24 is still drawing a list. The layout
+    /// grants it only when the terminal has columns to spare.
+    sidebar: bool = false,
     image_job: refresh_mod.ImageJob = .{},
     image_in_flight: bool = false,
     /// The marker the worker is fetching for ("r0"): the address is not the name the
@@ -859,8 +863,17 @@ pub const Session = struct {
             else => return false,
         }
 
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar,
+        );
         if (lay.too_small) return false;
+
+        // The sidebar owns the left columns: a click there is a choice of scope
+        // or folder, never a row of the list behind it.
+        if (lay.sidebar and mouse.x < lay.sidebar_width + 2) return self.click_sidebar(mouse);
 
         if (self.state.view == .list) {
             if (mouse.y == lay.header_y) {
@@ -879,6 +892,44 @@ pub const Session = struct {
         if (mouse.ctrl) return self.click_link(lay, mouse);
         if (self.start_selection(lay, mouse)) return true;
         return false;
+    }
+
+    /// How wide the account column has to be. One account on screen needs no
+    /// column: every row would repeat the label of the folder it sits under.
+    fn tag_width(self: *Session) u8 {
+        if (self.state.account_filter != null) return 0;
+        return self.state.accounts.max_label();
+    }
+
+    /// A click in the folder sidebar: the scope the row belongs to, and the
+    /// mailbox when the row is a folder.
+    fn click_sidebar(self: *Session, mouse: input.Mouse) bool {
+        const entry = render_mod.sidebar_hit(&self.state.accounts, self.state.account_filter, mouse.y) orelse return false;
+        switch (entry) {
+            .all_accounts => {
+                self.select_scope(null);
+                return true;
+            },
+            .account => |id| {
+                self.select_scope(id);
+                return true;
+            },
+            .folder => |folder| {
+                self.select_scope(folder.account);
+                return self.apply(.{ .select_mailbox = folder.mailbox });
+            },
+        }
+    }
+
+    /// The scope is the filter the list is built from. Changing it alone still
+    /// changes the list, so it rebuilds even when the mailbox stays put.
+    fn select_scope(self: *Session, account: ?core.id.AccountId) void {
+        if (self.state.account_filter == account) return;
+        self.state.account_filter = account;
+        self.state.cursor = 0;
+        self.state.offset = 0;
+        self.state.rebuild(&self.store);
+        self.needs_render = true;
     }
 
     /// The whole message as another program would show it: the browser for the
@@ -1083,7 +1134,9 @@ pub const Session = struct {
     fn cell_offset(self: *Session, lay: layout_mod.Layout, mouse: input.Mouse) ?u32 {
         if (self.state.view != .reader or !self.body_loaded) return null;
         if (mouse.y < lay.reader_body_y or mouse.y >= lay.reader_body_y + lay.reader_rows) return null;
-        if (mouse.x < 1) return null;
+        // The body starts one column into the content area, and the sidebar is
+        // not part of the text: both are the layout's to say.
+        if (mouse.x < lay.shift + 1) return null;
 
         const row = mouse.y - lay.reader_body_y;
         const index = self.state.reader_scroll + row;
@@ -1094,7 +1147,7 @@ pub const Session = struct {
         const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
         // Clicking past the end of a line is clicking nothing, not clicking the
         // text that happens to follow it in the buffer.
-        const column = mouse.x - 1;
+        const column = mouse.x - lay.shift - 1;
         // Each link starts with a mark of its own, and the frame moved everything after
         // it one column right. Walk back the same way, and a click on the mark itself
         // is a click on the link.
@@ -1118,7 +1171,12 @@ pub const Session = struct {
     /// Ctrl held and the pointer over a link: it lights up, so the click is not
     /// a leap of faith.
     fn hover_link(self: *Session, mouse: input.Mouse) bool {
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar,
+        );
         // Ctrl is the question "what would this do?": without it the pointer
         // changes nothing, so reading is never disturbed.
         var found: ?core.links.Link = null;
@@ -1196,7 +1254,7 @@ pub const Session = struct {
         if (row >= lay.reader_rows) return null;
         return .{
             .line = self.state.reader_scroll + row,
-            .column = mouse.x -| 1,
+            .column = mouse.x -| lay.shift -| 1,
         };
     }
 
@@ -1208,7 +1266,12 @@ pub const Session = struct {
 
     fn extend_selection(self: *Session, mouse: input.Mouse) bool {
         var active = self.selection orelse return false;
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar,
+        );
         const cell = self.body_cell(lay, mouse) orelse return false;
         active.dragTo(cell);
         self.selection = active;
@@ -1221,7 +1284,12 @@ pub const Session = struct {
         var active = self.selection orelse return false;
         self.selection = null;
 
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar,
+        );
         if (self.body_cell(lay, mouse)) |cell| active.dragTo(cell);
 
         if (!active.isDrag()) {
@@ -2253,7 +2321,12 @@ pub const Session = struct {
             self.screen.pristine = true;
         }
 
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar,
+        );
         // One text for the whole frame: what the wrap saw, what the lines point into,
         // and what the picture search reads -- the same bytes, or the offsets lie.
         const body = if (self.body_loaded) self.gapped_text() else "";
@@ -2279,6 +2352,7 @@ pub const Session = struct {
             .kinds = self.html_kinds[0..self.html_kind_count],
             .selection = self.selection,
             .reduced_motion = self.deps.reduced_motion,
+            .sidebar = self.sidebar,
             .elapsed_ms = os.monotonic_ms() - self.splash_started_ms,
             .now_unix = self.now_unix,
             .columns = self.size.columns,
@@ -2468,7 +2542,7 @@ pub const Session = struct {
                 self.deps.draw_image_context,
                 png,
                 media.image_id(self.state.opened_account, self.state.opened, key),
-                column,
+                lay.shift + column,
                 lay.reader_body_y + row,
                 @min(width, lay.columns -| column),
                 height,
@@ -3165,8 +3239,8 @@ test "switching to a loaded mailbox does not refetch it" {
 
     // Inbox is loaded at startup; switching to Sent and back must not fetch
     // Inbox again.
-    rig.send("\t");
-    rig.send("\x1b[Z");
+    rig.send("J");
+    rig.send("K");
     try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
     try testing.expectEqual(@as(u32, 2), rig.session.store.len);
 }
@@ -3223,7 +3297,7 @@ test "switching to an unloaded mailbox reads the cache, not the network" {
     try testing.expectEqualStrings("cached", rig.session.store.at(0).subject.slice());
 
     // Switching paints the cached copy first (instant), then refreshes.
-    rig.send_without_settle("]");
+    rig.send_without_settle("J");
     try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
     try testing.expectEqual(@as(u32, 2), cache.loads);
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
@@ -4514,7 +4588,7 @@ test "switching mailbox loads it from the server" {
     const sent = Message{ .id = MessageId.from_int(3), .account = core.id.AccountId.from_int(1), .mailbox = .sent, .timestamp_unix = 1_699_999_700 };
     try rig.fake_mail.inner.seed(&sent);
 
-    rig.send("\t");
+    rig.send("J");
     try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
 }
@@ -6233,7 +6307,7 @@ test "during the splash the only key that does anything is the one that leaves" 
     try testing.expectEqual(@as(u32, 0), rig.session.state.cursor);
     rig.send("c");
     try testing.expect(rig.session.state.compose.active == false);
-    rig.send("\t");
+    rig.send("J");
     try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
     rig.send("\x1b[<0;5;5M");
     try testing.expect(rig.session.state.booting);
@@ -6413,4 +6487,35 @@ test "the backslash shows every header, and again puts them away" {
     rig.fake_system.push_input("\\");
     _ = rig.session.step();
     try testing.expect(!rig.session.show_details);
+}
+
+test "a click in the sidebar opens that folder, and the scopes say whose folders they are" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.sidebar = true;
+
+    // Rows: 0 all accounts, 1 the account, 2 the rule, 3 its inbox, 4 sent.
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 4, .kind = .press, .button = .left });
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    // The folders are those of the scope on screen, so choosing one does not
+    // change the scope: the unified list is still unified.
+    try testing.expect(rig.session.state.account_filter == null);
+
+    // The account row narrows the scope and leaves the mailbox alone.
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    try testing.expect(rig.session.state.account_filter != null);
+    // One account on screen needs no column saying which account every row is from.
+    try testing.expectEqual(@as(u8, 0), rig.session.tag_width());
+
+    // The scope row goes back to every account, and the column comes back with it.
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 0, .kind = .press, .button = .left });
+    try testing.expect(rig.session.state.account_filter == null);
+    try testing.expectEqual(rig.session.state.accounts.max_label(), rig.session.tag_width());
+    // The rule between the scopes and the folders is not a thing to click, and
+    // neither is the empty space under them.
+    try testing.expect(!rig.session.handle_mouse(.{ .x = 4, .y = 2, .kind = .press, .button = .left }));
+    try testing.expect(!rig.session.handle_mouse(.{ .x = 4, .y = 22, .kind = .press, .button = .left }));
 }

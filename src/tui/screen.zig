@@ -110,6 +110,9 @@ pub const Screen = struct {
     previous: [max_rows][max_columns]Cell = undefined,
     /// Nothing has been written yet: the next flush must paint every row.
     pristine: bool = true,
+    /// Painted content is shifted right by this many columns: the sidebar owns
+    /// the left edge, and no renderer has to know it is there.
+    shift: u16 = 0,
 
     pub fn init(columns: u16, rows: u16) Screen {
         var screen: Screen = .{};
@@ -173,18 +176,20 @@ pub const Screen = struct {
     }
 
     pub fn put(self: *Screen, x: u16, y: u16, ch: u21, style: Style) void {
-        if (x >= self.columns) return;
+        const shifted = x + self.shift;
+        if (shifted >= self.columns) return;
         if (y >= self.rows) return;
-        self.cells[y][x] = .{ .ch = safeCodepoint(ch), .style = style };
+        self.cells[y][shifted] = .{ .ch = safeCodepoint(ch), .style = style };
     }
 
     /// Marks a cell as the second half of a wide glyph: it holds no codepoint of
     /// its own and is never written out, because the terminal already advanced
     /// past it.
     fn put_covered(self: *Screen, x: u16, y: u16, style: Style) void {
-        if (x >= self.columns) return;
+        const shifted = x + self.shift;
+        if (shifted >= self.columns) return;
         if (y >= self.rows) return;
-        self.cells[y][x] = .{ .ch = 0, .style = style };
+        self.cells[y][shifted] = .{ .ch = 0, .style = style };
     }
 
     /// Writes `text` and returns how many cells it used. Stops at `width`.
@@ -717,4 +722,23 @@ test "a wide glyph is sent once, without an extra cell after it" {
     try testing.expect(std.mem.endsWith(u8, glyphs, "🎉ab"));
     // Emoji (two cells) + a and b is four, so sixteen spaces pad the rest.
     try testing.expectEqual(@as(usize, 16), body.len - glyphs.len);
+}
+
+test "a shifted screen paints to the right of the sidebar, and clips at the edge" {
+    var out = Screen.init(40, 6);
+    out.shift = 10;
+    _ = out.put_text(0, 1, "abc", 3, .{});
+    out.hline(0, 2, 40, '-', .{});
+    out.fill_rect(.{ .x = 0, .y = 3, .width = 5, .height = 1 }, ' ', .{});
+    out.put(0, 4, 'x', .{});
+
+    try testing.expectEqual(@as(u21, 'a'), out.cells[1][10].ch);
+    try testing.expectEqual(@as(u21, 'c'), out.cells[1][12].ch);
+    // Nothing was written over the sidebar.
+    try testing.expectEqual(@as(u21, ' '), out.cells[1][9].ch);
+    // A full-width rule ends at the screen's last column instead of wrapping.
+    try testing.expectEqual(@as(u21, '-'), out.cells[2][10].ch);
+    try testing.expectEqual(@as(u21, '-'), out.cells[2][39].ch);
+    try testing.expectEqual(@as(u21, ' '), out.cells[3][10].ch);
+    try testing.expectEqual(@as(u21, 'x'), out.cells[4][10].ch);
 }

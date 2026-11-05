@@ -10,6 +10,11 @@ const Mailbox = @import("core").mailbox.Mailbox;
 pub const min_columns: u16 = 40;
 pub const min_rows: u16 = 10;
 
+/// The folder sidebar: its width, and the terminal width below which it would
+/// take more than it gives.
+pub const sidebar_width: u16 = 22;
+pub const sidebar_min_columns: u16 = 84;
+
 pub const tab_start: u16 = 8;
 /// The count is drawn right after the title, left-aligned in this many cells,
 /// so it always reads as part of its own mailbox ("Inbox 3", never "3  Sent").
@@ -20,6 +25,18 @@ pub const Layout = struct {
     columns: u16 = 0,
     rows: u16 = 0,
     too_small: bool = true,
+
+    /// Columns of the full terminal, and how far the content is pushed right by
+    /// the sidebar. Every coordinate in this struct is content-relative: the
+    /// screen adds `shift` when it paints, so no renderer has to know.
+    shift: u16 = 0,
+    sidebar: bool = false,
+    /// Cells the sidebar itself occupies, rule excluded.
+    sidebar_width: u16 = 0,
+    /// The bar above the list: the tabs, or the one-line header on a narrow
+    /// terminal. With folders on the left it says what the sidebar already
+    /// says, so it is not drawn at all.
+    show_header: bool = true,
 
     header_y: u16 = 0,
     top_rule_y: u16 = 1,
@@ -55,34 +72,54 @@ pub const Layout = struct {
     /// `label_width` is the longest account label (0 = single account, no
     /// column): the column sizes itself to the names, bounded.
     pub fn compute(columns: u16, rows: u16, label_width: u8) Layout {
+        return compute_with(columns, rows, label_width, false);
+    }
+
+    /// `sidebar` asks for the folder column on the left. It is granted only when
+    /// the terminal can afford it: a sidebar that leaves no list is a decoration.
+    pub fn compute_with(columns: u16, rows: u16, label_width: u8, sidebar: bool) Layout {
+        const wanted: u16 = if (sidebar and columns >= sidebar_min_columns) sidebar_width else 0;
+        // The rule belongs to the sidebar, the space to the content.
+        const shift: u16 = if (wanted > 0) wanted + 2 else 0;
+        const content_columns = columns -| shift;
         const account_tags = label_width > 0;
-        var layout: Layout = .{ .columns = columns, .rows = rows };
-        layout.too_small = columns < min_columns or rows < min_rows;
+        var layout: Layout = .{
+            .columns = content_columns,
+            .rows = rows,
+            .shift = shift,
+            .sidebar = wanted > 0,
+            .sidebar_width = wanted,
+        };
+        layout.too_small = content_columns < min_columns or rows < min_rows;
         if (layout.too_small) return layout;
 
+        // Without a header the list owns the top of the screen, the way the
+        // reader already does.
+        layout.show_header = shift == 0;
         layout.top_rule_y = 1;
-        layout.body_y = 2;
+        layout.body_y = if (layout.show_header) 2 else 0;
         layout.bottom_rule_y = rows - 3;
         layout.footer_y = rows - 1;
         layout.body_height = layout.bottom_rule_y - layout.body_y;
         layout.list_rows = layout.body_height;
         layout.reader_rows = layout.bottom_rule_y -| layout.reader_body_y;
-        layout.reader_text_width = columns - 2;
-        layout.show_tabs = columns >= tab_start + tabs_width() + 1;
+        layout.reader_text_width = content_columns - 2;
+        // With folders on the left, tabs would be the same list twice.
+        layout.show_tabs = layout.shift == 0 and layout.columns >= tab_start + tabs_width() + 1;
 
         layout.account_tags = account_tags;
         // The full account label ("work", "personal") when it fits, at least
         // two characters so accounts stay distinguishable.
         layout.account_width = if (account_tags)
-            @min(@max(@as(u16, label_width), 2), @min(10, columns / 6))
+            @min(@max(@as(u16, label_width), 2), @min(10, layout.columns / 6))
         else
             0;
         // A space after the unread dot and another after the label.
         layout.account_x = layout.dot_x + 2;
         layout.sender_x = if (account_tags) layout.account_x + layout.account_width + 1 else 3;
-        layout.sender_width = @max(8, @min(24, columns / 4) - @as(u16, if (account_tags) 2 else 0));
+        layout.sender_width = @max(8, @min(24, layout.columns / 4) - @as(u16, if (account_tags) 2 else 0));
         layout.subject_x = layout.sender_x + layout.sender_width + 1;
-        layout.flag_x = columns - 1;
+        layout.flag_x = layout.columns - 1;
         layout.date_x = layout.flag_x - 1 - layout.date_width;
         layout.subject_width = layout.date_x -| 1 -| layout.subject_x;
         assert(layout.subject_width >= 1);
@@ -227,4 +264,22 @@ test "reader geometry uses the full screen and leaves room for the body" {
     try testing.expectEqual(@as(u16, 6), layout.reader_rows);
     try testing.expectEqual(@as(u16, 1), layout.reader_text_x);
     try testing.expectEqual(@as(u16, 58), layout.reader_text_width);
+}
+
+test "a sidebar takes its columns from the content, and only when there is room" {
+    const wide = Layout.compute_with(120, 30, 4, true);
+    try testing.expect(wide.sidebar);
+    try testing.expectEqual(sidebar_width, wide.sidebar_width);
+    // The rule and one space belong to the sidebar, not to the list.
+    try testing.expectEqual(sidebar_width + 2, wide.shift);
+    try testing.expectEqual(120 - (sidebar_width + 2), wide.columns);
+    try testing.expect(wide.subject_width > 20);
+    // Folders on the left, so the tab row would be the same list twice.
+    try testing.expect(!wide.show_tabs);
+
+    // A terminal with no columns to spare keeps its tabs and its list.
+    const narrow = Layout.compute_with(80, 24, 4, true);
+    try testing.expect(!narrow.sidebar);
+    try testing.expectEqual(@as(u16, 0), narrow.shift);
+    try testing.expectEqual(Layout.compute(80, 24, 4), narrow);
 }

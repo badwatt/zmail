@@ -52,6 +52,9 @@ pub const Inputs = struct {
     cover: []const u8 = &.{},
     /// Set when the user asked for no motion: the splash draws its still frame.
     reduced_motion: bool = false,
+    /// The folder sidebar is wanted. It is drawn only when the terminal can
+    /// afford it; `Layout` decides.
+    sidebar: bool = false,
     /// Milliseconds since the first screen went up. The splash's only clock: the loop
     /// and the painter thread both read it, so the mark cannot jump when one hands
     /// over to the other.
@@ -182,7 +185,13 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
     // previous view. The flush still compares rows, so this costs nothing on
     // the wire.
     out.clear();
-    const lay = layout_mod.Layout.compute(out.columns, out.rows, inputs.state.accounts.max_label());
+    out.shift = 0;
+    const lay = layout_mod.Layout.compute_with(
+        out.columns,
+        out.rows,
+        inputs.state.accounts.max_label(),
+        inputs.sidebar,
+    );
     if (lay.too_small) {
         render_too_small(inputs, out);
         return;
@@ -190,6 +199,13 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
     if (inputs.state.booting) {
         splash.draw(out, inputs.state, inputs.theme, inputs.elapsed_ms, inputs.reduced_motion);
         return;
+    }
+
+    // The sidebar is painted where it lives, then everything else is shifted
+    // past it: one rule and one blank column, and no renderer knows it is there.
+    if (lay.sidebar) {
+        render_sidebar(inputs, lay, out);
+        out.shift = lay.shift;
     }
 
     switch (inputs.state.view) {
@@ -219,14 +235,149 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
 const spinner_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
 fn render_list(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
-    if (inputs.state.mode == .search) {
+    if (inputs.state.mode == .search and lay.show_header) {
         render_search_bar(inputs, lay, out);
-    } else {
+        out.hline(0, lay.top_rule_y, lay.columns, '─', inputs.theme.border);
+    } else if (lay.show_header) {
         render_tabs(inputs, lay, out);
+        out.hline(0, lay.top_rule_y, lay.columns, '─', inputs.theme.border);
     }
-    out.hline(0, lay.top_rule_y, lay.columns, '─', inputs.theme.border);
     render_rows(inputs, lay, out);
     out.hline(0, lay.bottom_rule_y, lay.columns, '─', inputs.theme.border);
+}
+
+/// One row of the folder sidebar and what a click on it means.
+pub const SidebarEntry = union(enum) {
+    all_accounts,
+    account: core.id.AccountId,
+    folder: struct { account: ?core.id.AccountId, mailbox: Mailbox },
+};
+
+pub const SidebarRow = struct { y: u16, entry: SidebarEntry };
+
+/// The scopes, the rule under them, and the six folders of the scope on screen.
+pub const max_sidebar_rows: usize = 1 + core.state.accounts_max + Mailbox.all.len;
+
+/// A scope row: every account at once, or one of them.
+pub const SidebarScope = union(enum) {
+    all_accounts,
+    account: core.id.AccountId,
+};
+
+/// The rows the sidebar draws, top to bottom: the scopes that choose whose
+/// folders these are, then the folders themselves. The renderer and the mouse
+/// both walk this list, so a label and its hit box cannot drift apart.
+pub fn sidebar_rows(accounts: *const core.state.Accounts, scope: ?core.id.AccountId, rows: []SidebarRow) usize {
+    var count: usize = 0;
+    if (count == rows.len) return count;
+    rows[count] = .{ .y = 0, .entry = .all_accounts };
+    count += 1;
+
+    var y: u16 = 1;
+    for (accounts.items[0..accounts.len]) |account| {
+        if (count == rows.len) return count;
+        rows[count] = .{ .y = y, .entry = .{ .account = account.id } };
+        count += 1;
+        y += 1;
+    }
+
+    // One row says "the folders below belong to the scope above".
+    y += 1;
+    for (Mailbox.all) |mailbox| {
+        if (count == rows.len) return count;
+        rows[count] = .{ .y = y, .entry = .{ .folder = .{ .account = scope, .mailbox = mailbox } } };
+        count += 1;
+        y += 1;
+    }
+    return count;
+}
+
+/// What the row at `y` is, if it is a row at all.
+pub fn sidebar_hit(accounts: *const core.state.Accounts, scope: ?core.id.AccountId, y: u16) ?SidebarEntry {
+    var rows: [max_sidebar_rows]SidebarRow = undefined;
+    const count = sidebar_rows(accounts, scope, &rows);
+    for (rows[0..count]) |row| {
+        if (row.y == y) return row.entry;
+    }
+    return null;
+}
+
+fn sidebar_active(state: *const State, entry: SidebarEntry) bool {
+    return switch (entry) {
+        .all_accounts => state.account_filter == null,
+        .account => |id| state.account_filter == id,
+        .folder => |folder| state.account_filter == folder.account and state.mailbox == folder.mailbox,
+    };
+}
+
+fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    const theme = inputs.theme;
+    const width = lay.sidebar_width;
+    out.vline(width, 0, out.rows, '│', theme.border);
+
+    var rows: [max_sidebar_rows]SidebarRow = undefined;
+    const count = sidebar_rows(&inputs.state.accounts, inputs.state.account_filter, &rows);
+
+    // The rule between the scopes and the folders of the scope on screen.
+    const separator: u16 = 1 + inputs.state.accounts.len;
+    if (separator < out.rows) out.hline(1, separator, width -| 2, '─', theme.border);
+    for (rows[0..count]) |row| {
+        if (row.y >= out.rows) break;
+        const active = sidebar_active(inputs.state, row.entry);
+        if (active) {
+            out.fill_rect(.{ .x = 0, .y = row.y, .width = width, .height = 1 }, ' ', theme.selection);
+        }
+        switch (row.entry) {
+            .all_accounts => {
+                const style = if (active) theme.accent.with_bold() else theme.dim.with_bold();
+                _ = out.put_text(1, row.y, "ALL ACCOUNTS", width -| 2, style);
+                render_sidebar_total(inputs, out, row.y, width, null);
+            },
+            .account => |id| {
+                const style = if (active) theme.accent.with_bold() else theme.text.with_bold();
+                const label = inputs.state.accounts.label_for(id);
+                out.put_text_truncated(1, row.y, label, width -| 4, style);
+                render_sidebar_total(inputs, out, row.y, width, id);
+            },
+            .folder => |folder| {
+                const unread = inputs.store.unread_in(folder.mailbox, folder.account);
+                const style = if (active)
+                    theme.accent.with_bold()
+                else if (unread > 0)
+                    theme.text
+                else
+                    theme.dim;
+                _ = out.put_text(3, row.y, folder.mailbox.title(), width -| 4, style);
+                render_sidebar_count(inputs, out, row.y, width, folder.mailbox, folder.account);
+            },
+        }
+    }
+}
+
+/// Unread everywhere in a scope: a group row counts what is behind it, not
+/// what one of its folders happens to hold.
+fn render_sidebar_total(inputs: Inputs, out: *Screen, y: u16, width: u16, account: ?core.id.AccountId) void {
+    var total: u32 = 0;
+    for (Mailbox.all) |mailbox| total += inputs.store.unread_in(mailbox, account);
+    if (total == 0) return;
+    var buffer: [8]u8 = undefined;
+    const count = if (total > 999) "999" else std.fmt.bufPrint(&buffer, "{d}", .{total}) catch "";
+    put_right(out, width -| 2, y, count, inputs.theme.accent);
+}
+
+fn render_sidebar_count(
+    inputs: Inputs,
+    out: *Screen,
+    y: u16,
+    width: u16,
+    mailbox: Mailbox,
+    account: ?core.id.AccountId,
+) void {
+    const unread = inputs.store.unread_in(mailbox, account);
+    if (unread == 0) return;
+    var buffer: [8]u8 = undefined;
+    const count = if (unread > 999) "999" else std.fmt.bufPrint(&buffer, "{d}", .{unread}) catch "";
+    put_right(out, width -| 2, y, count, inputs.theme.accent);
 }
 
 fn render_tabs(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
@@ -281,6 +432,22 @@ fn render_unread_count(inputs: Inputs, y: u16, x: u16, mailbox: Mailbox, out: *S
     else
         std.fmt.bufPrint(&buffer, "{d}", .{unread}) catch "";
     _ = out.put_text(x, y, count, layout_mod.tab_count_width, inputs.theme.accent.with_bold());
+}
+
+/// The search prompt as one footer row: what is typed, a cursor, and how many
+/// messages match.
+fn render_search_line(inputs: Inputs, y: u16, limit: u16, out: *Screen) void {
+    _ = out.put_text(1, y, "/", 1, inputs.theme.accent.with_bold());
+    const draft = inputs.state.draft.slice();
+    const written = out.put_text(3, y, draft, limit -| 4, inputs.theme.text);
+    out.put(3 + written, y, ' ', inputs.theme.text.with_reverse());
+
+    var buffer: [24]u8 = undefined;
+    const label = if (inputs.state.visible_len == 1)
+        std.fmt.bufPrint(&buffer, "1 match", .{}) catch ""
+    else
+        std.fmt.bufPrint(&buffer, "{d} matches", .{inputs.state.visible_len}) catch "";
+    put_right(out, limit -| 1, y, label, inputs.theme.dim);
 }
 
 fn render_search_bar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
@@ -855,6 +1022,12 @@ fn render_footer(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const limit = lay.columns -| (right_width + 3);
     put_right(out, lay.columns - 2, y, right, inputs.theme.dim);
 
+    // With no bar over the list, a search is typed where the hints live: one
+    // prompt row, and the list never moves under it.
+    if (inputs.state.mode == .search and !lay.show_header) {
+        render_search_line(inputs, y, limit, out);
+        return;
+    }
     if (!inputs.state.status.is_empty()) {
         const style = if (inputs.state.status_alert) inputs.theme.alert else inputs.theme.accent;
         out.put_text_truncated(1, y, inputs.state.status.slice(), limit -| 1, style);
@@ -921,7 +1094,7 @@ const help_rows = [_]Hint{
     .{ .keys = "Ctrl+C", .action = "quit (the only way out)" },
     .{ .keys = "/", .action = "search the list" },
     .{ .keys = "Ctrl+R", .action = "refresh from the server" },
-    .{ .keys = "Tab / [ ]", .action = "next / previous mailbox" },
+    .{ .keys = "J / K", .action = "next / previous folder" },
     .{ .keys = "1 - 6", .action = "the six mailboxes, in order" },
     .{ .keys = "a / A", .action = "next account / accounts overlay" },
     .{ .keys = "", .action = "-- the list" },
@@ -1395,6 +1568,35 @@ test "frame renders the search bar with the draft and a cursor" {
 
     try row_contains(&out, 0, "/ inv");
     try testing.expect(out.cells[0][6].style.attrs.reverse);
+}
+
+test "with the sidebar on, the search prompt is the footer row" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", .{}, .{});
+    f.state.mode = .search;
+    f.state.draft.set("a");
+    f.state.query.set("a");
+    f.state.rebuild(&f.store);
+
+    var inputs = f.inputs(120, 30);
+    inputs.sidebar = true;
+    var out = Screen.init(120, 30);
+    frame(inputs, &out);
+
+    // No bar over the list, so the prompt takes the row the hints would have.
+    try row_contains(&out, 29, "/ a");
+    try row_contains(&out, 29, "matches");
+    // The cursor sits after the typed text, and the row is shifted past the sidebar.
+    const shift: u16 = layout_mod.sidebar_width + 2;
+    try testing.expect(out.cells[29][shift + 4].style.attrs.reverse);
+
+    // One match is not "1 matches".
+    f.state.draft.set("tokens");
+    f.state.query.set("tokens");
+    f.state.rebuild(&f.store);
+    frame(inputs, &out);
+    try row_contains(&out, 29, "1 match");
 }
 
 test "frame renders the reader: subject, metadata, and body" {
@@ -2634,4 +2836,77 @@ test "the meta line says who the message was sent to" {
         if (std.mem.indexOf(u8, out.row_text(line, &row_buffer), "to bob@example.com") != null) found = true;
     }
     try testing.expect(found);
+}
+
+test "the sidebar lists every account's folders, and a row knows where it leads" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", .{}, .{});
+    f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{}, .{});
+
+    var rows: [max_sidebar_rows]SidebarRow = undefined;
+    const count = sidebar_rows(&f.state.accounts, null, &rows);
+    // All accounts, the two of them, and the six folders of the scope. The rule
+    // between the two halves is a gap in `y`, not a row of its own.
+    try testing.expectEqual(@as(usize, 1 + 2 + 6), count);
+    try testing.expectEqual(SidebarEntry.all_accounts, rows[0].entry);
+    try testing.expectEqual(@as(u16, 0), rows[0].y);
+
+    const first_account = rows[1];
+    try testing.expectEqual(@as(u16, 1), first_account.y);
+    try testing.expectEqual(SidebarEntry{ .account = core.id.AccountId.from_int(1) }, first_account.entry);
+    // The rule sits at y = 3, so the folders start under it.
+    try testing.expectEqual(@as(u16, 4), rows[3].y);
+    try testing.expectEqual(
+        SidebarEntry{ .folder = .{ .account = null, .mailbox = .inbox } },
+        rows[3].entry,
+    );
+    // The folders are the ones of the scope on screen: this account's, here.
+    var account_rows: [max_sidebar_rows]SidebarRow = undefined;
+    const account_count = sidebar_rows(&f.state.accounts, core.id.AccountId.from_int(2), &account_rows);
+    try testing.expectEqual(count, account_count);
+    try testing.expectEqual(
+        SidebarEntry{ .folder = .{ .account = core.id.AccountId.from_int(2), .mailbox = .inbox } },
+        account_rows[3].entry,
+    );
+
+    // The same list answers the mouse.
+    try testing.expectEqual(first_account.entry, sidebar_hit(&f.state.accounts, null, 1).?);
+    try testing.expect(sidebar_hit(&f.state.accounts, null, 3) == null);
+    try testing.expect(sidebar_hit(&f.state.accounts, null, 99) == null);
+}
+
+test "with the sidebar on, the folders are on the left and the list starts after the rule" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", .{}, .{});
+    f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{}, .{});
+    f.store.at(0).account = core.id.AccountId.from_int(2);
+    f.state.rebuild(&f.store);
+
+    // The list is on another mailbox of the first account: Sent is the active row,
+    // and the unread Inbox beside it is not.
+    f.state.mailbox = .sent;
+    f.state.account_filter = core.id.AccountId.from_int(1);
+    var inputs = f.inputs(120, 30);
+    inputs.sidebar = true;
+    var out = Screen.init(120, 30);
+    frame(inputs, &out);
+
+    try row_contains(&out, 0, "ALL ACCOUNTS");
+    try row_contains(&out, 1, "home");
+    try row_contains(&out, 2, "work");
+    try row_contains(&out, 4, "Inbox");
+    // The rule is the sidebar's last column, and the list starts next to it.
+    try testing.expectEqual(@as(u21, '│'), out.cells[0][layout_mod.sidebar_width].ch);
+    try testing.expectEqual(@as(u21, ' '), out.cells[0][layout_mod.sidebar_width + 1].ch);
+    // No bar over the list: the first row of mail is row 0 of the screen.
+    try row_contains(&out, 0, "Alice Rivera");
+    // The scope row counts what is behind it, at the sidebar's right edge.
+    try testing.expectEqual(@as(u21, '2'), out.cells[0][layout_mod.sidebar_width - 2].ch);
+    // A folder row counts its own mailbox, in the scope on screen: one unread each.
+    try testing.expectEqual(@as(u21, '1'), out.cells[4][layout_mod.sidebar_width - 2].ch);
+    // A folder with unread mail that is not the one on screen still reads as text,
+    // not as the dim of a mailbox with nothing in it.
+    try testing.expectEqual(f.theme.text.with_bold().fg, out.cells[4][3].style.fg);
 }
