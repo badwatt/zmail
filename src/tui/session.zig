@@ -753,13 +753,10 @@ pub const Session = struct {
         while (slot < self.refresh_count) : (slot += 1) {
             const index = self.refresh_index[slot];
             const source = self.live_sources()[index];
-            // A failed account keeps whatever the cache already showed.
-            if (!self.refresh_job.ok[slot]) continue;
 
-            const offset = self.refresh_job.offsets[slot];
-            const count = self.refresh_job.counts[slot];
-            const fetched = self.refresh_scratch[offset..][0..count];
-
+            // The folders are the list's own business, and they are what the sidebar
+            // keeps: a listing that carries no mail still saves them, which is what
+            // makes the next start instant.
             const listed_count = self.refresh_job.folder_counts[slot];
             if (listed_count > 0) {
                 const listed = self.folder_scratch[self.refresh_job.folder_offsets[slot]..][0..listed_count];
@@ -776,8 +773,15 @@ pub const Session = struct {
                     }
                     cache.save_folders(source.id, records[0..bounded]) catch {};
                 }
+                self.adopt_folders(source.id, self.refresh_job.folder_offsets[slot], listed_count);
             }
-            self.adopt_folders(source.id, self.refresh_job.folder_offsets[slot], listed_count);
+
+            // A failed account keeps whatever the cache already showed.
+            if (!self.refresh_job.ok[slot]) continue;
+
+            const offset = self.refresh_job.offsets[slot];
+            const count = self.refresh_job.counts[slot];
+            const fetched = self.refresh_scratch[offset..][0..count];
             self.apply_target(self.refresh_target, source.id, fetched);
             const place_slot: u8 = switch (self.refresh_target) {
                 .mailbox => |mailbox| @backingInt(mailbox),
@@ -6928,7 +6932,7 @@ test "a move target whose folder is gone falls back to a mailbox" {
 
     try testing.expectEqual(
         core.mail_port.Place.inbox,
-        rig.session.place_named(.{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 3 } }),
+        rig.session.place_named(.{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 20 } }),
     );
     try testing.expectEqual(core.mail_port.Place.sent, rig.session.place_named(.{ .mailbox = .sent }));
 }
@@ -7108,4 +7112,42 @@ test "the folders are there at startup, without a key to ask for them" {
     try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
     try testing.expect(!rig.session.state.listing);
     try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, 1).?.display());
+}
+
+test "the first listing is the only one: the next start reads it from disk" {
+    var cache: core.cache_port.Memory = .{};
+    const account = core.id.AccountId.from_int(1);
+
+    // First run: nothing on disk, so the boot asks once and keeps the answer.
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        rig.sources[0] = .{ .id = account, .label = "account", .mail = rig.fake_mail.mail() };
+        try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.needs_boot = true;
+        rig.session.boot();
+        rig.session.settle_boot_for_test();
+        rig.session.settle_refresh_for_test();
+        try testing.expectEqual(@as(u32, 1), cache.folder_saves);
+        try testing.expect(cache.folder_count > 0);
+    }
+
+    // Second run: the same disk. No listing, no wait -- the folders are there
+    // before the first connection is even made.
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        rig.sources[0] = .{ .id = account, .label = "account", .mail = rig.fake_mail.mail() };
+        try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.needs_boot = true;
+        rig.session.boot();
+        // Before any network work at all: the table is already the account's.
+        try testing.expectEqual(cache.folder_count, rig.session.state.folders.count(account));
+        rig.session.settle_boot_for_test();
+        try testing.expect(!rig.session.state.listing);
+        // And nothing was listed again.
+        try testing.expectEqual(@as(u32, 1), cache.folder_saves);
+    }
 }
