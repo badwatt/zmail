@@ -697,7 +697,16 @@ pub const Session = struct {
         for (self.live_sources()) |source| {
             if (!self.in_scope(source.id)) continue;
             if (source.mail.connected()) continue;
+            // It blocks, and there is nothing to be done about that: say so on
+            // screen *before* the wait, or the client looks hung for however long
+            // a handshake takes.
+            self.state.listing = self.state.folders.is_empty(source.id);
+            _ = self.say("Connecting…", .{});
+            self.render();
             self.reload(self.state.mailbox);
+            // Connected now, so the folders can be listed -- on the worker, where
+            // a round trip per folder belongs.
+            self.list_missing_folders();
             return;
         }
 
@@ -7151,3 +7160,62 @@ test "the first listing is the only one: the next start reads it from disk" {
         try testing.expectEqual(@as(u32, 1), cache.folder_saves);
     }
 }
+
+test "the first connection says so before it blocks, and lists the folders after" {
+    var rig: Rig = .{};
+    rig.fake_system.size_value = .{ .columns = 120, .rows = 30 };
+    try rig.seed();
+    const account = core.id.AccountId.from_int(1);
+
+    // An account that opens lazily: `connected` is false until the first use,
+    // which is the case that blocks the loop for a handshake.
+    var opener = LazyOpener{ .target = &rig.fake_mail };
+    rig.sources[0] = .{ .id = account, .label = "azama", .mail = opener.mail() };
+    try rig.arm(.{ .accounts = &rig.sources, .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    // Boot with another account in scope: this one is never opened.
+    rig.session.state.account_filter = core.id.AccountId.from_int(2);
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+    rig.session.state.folders.reset(account);
+    try testing.expect(!opener.lazy.connected());
+
+    rig.session.state.account_filter = null;
+    rig.fake_system.output_len = 0;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+
+    // Painted before the wait: the frame that says what is happening went out
+    // before the connection blocked.
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), "Connecting…") != null);
+    try testing.expect(opener.lazy.connected());
+
+    // And the folders are asked for once the connection is there.
+    rig.session.settle_refresh_for_test();
+    try testing.expectEqual(@as(u8, 6), rig.session.state.folders.count(account));
+    try testing.expect(!rig.session.state.listing);
+    opener.lazy.close();
+}
+
+/// A mail port that is not connected until its first call, like the real one.
+const LazyOpener = struct {
+    target: *FakeMail,
+    lazy: core.lazy_mail = undefined,
+    opened: core.mail_port.Mail = undefined,
+
+    fn open(context: *anyopaque) core.mail_port.Error!core.mail_port.Mail {
+        const self: *LazyOpener = @ptrCast(@alignCast(context));
+        self.opened = self.target.mail();
+        return self.opened;
+    }
+
+    fn close(_: *anyopaque) void {}
+
+    fn mail(self: *LazyOpener) core.mail_port.Mail {
+        self.lazy = .{ .context = self, .open_fn = open, .close_fn = close };
+        return self.lazy.mail();
+    }
+};
