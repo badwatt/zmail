@@ -93,7 +93,10 @@ fn normal_key(key: Key, view: View) ?Command {
         .end => .{ .move = .bottom },
         .page_up => .{ .move = .page_up },
         .page_down => .{ .move = .page_down },
-        .left, .escape => if (view == .list) null else .dismiss,
+        // Esc goes back one layer, and in the list the layer under it is the
+        // chooser that may be open: it is never a key that does nothing.
+        .escape => .dismiss,
+        .left => if (view == .list) null else .dismiss,
         .right => if (view == .list) .open_selected else null,
         .backspace => null,
         .delete => .delete_selected,
@@ -254,7 +257,7 @@ test "opening and dismissing" {
         .{ .key = .{ .char = 'l' }, .expected = .open_selected },
         .{ .key = .{ .char = 'o' }, .expected = .open_selected },
         .{ .key = .right, .expected = .open_selected },
-        .{ .key = .escape, .expected = null },
+        .{ .key = .escape, .expected = .dismiss },
         .{ .key = .{ .char = 'q' }, .expected = null },
         .{ .key = .{ .char = 'h' }, .expected = null },
         .{ .key = .{ .char = 'x' }, .expected = null },

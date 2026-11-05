@@ -7424,3 +7424,75 @@ test "an account whose folders are on disk shows them the moment it is opened" {
     try testing.expect(std.mem.indexOf(u8, frame_text, "listing folders") == null);
     rig.session.settle_refresh_for_test();
 }
+
+test "Esc closes the move chooser, because in the list it is a layer and not a no-op" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+    _ = rig.session.step();
+
+    rig.send("m");
+    try testing.expect(rig.session.state.moving);
+    const before = rig.session.store.at(0).mailbox;
+
+    rig.send("\x1b");
+    // A lone ESC is ambiguous until the next read times out: that is one more tick.
+    _ = rig.session.step();
+    try testing.expect(!rig.session.state.moving);
+    // Nothing moved, and the list is where it was.
+    try testing.expectEqual(before, rig.session.store.at(0).mailbox);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "cancelled") != null);
+}
+
+test "the folders survive a restart through the file cache" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try std.fmt.bufPrint(&path_buffer, "{s}{c}{s}", .{
+        std.testing.TmpDir.parent_dir_path, std.fs.path.sep, tmp.sub_path,
+    });
+    var labels = [_]net.cache_file.Label{.{ .id = core.id.AccountId.from_int(1), .label = "azama" }};
+    const account = core.id.AccountId.from_int(1);
+
+    // First run: the server lists, and the answer has to end up on disk.
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        // A server that lists the six and one folder of its own.
+        for (core.mailbox.Mailbox.all) |mailbox| _ = try rig.fake_mail.inner.add_folder(mailbox.title(), mailbox);
+        _ = try rig.fake_mail.inner.add_folder("Clients", null);
+        var cache = net.cache_file.FileCache.init(std.testing.allocator, std.testing.io, base, &labels);
+        rig.sources[0] = .{ .id = account, .label = "azama", .mail = rig.fake_mail.mail() };
+        try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.sidebar = true;
+        rig.session.needs_boot = true;
+        rig.session.boot();
+        rig.session.settle_boot_for_test();
+        rig.session.settle_refresh_for_test();
+        try testing.expect(rig.session.state.folders.count(account) > 0);
+    }
+
+    // The file is there, and the second run is instant: no listing at all.
+    var file_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&file_buffer, "{s}/azama/folders.bin", .{base});
+    var file = try std.Io.Dir.cwd().openFile(std.testing.io, file_path, .{});
+    file.close(std.testing.io);
+
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        var cache = net.cache_file.FileCache.init(std.testing.allocator, std.testing.io, base, &labels);
+        rig.sources[0] = .{ .id = account, .label = "azama", .mail = rig.fake_mail.mail() };
+        try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.sidebar = true;
+        rig.session.needs_boot = true;
+        rig.session.boot();
+        // Before any network work: the sidebar is the account's own.
+        try testing.expectEqual(@as(u8, 7), rig.session.state.folders.count(account));
+        try testing.expect(!rig.session.state.listing);
+    }
+}

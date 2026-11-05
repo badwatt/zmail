@@ -188,6 +188,11 @@ pub const ImapMail = struct {
     }
 
     /// The account's folders, as the server listed them.
+    /// How many folders get a `STATUS` per listing. The sidebar shows the top of
+    /// the list; asking about forty of them is a second of round trips for numbers
+    /// nobody scrolls to.
+    pub const max_status_per_listing: u8 = 8;
+
     fn foldersThunk(context: *anyopaque, out: []port.Listed) port.Error!u32 {
         const self: *ImapMail = @ptrCast(@alignCast(context));
         self.listOnce();
@@ -197,10 +202,13 @@ pub const ImapMail = struct {
             const entry = &self.entries[index];
             // A heading holds folders; it is not one.
             if (!entry.selectable) continue;
-            // The numbers come from STATUS, one round trip per folder, and a
-            // folder whose count failed is still a folder: zero unread, not an
-            // error that loses the list.
-            const numbers = self.client.status(entry.name.slice()) catch response_mod.Status{};
+            // The numbers come from STATUS: one round trip each, so only the top
+            // of the list gets one. A folder whose count failed is still a folder:
+            // zero unread, not an error that loses the list.
+            const numbers = if (written < max_status_per_listing)
+                self.client.status(entry.name.slice()) catch response_mod.Status{}
+            else
+                response_mod.Status{};
             out[written] = .{
                 .name = entry.name.slice(),
                 .title = entry.title.slice(),
@@ -727,4 +735,41 @@ test "a Gmail-shaped LIST gives folders, not the namespace that holds them" {
     for (out[0..count]) |listed| {
         try testing.expect(!std.mem.eql(u8, listed.name, "[Gmail]"));
     }
+}
+
+test "a mailbox with more folders than the sidebar shows does not ask about all of them" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "* LIST () \"/\" \"A\"\r\n" ++
+        "* LIST () \"/\" \"B\"\r\n" ++
+        "* LIST () \"/\" \"C\"\r\n" ++
+        "* LIST () \"/\" \"D\"\r\n" ++
+        "* LIST () \"/\" \"E\"\r\n" ++
+        "* LIST () \"/\" \"F\"\r\n" ++
+        "* LIST () \"/\" \"G\"\r\n" ++
+        "* LIST () \"/\" \"H\"\r\n" ++
+        "* LIST () \"/\" \"I\"\r\n" ++
+        "* LIST () \"/\" \"J\"\r\n" ++
+        "a2 OK LIST done\r\n" ++
+        "* STATUS \"A\" (UNSEEN 1 MESSAGES 3)\r\n" ++ "a3 OK done\r\n" ++
+        "* STATUS \"B\" (UNSEEN 2 MESSAGES 3)\r\n" ++ "a4 OK done\r\n" ++
+        "* STATUS \"C\" (UNSEEN 3 MESSAGES 3)\r\n" ++ "a5 OK done\r\n" ++
+        "* STATUS \"D\" (UNSEEN 4 MESSAGES 3)\r\n" ++ "a6 OK done\r\n" ++
+        "* STATUS \"E\" (UNSEEN 5 MESSAGES 3)\r\n" ++ "a7 OK done\r\n" ++
+        "* STATUS \"F\" (UNSEEN 6 MESSAGES 3)\r\n" ++ "a8 OK done\r\n" ++
+        "* STATUS \"G\" (UNSEEN 7 MESSAGES 3)\r\n" ++ "a9 OK done\r\n" ++
+        "* STATUS \"H\" (UNSEEN 8 MESSAGES 3)\r\n" ++ "a10 OK done\r\n" };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var out: [16]port.Listed = undefined;
+    const count = try imap.mail().folders(&out);
+    try testing.expectEqual(@as(u32, 10), count);
+    // Eight asked, and the last two are folders without a number rather than
+    // folders without a row.
+    try testing.expectEqual(@as(u32, 8), out[ImapMail.max_status_per_listing - 1].unread);
+    try testing.expectEqual(@as(u32, 0), out[ImapMail.max_status_per_listing].unread);
+    try testing.expectEqualStrings("I", out[ImapMail.max_status_per_listing].name);
 }
