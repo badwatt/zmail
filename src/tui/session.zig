@@ -343,6 +343,8 @@ pub const Session = struct {
     pending_effects: [pending_effects_max]core.effect.Effect = undefined,
     pending_len: u8 = 0,
     refresh_scratch: []Message = undefined,
+    /// Where a folder list read from disk lands before it goes into the table.
+    cached_folders: [core.folder.per_account_max]core.cache_port.Folder = @splat(.{}),
     /// Where the worker writes the folders each account listed.
     folder_scratch: [core.state.accounts_max * core.folder.per_account_max]core.mail_port.Listed = undefined,
     refresh_sources: [core.state.accounts_max]refresh_mod.Source = undefined,
@@ -701,8 +703,12 @@ pub const Session = struct {
         self.load_cached(self.screen_target(), false);
 
         self.refresh_target = self.screen_target();
+        // The disk first: a folder list is small, and the account you were in an
+        // hour ago should not make you wait for a round trip to see its folders.
+        self.load_cached_folders();
         // An account whose folders nobody has listed yet says so in the sidebar:
         // the six the app knows are a placeholder, not an answer.
+        self.state.listing = false;
         if (self.refresh_target.named == null) {
             if (self.state.account_filter) |account| {
                 self.state.listing = self.state.folders.is_empty(account);
@@ -739,7 +745,24 @@ pub const Session = struct {
             const count = self.refresh_job.counts[slot];
             const fetched = self.refresh_scratch[offset..][0..count];
 
-            self.adopt_folders(source.id, self.refresh_job.folder_offsets[slot], self.refresh_job.folder_counts[slot]);
+            const listed_count = self.refresh_job.folder_counts[slot];
+            if (listed_count > 0) {
+                const listed = self.folder_scratch[self.refresh_job.folder_offsets[slot]..][0..listed_count];
+                if (self.deps.cache) |cache| {
+                    var records: [core.folder.per_account_max]core.cache_port.Folder = undefined;
+                    const bounded = @min(listed.len, records.len);
+                    for (listed[0..bounded], 0..) |folder, position| {
+                        records[position] = .{
+                            .name = folder.name,
+                            .title = folder.title,
+                            .canonical = folder.canonical,
+                            .unread = folder.unread,
+                        };
+                    }
+                    cache.save_folders(source.id, records[0..bounded]) catch {};
+                }
+            }
+            self.adopt_folders(source.id, self.refresh_job.folder_offsets[slot], listed_count);
             self.apply_target(self.refresh_target, source.id, fetched);
             const place_slot: u8 = if (self.refresh_target.named) |ref| ref.slot else @backingInt(self.refresh_target.mailbox);
             self.loaded_mask |= mask_bit(@intCast(index), place_slot);
@@ -773,7 +796,13 @@ pub const Session = struct {
     /// there, even on a server that lists nothing: the list is the sidebar's, and
     /// an empty sidebar would look like a broken account.
     fn adopt_folders(self: *Session, account: core.id.AccountId, offset: u32, count: u32) void {
-        if (count == 0) return;
+        self.adopt(account, self.folder_scratch[offset..][0..count]);
+    }
+
+    /// Fills the sidebar's table for one account. The same code path for a list
+    /// the server just sent and one the disk remembered.
+    fn adopt(self: *Session, account: core.id.AccountId, listed: []const core.mail_port.Listed) void {
+        if (listed.len == 0) return;
 
         // A slot is a position in this list, and the list is about to be replaced:
         // remember the name of the folder on screen to find it again.
@@ -787,8 +816,8 @@ pub const Session = struct {
         }
 
         self.state.folders.reset(account);
-        for (self.folder_scratch[offset..][0..count]) |listed| {
-            _ = self.state.folders.add_counted(account, listed.name, listed.title, listed.canonical, listed.unread);
+        for (listed) |folder| {
+            _ = self.state.folders.add_counted(account, folder.name, folder.title, folder.canonical, folder.unread);
         }
 
         if (open_name.is_empty()) return;
@@ -805,6 +834,29 @@ pub const Session = struct {
         // Not in the list any more: the list goes back to the mailbox it was on.
         self.state.named = null;
         self.state.rebuild(&self.store);
+    }
+
+    /// Fills the sidebar from the folder list kept on disk, for the accounts in
+    /// scope that have none in memory. A miss is normal: the server will answer.
+    fn load_cached_folders(self: *Session) void {
+        const cache = self.deps.cache orelse return;
+        for (self.live_sources()) |source| {
+            if (!self.in_scope(source.id)) continue;
+            if (!self.state.folders.is_empty(source.id)) continue;
+            const count = cache.load_folders(source.id, &self.cached_folders) catch 0;
+            if (count == 0) continue;
+            var listed: [core.folder.per_account_max]core.mail_port.Listed = undefined;
+            const bounded = @min(count, listed.len);
+            for (self.cached_folders[0..bounded], 0..) |folder, index| {
+                listed[index] = .{
+                    .name = folder.name,
+                    .title = folder.title,
+                    .canonical = folder.canonical,
+                    .unread = folder.unread,
+                };
+            }
+            self.adopt(source.id, listed[0..bounded]);
+        }
     }
 
     /// Waits for an in-flight refresh, then applies its results. Used when a
@@ -6884,4 +6936,31 @@ test "a named folder that disappears from the list goes back to a mailbox" {
     rig.session.settle_refresh_for_test();
     try testing.expect(rig.session.state.named == null);
     try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+}
+
+test "the folder list comes from disk before it comes from the network" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    var cache: core.cache_port.Memory = .{};
+    try cache.cache().save_folders(account, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox, .unread = 4 },
+        .{ .name = "Clients", .title = "Clients", .unread = 2 },
+    });
+    rig.session.deps.cache = cache.cache();
+    rig.session.state.folders.reset(account);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // A scope change asks the disk first: the folders are there before the worker
+    // has even started, and the sidebar never shows the placeholder.
+    rig.session.state.account_filter = core.id.AccountId.from_int(2);
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    try testing.expect(!rig.session.state.listing);
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, 1).?.display());
+    try testing.expectEqual(@as(u32, 2), rig.session.state.folders.at(account, 1).?.unread);
 }

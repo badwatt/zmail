@@ -17,6 +17,17 @@ const Mailbox = @import("domain/mailbox.zig").Mailbox;
 const Flags = @import("domain/message.zig").Flags;
 
 pub const header = meta.cache_header;
+/// The folder list a server gave, kept so the sidebar is there before the
+/// network is. Its own version: a format change is a miss, not garbage.
+pub const folders_header = meta.name ++ "-folders 1";
+
+/// One folder as the cache keeps it.
+pub const Folder = struct {
+    name: []const u8 = "",
+    title: []const u8 = "",
+    canonical: ?Mailbox = null,
+    unread: u32 = 0,
+};
 
 pub const Error = error{
     WrongVersion,
@@ -27,7 +38,7 @@ pub const Error = error{
 pub fn encode(writer: *std.Io.Writer, messages: []const Message) std.Io.Writer.Error!void {
     try writer.print("{s}\n", .{header});
     for (messages) |message| {
-        try writer.print("{d}\t{d}\t{d}\t{s}\t{s}\t{s}\t{s}\t{s}\t{d}\t{d}\t{d}\n", .{
+        try writer.print("{d}\t{d}\t{d}\t{s}\t{s}\t{s}\t{s}\t{s}\t{d}\t{d}\t{d}\t{d}\n", .{
             message.id.to_int(),
             message.account.to_int(),
             @backingInt(message.mailbox),
@@ -39,6 +50,7 @@ pub fn encode(writer: *std.Io.Writer, messages: []const Message) std.Io.Writer.E
             message.timestamp_unix,
             message.size_bytes,
             @as(u8, @bitCast(message.flags)),
+            message.named,
         });
     }
 }
@@ -79,10 +91,55 @@ pub fn decode(text: []const u8, out: []Message) Error!u32 {
         message.size_bytes = try number(&fields, u32);
         const flags_value = try number(&fields, u8);
         message.flags = @bitCast(@as(Flags, @bitCast(flags_value)));
+        // The slot of one of the account's own folders, which the six cannot
+        // express: a message cached in "Clients" comes back in "Clients".
+        message.named = try number(&fields, u8);
 
         if (fields.next() != null) return error.Malformed;
 
         out[count] = message;
+        count += 1;
+    }
+    return count;
+}
+
+/// The folder list of one account: name, what to show, which of the six it is
+/// (6 for none), and the unread count the server gave.
+pub fn encode_folders(writer: *std.Io.Writer, folders: []const Folder) std.Io.Writer.Error!void {
+    try writer.print("{s}\n", .{folders_header});
+    for (folders) |folder| {
+        const canonical: u8 = if (folder.canonical) |mailbox| @backingInt(mailbox) else 6;
+        try writer.print("{s}\t{s}\t{d}\t{d}\n", .{ folder.name, folder.title, canonical, folder.unread });
+    }
+}
+
+/// Reads a folder list into `out`, returning how many were read. The slices point
+/// into `text`, which the caller keeps alive while it copies them into the table.
+pub fn decode_folders(text: []const u8, out: []Folder) Error!u32 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    const first = lines.next() orelse return error.Malformed;
+    if (!std.mem.eql(u8, std.mem.trimEnd(u8, first, "\r"), folders_header)) return error.WrongVersion;
+
+    var count: u32 = 0;
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trimEnd(u8, raw_line, "\r");
+        if (line.len == 0) continue;
+        if (count == out.len) break;
+
+        var fields = std.mem.splitScalar(u8, line, '\t');
+        const name = try text_field(&fields);
+        const title = try text_field(&fields);
+        const canonical_value = try number(&fields, u8);
+        if (canonical_value > 6) return error.Malformed;
+        const unread = try number(&fields, u32);
+        if (fields.next() != null) return error.Malformed;
+
+        out[count] = .{
+            .name = name,
+            .title = title,
+            .canonical = if (canonical_value < 6) Mailbox.from_index(canonical_value) else null,
+            .unread = unread,
+        };
         count += 1;
     }
     return count;
@@ -174,7 +231,7 @@ test "cache: stops at the output capacity" {
 }
 
 test "cache: a different version is a clean miss" {
-    try testing.expectError(error.WrongVersion, decode(meta.name ++ "-cache 2\n", &.{}));
+    try testing.expectError(error.WrongVersion, decode(meta.name ++ "-cache 1\n", &.{}));
     try testing.expectError(error.WrongVersion, decode("", &.{}));
     try testing.expectError(error.WrongVersion, decode("garbage\n", &.{}));
 }
@@ -190,8 +247,44 @@ test "cache: malformed records are refused" {
 
 test "cache: blank lines and CRLF are tolerated" {
     const text = header ++ "\r\n\r\n" ++
-        "1\t1\t0\tA\tb\tc\ts\ts\t0\t1\t0\r\n";
+        "1\t1\t0\tA\tb\tc\ts\ts\t0\t1\t0\t255\r\n";
     var decoded: [1]Message = undefined;
     try testing.expectEqual(@as(u32, 1), try decode(text, &decoded));
     try testing.expectEqual(MessageId.from_int(1), decoded[0].id);
+}
+
+test "folders: a list survives the round trip, names and mapping and all" {
+    var buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try encode_folders(&writer, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox, .unread = 4 },
+        .{ .name = "[Gmail]/All Mail", .title = "All Mail", .canonical = null, .unread = 7 },
+    });
+
+    var decoded: [4]Folder = undefined;
+    const count = try decode_folders(writer.buffered(), &decoded);
+    try testing.expectEqual(@as(u32, 2), count);
+    try testing.expectEqualStrings("INBOX", decoded[0].name);
+    try testing.expectEqual(Mailbox.inbox, decoded[0].canonical.?);
+    try testing.expectEqual(@as(u32, 4), decoded[0].unread);
+    try testing.expectEqualStrings("[Gmail]/All Mail", decoded[1].name);
+    try testing.expectEqualStrings("All Mail", decoded[1].title);
+    try testing.expectEqual(@as(?Mailbox, null), decoded[1].canonical);
+}
+
+test "folders: the cache stops at the buffer it was given, and refuses garbage" {
+    var buffer: [512]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try encode_folders(&writer, &.{
+        .{ .name = "a" },
+        .{ .name = "b" },
+        .{ .name = "c" },
+    });
+
+    var small: [2]Folder = undefined;
+    try testing.expectEqual(@as(u32, 2), try decode_folders(writer.buffered(), &small));
+
+    try testing.expectError(error.WrongVersion, decode_folders("other 1\n", &small));
+    try testing.expectError(error.Malformed, decode_folders(folders_header ++ "\nname\n", &small));
+    try testing.expectError(error.Malformed, decode_folders(folders_header ++ "\nname\tt\t9\t0\n", &small));
 }

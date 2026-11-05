@@ -20,7 +20,7 @@ pub const minimum_zig_version: []const u8 = zon.minimum_zig_version;
 
 /// A file format tag: the product name and a format number. Reading an old file
 /// is refused rather than misread, so a rename invalidates caches on purpose.
-pub const cache_header = name ++ "-cache 1";
+pub const cache_header = name ++ "-cache 2";
 
 test "name is non-empty and contains no whitespace" {
     try std.testing.expect(name.len > 0);

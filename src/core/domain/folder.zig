@@ -101,6 +101,20 @@ pub const Table = struct {
             if (entry.title.is_empty() and title.len > 0) entry.title.set(title);
             return slot;
         }
+        // Two names can be the same folder: a server that flags both "Junk" and
+        // "Spam" with \Junk is telling us about one Junk, and two rows for it
+        // would let J walk in place forever.
+        if (canonical) |wanted| {
+            var existing: u8 = 0;
+            while (existing < used) : (existing += 1) {
+                const entry = &self.entries[position][existing];
+                const have = entry.canonical orelse continue;
+                if (have != wanted) continue;
+                if (unread > entry.unread) entry.unread = unread;
+                return existing;
+            }
+        }
+
         if (used == per_account_max) return null;
         self.entries[position][used] = .{ .canonical = canonical, .unread = unread };
         self.entries[position][used].name.set(name);
@@ -202,4 +216,17 @@ test "folder: a slot of one account cannot be read as another's" {
     _ = table.add(AccountId.from_int(1), "Receipts", null);
     try testing.expect(table.at(AccountId.from_int(2), 0) == null);
     try testing.expect(table.at(AccountId.from_int(1), 0) != null);
+}
+
+test "folder: two names that are the same mailbox are one folder" {
+    var table: Table = .{};
+    const account = AccountId.from_int(1);
+    try testing.expectEqual(@as(u8, 0), table.add(account, "Junk", .junk).?);
+    // The server also lists "Spam" as \Junk: same folder, same row.
+    try testing.expectEqual(@as(u8, 0), table.add_counted(account, "Spam", "", .junk, 4).?);
+    try testing.expectEqual(@as(u8, 1), table.count(account));
+    try testing.expectEqual(@as(u32, 4), table.at(account, 0).?.unread);
+    // The name it keeps is the first one the server gave: that is what a port
+    // call has to send.
+    try testing.expectEqualStrings("Junk", table.at(account, 0).?.name.slice());
 }
