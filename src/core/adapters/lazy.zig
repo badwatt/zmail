@@ -60,6 +60,30 @@ pub const LazyMail = struct {
         return opened;
     }
 
+    /// Runs one port call; if the server turned out to be gone, opens it again and
+    /// runs the call once more.
+    ///
+    /// Servers hang up: a mailbox with forty folders is forty `STATUS` commands,
+    /// and Gmail answers a burst of those by closing the socket. Without this,
+    /// every call after that burst failed with "could not load this message" and
+    /// only a restart helped -- and mail you have already seen must open.
+    fn attempt(
+        self: *LazyMail,
+        comptime T: type,
+        args: anytype,
+        comptime call: fn (@TypeOf(args), port.Mail) port.Error!T,
+    ) port.Error!T {
+        const opened = self.ensure() catch |err| return err;
+        return call(args, opened) catch |err| {
+            // One retry, on a fresh connection: a loop here would be a mail client
+            // hammering a server that is down.
+            if (err != error.Unavailable) return err;
+            self.close();
+            const again = self.ensure() catch |second| return second;
+            return call(args, again);
+        };
+    }
+
     fn connectedThunk(context: *anyopaque) bool {
         const self: *LazyMail = @ptrCast(@alignCast(context));
         return self.connected();
@@ -67,12 +91,22 @@ pub const LazyMail = struct {
 
     fn foldersThunk(context: *anyopaque, out: []port.Listed) port.Error!u32 {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).folders(out);
+        const Call = struct {
+            fn run(args: @TypeOf(.{out}), opened: port.Mail) port.Error!u32 {
+                return opened.folders(args[0]);
+            }
+        };
+        return self.attempt(u32, .{out}, Call.run);
     }
 
     fn fetchThunk(context: *anyopaque, place: port.Place, out: []Message) port.Error!u32 {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).fetch(place, out);
+        const Call = struct {
+            fn run(args: @TypeOf(.{ place, out }), opened: port.Mail) port.Error!u32 {
+                return opened.fetch(args[0], args[1]);
+            }
+        };
+        return self.attempt(u32, .{ place, out }, Call.run);
     }
 
     fn fetchBodyThunk(
@@ -82,7 +116,12 @@ pub const LazyMail = struct {
         out: []u8,
     ) port.Error![]const u8 {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).fetch_body(place, id, out);
+        const Call = struct {
+            fn run(args: @TypeOf(.{ place, id, out }), opened: port.Mail) port.Error![]const u8 {
+                return opened.fetch_body(args[0], args[1], args[2]);
+            }
+        };
+        return self.attempt([]const u8, .{ place, id, out }, Call.run);
     }
 
     fn fetchRawThunk(
@@ -92,27 +131,52 @@ pub const LazyMail = struct {
         out: []u8,
     ) port.Error![]const u8 {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).fetch_raw(place, id, out);
+        const Call = struct {
+            fn run(args: @TypeOf(.{ place, id, out }), opened: port.Mail) port.Error![]const u8 {
+                return opened.fetch_raw(args[0], args[1], args[2]);
+            }
+        };
+        return self.attempt([]const u8, .{ place, id, out }, Call.run);
     }
 
     fn setFlagsThunk(context: *anyopaque, place: port.Place, id: MessageId, flags: Flags) port.Error!void {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).set_flags(place, id, flags);
+        const Call = struct {
+            fn run(args: @TypeOf(.{ place, id, flags }), opened: port.Mail) port.Error!void {
+                return opened.set_flags(args[0], args[1], args[2]);
+            }
+        };
+        return self.attempt(void, .{ place, id, flags }, Call.run);
     }
 
     fn deleteThunk(context: *anyopaque, place: port.Place, id: MessageId) port.Error!void {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).delete_message(place, id);
+        const Call = struct {
+            fn run(args: @TypeOf(.{ place, id }), opened: port.Mail) port.Error!void {
+                return opened.delete_message(args[0], args[1]);
+            }
+        };
+        return self.attempt(void, .{ place, id }, Call.run);
     }
 
     fn emptyThunk(context: *anyopaque, place: port.Place) port.Error!void {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).empty_mailbox(place);
+        const Call = struct {
+            fn run(args: @TypeOf(.{place}), opened: port.Mail) port.Error!void {
+                return opened.empty_mailbox(args[0]);
+            }
+        };
+        return self.attempt(void, .{place}, Call.run);
     }
 
     fn moveThunk(context: *anyopaque, place: port.Place, id: MessageId, to: port.Place) port.Error!void {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).move_message(place, id, to);
+        const Call = struct {
+            fn run(args: @TypeOf(.{ place, id, to }), opened: port.Mail) port.Error!void {
+                return opened.move_message(args[0], args[1], args[2]);
+            }
+        };
+        return self.attempt(void, .{ place, id, to }, Call.run);
     }
 };
 
@@ -158,6 +222,8 @@ const AccountId = @import("../domain/id.zig").AccountId;
 
 const Opener = struct {
     mail: MemoryMail = MemoryMail.init(),
+    /// When set, the connection hands out this port instead of `mail`.
+    flaky: ?*Flaky = null,
     opens: u32 = 0,
     closes: u32 = 0,
     fail: bool = false,
@@ -166,6 +232,7 @@ const Opener = struct {
         const self: *Opener = @ptrCast(@alignCast(context));
         self.opens += 1;
         if (self.fail) return error.Unavailable;
+        if (self.flaky) |flaky| return flaky.mail();
         return self.mail.mail();
     }
 
@@ -340,3 +407,105 @@ test "lazy mail: the folder list goes through the opened connection" {
     try testing.expect(count > 0);
     try testing.expectEqualStrings("Inbox", out[0].name);
 }
+
+test "lazy mail: a server that hung up is opened again for the same call" {
+    var flaky: Flaky = .{};
+    var opener = Opener{ .flaky = &flaky };
+    var lazy = opener.lazy();
+    defer lazy.close();
+    var message = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(1) };
+    try flaky.inner.seed(&message);
+
+    var out: [4]Message = undefined;
+    try testing.expectEqual(@as(u32, 1), try lazy.mail().fetch(port.Place.inbox, &out));
+    try testing.expectEqual(@as(u32, 1), opener.opens);
+
+    // The open connection is dead: the first call on it fails with Unavailable,
+    // which is what a server that hung up looks like from here.
+    flaky.hang_ups = 1;
+    try testing.expectEqual(@as(u32, 1), try lazy.mail().fetch(port.Place.inbox, &out));
+    try testing.expectEqual(@as(u32, 2), opener.opens);
+
+    // A rejection is the server saying no, not a hang-up: no second attempt.
+    flaky.reject = true;
+    try testing.expectError(error.Rejected, lazy.mail().fetch(port.Place.inbox, &out));
+    try testing.expectEqual(@as(u32, 2), opener.opens);
+
+    // Every call recovers the same way, not just the one that shows the list.
+    flaky.reject = false;
+    flaky.hang_ups = 1;
+    var body: [64]u8 = undefined;
+    _ = try lazy.mail().fetch_raw(port.Place.inbox, MessageId.from_int(1), &body);
+    try testing.expectEqual(@as(u32, 3), opener.opens);
+    try lazy.mail().set_flags(port.Place.inbox, MessageId.from_int(1), .{ .unread = false });
+    try lazy.mail().move_message(port.Place.inbox, MessageId.from_int(1), port.Place.archive);
+    // It is in Archive now, and only there: the same call in Trash is a NotFound,
+    // which is the server's answer and not something to retry.
+    try lazy.mail().empty_mailbox(port.Place.trash);
+    try lazy.mail().delete_message(port.Place.archive, MessageId.from_int(1));
+}
+
+/// A mail port that hangs up (or refuses) on demand, so the lazy wrapper has
+/// something to recover from.
+const Flaky = struct {
+    inner: MemoryMail = MemoryMail.init(),
+    hang_ups: u32 = 0,
+    reject: bool = false,
+
+    fn answer(self: *Flaky) ?port.Error {
+        if (self.reject) return error.Rejected;
+        if (self.hang_ups > 0) {
+            self.hang_ups -= 1;
+            return error.Unavailable;
+        }
+        return null;
+    }
+
+    fn mail(self: *Flaky) port.Mail {
+        return .{ .context = self, .vtable = &.{
+            .fetch = fetchThunk,
+            .fetch_body = fetchRawThunk,
+            .fetch_raw = fetchRawThunk,
+            .set_flags = setFlagsThunk,
+            .move_message = moveThunk,
+            .delete_message = deleteThunk,
+            .empty_mailbox = emptyThunk,
+        } };
+    }
+
+    fn fetchThunk(context: *anyopaque, place: port.Place, out: []Message) port.Error!u32 {
+        const self: *Flaky = @ptrCast(@alignCast(context));
+        if (self.answer()) |err| return err;
+        return self.inner.mail().fetch(place, out);
+    }
+
+    fn fetchRawThunk(context: *anyopaque, place: port.Place, id: MessageId, out: []u8) port.Error![]const u8 {
+        const self: *Flaky = @ptrCast(@alignCast(context));
+        if (self.answer()) |err| return err;
+        return self.inner.mail().fetch_raw(place, id, out);
+    }
+
+    fn setFlagsThunk(context: *anyopaque, place: port.Place, id: MessageId, flags: Flags) port.Error!void {
+        const self: *Flaky = @ptrCast(@alignCast(context));
+        if (self.answer()) |err| return err;
+        return self.inner.mail().set_flags(place, id, flags);
+    }
+
+    fn moveThunk(context: *anyopaque, place: port.Place, id: MessageId, to: port.Place) port.Error!void {
+        const self: *Flaky = @ptrCast(@alignCast(context));
+        if (self.answer()) |err| return err;
+        return self.inner.mail().move_message(place, id, to);
+    }
+
+    fn deleteThunk(context: *anyopaque, place: port.Place, id: MessageId) port.Error!void {
+        const self: *Flaky = @ptrCast(@alignCast(context));
+        if (self.answer()) |err| return err;
+        return self.inner.mail().delete_message(place, id);
+    }
+
+    fn emptyThunk(context: *anyopaque, place: port.Place) port.Error!void {
+        const self: *Flaky = @ptrCast(@alignCast(context));
+        if (self.answer()) |err| return err;
+        return self.inner.mail().empty_mailbox(place);
+    }
+};
