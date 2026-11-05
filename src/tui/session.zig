@@ -698,10 +698,13 @@ pub const Session = struct {
 
         // A connection nobody has opened yet must be opened here, on the thread
         // that owns the transport. The worker cannot: it would create the TLS
-        // stream from another thread and both wait forever.
+        // stream from another thread and both wait forever. But a key that only
+        // moves through the mail is not a reason to open a socket at all: what is
+        // on disk is what you asked for, and `Ctrl+R` is how you ask for more.
         for (self.live_sources()) |source| {
             if (!self.in_scope(source.id)) continue;
             if (source.mail.connected()) continue;
+            if (!refresh_forced) return;
             // It blocks, and there is nothing to be done about that: the footer
             // says so *before* the wait.
             if (!self.connect(source.mail)) return;
@@ -1221,9 +1224,12 @@ pub const Session = struct {
         self.state.offset = 0;
         self.state.rebuild(&self.store);
         self.needs_render = true;
-        // A scope change asks the account what folders it has: the sidebar for
-        // that account is the server's answer, not a stale one.
-        self.start_refresh();
+        // A scope change reads the disk and nothing else: the folders of the
+        // account just chosen are the ones the last run kept, and a key that only
+        // moves through the mail does not open a socket. `Ctrl+R` is how a stale
+        // list becomes a fresh one.
+        self.load_cached_folders();
+        self.repaint();
     }
 
     /// The whole message as another program would show it: the browser for the
@@ -6520,7 +6526,7 @@ test "a refresh that would have to open the connection does it here, not in a wo
     rig.session.sources[0].mail = .{ .context = &rig.fake_mail, .vtable = &vtable };
 
     const before = rig.fake_mail.fetch_calls;
-    rig.session.start_refresh();
+    rig.session.start_refresh_listing_for_test();
 
     // The connection was opened here, the port now says so, and the fetch
     // happened on this thread: nothing is running, and the messages are here.
@@ -6938,11 +6944,11 @@ test "the folders the account lists are the ones its sidebar shows" {
     rig.session.needs_render = true;
     _ = rig.session.step();
 
-    // Choosing the account asks it what it has.
-    // The scope starts on every account; choosing one is a change, and a change
-    // is what asks the account for its folders.
+    // Choosing the account reads the disk (nothing, here) and asks nothing of the
+    // server; `Ctrl+R` is what asks, and what the sidebar then shows.
     rig.session.state.account_filter = null;
     _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    rig.session.start_refresh_listing_for_test();
     rig.session.settle_refresh_for_test();
     // The server listed two folders, so those two are what the sidebar shows: the
     // six are what an account has when nobody has said otherwise.
@@ -7037,6 +7043,8 @@ test "the folders load in the order J walks them, and the sidebar says when they
     var rows: [32]core.state.MoveRow = undefined;
     try testing.expect(rig.session.state.folder_rows(&rows) > 0);
 
+    // `Ctrl+R`: the key that asks the server, and the one the sidebar follows.
+    rig.session.start_refresh_listing_for_test();
     rig.session.settle_refresh_for_test();
     try testing.expectEqual(@as(u8, 3), rig.session.state.folders.count(account));
 
@@ -7067,6 +7075,7 @@ test "a named folder that disappears from the list goes back to a mailbox" {
     // Open it: the scope follows the folder, as it must.
     rig.session.state.account_filter = null;
     _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    rig.session.start_refresh_listing_for_test();
     rig.session.settle_refresh_for_test();
     _ = rig.session.handle_mouse(.{ .x = 4, .y = 3, .kind = .press, .button = .left });
     rig.session.settle_refresh_for_test();
@@ -7252,7 +7261,8 @@ test "the first connection says so before it blocks, and lists the folders after
 
     rig.session.state.account_filter = null;
     rig.fake_system.output_len = 0;
-    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    // `Ctrl+R` on that account: the one key that opens a socket.
+    rig.session.start_refresh_listing_for_test();
 
     // Painted before the wait: the frame that says what is happening went out
     // before the connection blocked.
@@ -7577,8 +7587,8 @@ test "a connection that will not open says so, and neither refreshes nor reads" 
     vtable.open = stuckClose;
     rig.session.sources[0].mail = .{ .context = &rig.fake_mail, .vtable = &vtable };
 
-    // A refresh gives up honestly instead of hanging on "Connecting…".
-    rig.session.start_refresh();
+    // An explicit refresh gives up honestly instead of hanging on "Connecting…".
+    rig.session.start_refresh_listing_for_test();
     try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Could not connect") != null);
     try testing.expect(!rig.session.refreshing);
 
