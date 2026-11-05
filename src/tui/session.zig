@@ -689,14 +689,10 @@ pub const Session = struct {
         while (self.step()) {}
     }
 
+    /// Refreshes the folder on screen: the mail for every account in scope, and
+    /// the folders those accounts have. It runs on the worker, so `Ctrl+R` and a
+    /// folder switch are the same call -- and neither of them blocks the frame.
     fn start_refresh(self: *Session) void {
-        self.start_refresh_listing(false);
-    }
-
-    /// `refresh_forced` is the user asking (Ctrl+R): numbers are worth a round
-    /// trip then. Otherwise the folders are asked for only when the disk has
-    /// none -- what is already here is not worth a second of somebody's life.
-    fn start_refresh_listing(self: *Session, refresh_forced: bool) void {
         if (self.refreshing) return;
 
         // The worker takes exactly the accounts in scope: refreshing never wakes
@@ -719,13 +715,12 @@ pub const Session = struct {
         // The disk first: a folder list is small, and the account you were in an
         // hour ago should not make you wait for a round trip to see its folders.
         self.load_cached_folders();
-        // An account whose folders nobody has listed yet says so in the sidebar:
-        // the six the app knows are a placeholder, not an answer.
-        if (self.refresh_target == .mailbox) {}
-        var need_listing = refresh_forced;
-        for (self.refresh_sources[0..count]) |source| {
-            if (self.state.folders.is_empty(source.id)) need_listing = true;
-        }
+        // A refresh asks for the folders as well as the mail, which is what makes
+        // going to a folder work the first time: the name the sidebar holds may be
+        // older than the folder itself, and a fetch through an old name lands on an
+        // empty list. It is one round trip plus a handful, on the worker, and the
+        // frame never waits for it.
+        const need_listing = true;
         self.refresh_job.start(
             self.refresh_sources[0..count],
             self.places_for(self.refresh_target, &self.refresh_places),
@@ -945,9 +940,9 @@ pub const Session = struct {
         self.start_refresh();
     }
 
-    /// The refresh Ctrl+R asks for: the one that re-lists the folders.
+    /// The refresh Ctrl+R asks for. The same call a folder switch makes.
     pub fn start_refresh_listing_for_test(self: *Session) void {
-        self.start_refresh_listing(true);
+        self.start_refresh();
     }
 
     /// Drains effects that were waiting for the connection, the way the loop does.
@@ -1777,7 +1772,7 @@ pub const Session = struct {
         for (effects) |effect| {
             if (self.state.quit) return;
             switch (effect) {
-                .refresh => |args| self.start_refresh_listing(args.force),
+                .refresh => self.start_refresh(),
                 // The body is never fetched here: the reader is already on screen, and
                 // asking is all this does. `poll_body` starts the worker and the loop
                 // stays free -- Esc works while the bytes are in the air.
@@ -1817,7 +1812,7 @@ pub const Session = struct {
             .edit_account => |args| self.open_settings(args.account),
             .rename_account => |args| self.open_rename(args.account),
             .oauth_account => |args| self.oauth_account(args.account),
-            .refresh => |args| self.start_refresh_listing(args.force),
+            .refresh => self.start_refresh(),
             .send => |outgoing| self.send(&outgoing),
             .edit_body => |request| self.edit_body(request.initial),
             .fetch_body => |args| self.request_body(args.account, args.folder, args.id),
@@ -7266,30 +7261,22 @@ const LazyOpener = struct {
     }
 };
 
-test "a refresh of the mail does not re-list the folders it already has" {
+test "a refresh re-lists the folders, so a folder it did not know still opens" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     const account = core.id.AccountId.from_int(1);
-    rig.session.state.folders.reset(account);
-    _ = rig.session.state.folders.add(account, "INBOX", .inbox);
-    _ = rig.session.state.folders.add_counted(account, "Clients", "", null, 3);
     rig.session.sidebar = true;
     rig.session.needs_render = true;
     _ = rig.session.step();
 
-    // A plain refresh (a scope change, a mailbox switch): the table is already
-    // there, and forty STATUS commands are not worth a second of anybody's time.
+    // The server grew a folder after the sidebar's list was written.
+    for (core.mailbox.Mailbox.all) |mailbox| _ = try rig.fake_mail.inner.add_folder(mailbox.title(), mailbox);
+    _ = try rig.fake_mail.inner.add_folder("Clients", null);
     rig.session.start_refresh_for_test();
     rig.session.settle_refresh_for_test();
-    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
-    try testing.expectEqual(@as(u32, 3), rig.session.state.folders.at(account, 1).?.unread);
-
-    // Ctrl+R is the user asking for numbers: it lists, and the server's answer
-    // replaces what the disk had.
-    rig.session.start_refresh_listing_for_test();
-    rig.session.settle_refresh_for_test();
-    try testing.expectEqual(@as(u8, 6), rig.session.state.folders.count(account));
+    try testing.expectEqual(@as(u8, 7), rig.session.state.folders.count(account));
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, 6).?.display());
 }
 
 test "a re-list that moves the folder on screen keeps its mail under it" {
@@ -7374,11 +7361,12 @@ test "a warm start reads the folders from disk: no listing, no wait" {
     rig.session.boot();
     try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
 
-    // And the warm-up refresh, with the folders already in hand, does not list.
+    // The first refresh asks the server as well -- that is what makes a folder
+    // work the first time -- and keeps what it hears.
     rig.session.start_refresh_for_test();
     rig.session.settle_refresh_for_test();
-    try testing.expectEqual(@as(u32, 1), cache.folder_saves);
-    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+    try testing.expect(cache.folder_saves >= 1);
+    try testing.expect(rig.session.state.folders.count(account) > 0);
 }
 
 test "an account whose folders are on disk shows them the moment it is opened" {

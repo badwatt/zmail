@@ -169,7 +169,13 @@ pub const ImapMail = struct {
             const name = if (place.name.len > 0) place.name else self.serverName(mailbox) orelse return false;
             self.exists = self.client.select_name(name) catch |err| switch (err) {
                 error.NotFound => blk: {
-                    if (self.listed) return false;
+                    // A name the caller gave us is the sidebar's, and the sidebar's
+                    // list came from this server: a refusal is the folder being
+                    // gone, not a guess to check. A name we guessed from the title
+                    // is a guess, and asking the server what it has is how it
+                    // becomes the folder instead of an empty list.
+                    if (place.name.len > 0) return false;
+                    self.listed = false;
                     self.listOnce();
                     const retry = self.serverName(mailbox) orelse return false;
                     break :blk self.client.select_name(retry) catch |second| return mapError(second);
