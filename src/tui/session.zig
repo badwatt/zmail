@@ -7476,3 +7476,55 @@ test "the folders survive a restart through the file cache" {
         try testing.expectEqual(@as(u8, 7), rig.session.state.folders.count(account));
     }
 }
+
+test "switching accounts saves the folders it had to ask for" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try std.fmt.bufPrint(&path_buffer, "{s}{c}{s}", .{
+        std.testing.TmpDir.parent_dir_path, std.fs.path.sep, tmp.sub_path,
+    });
+    var labels = [_]net.cache_file.Label{
+        .{ .id = core.id.AccountId.from_int(1), .label = "gmail" },
+        .{ .id = core.id.AccountId.from_int(2), .label = "azama" },
+    };
+    const gmail = core.id.AccountId.from_int(1);
+    const azama = core.id.AccountId.from_int(2);
+
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        for (core.mailbox.Mailbox.all) |mailbox| _ = try rig.fake_mail.inner.add_folder(mailbox.title(), mailbox);
+        _ = try rig.fake_mail.inner.add_folder("Destacados", null);
+        var opener = LazyOpener{ .target = &rig.fake_mail };
+        var sources = [_]MailSource{
+            .{ .id = gmail, .label = "gmail", .mail = opener.mail() },
+            .{ .id = azama, .label = "azama", .mail = rig.fake_mail.mail() },
+        };
+        var cache = net.cache_file.FileCache.init(std.testing.allocator, std.testing.io, base, &labels);
+        try rig.arm(.{ .accounts = &sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.sidebar = true;
+
+        // The scope starts on azama: gmail is never opened, so its folders are
+        // unknown the moment the user switches to it.
+        rig.session.state.account_filter = azama;
+        rig.session.needs_boot = false;
+        rig.session.boot();
+        try testing.expectEqual(@as(u8, 0), rig.session.state.folders.count(gmail));
+
+        // The switch: a handshake, then the list -- and the list has to be kept.
+        rig.session.state.account_filter = null;
+        _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+        rig.session.settle_boot_for_test();
+        rig.session.settle_refresh_for_test();
+        try testing.expectEqual(gmail, rig.session.state.account_filter.?);
+        try testing.expect(rig.session.state.folders.count(gmail) > 0);
+    }
+
+    // On disk, under the account's own label.
+    var file_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&file_buffer, "{s}/gmail/folders.bin", .{base});
+    var file = try std.Io.Dir.cwd().openFile(std.testing.io, file_path, .{});
+    file.close(std.testing.io);
+}
