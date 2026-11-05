@@ -66,6 +66,11 @@ pub const Mail = struct {
         return true;
     }
 
+    /// Opens the connection, for the thread that is allowed to: a lazy port does
+    /// its work here instead of on the first call, so the wait happens where it
+    /// can be painted first.
+    fn no_open(_: *anyopaque) void {}
+
     /// A port with no folder list of its own: nothing to add to the sidebar.
     fn no_folders(_: *anyopaque, _: []Listed) Error!u32 {
         return 0;
@@ -81,6 +86,9 @@ pub const Mail = struct {
         /// too small, the oldest messages are dropped.
         /// The folders the server has, once it has said. A port that never
         /// lists (the demo's memory mail says all it knows) returns 0.
+        /// Opens the connection, when the port opens lazily. Called on the thread
+        /// that owns the transport, before a worker touches it.
+        open: *const fn (context: *anyopaque) void = no_open,
         folders: *const fn (context: *anyopaque, out: []Listed) Error!u32 = no_folders,
         fetch: *const fn (context: *anyopaque, place: Place, out: []Message) Error!u32,
         /// Copies the displayable text of `id` (which lives in `mailbox`) into
@@ -101,6 +109,12 @@ pub const Mail = struct {
 
     pub fn connected(self: Mail) bool {
         return self.vtable.connected(self.context);
+    }
+
+    /// Opens the connection if it is not open. A failure is not an error here:
+    /// the port reports it on the call that needed it.
+    pub fn open(self: Mail) void {
+        self.vtable.open(self.context);
     }
 
     pub fn folders(self: Mail, out: []Listed) Error!u32 {
@@ -336,4 +350,20 @@ test "Mail.folders reports nothing when a port does not list" {
         .empty_mailbox = Recorder.emptyThunk,
     } };
     try testing.expectEqual(@as(u32, 0), try plain.folders(&out));
+}
+
+test "a port that does not open lazily still answers open" {
+    var recorder: Recorder = .{};
+    const plain = Mail{ .context = &recorder, .vtable = &.{
+        .fetch = Recorder.fetchThunk,
+        .fetch_body = Recorder.fetchBodyThunk,
+        .fetch_raw = Recorder.fetchRawThunk,
+        .set_flags = Recorder.setFlagsThunk,
+        .move_message = Recorder.moveThunk,
+        .delete_message = Recorder.deleteThunk,
+        .empty_mailbox = Recorder.emptyThunk,
+    } };
+    // Nothing to open and nothing to report: the default is a no-op.
+    plain.open();
+    try testing.expect(plain.connected());
 }

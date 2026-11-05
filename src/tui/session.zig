@@ -663,7 +663,6 @@ pub const Session = struct {
     /// Runs until the user quits. `run.zig` wraps this with raw mode and the
     /// alternate screen.
     pub fn loop(self: *Session) void {
-        const needs_network = self.needs_boot;
         if (self.deps.splash) {
             // Every start has its first screen, and it breathes while the connection
             // is made: `splash_on` puts it up, `boot` decides what to fetch, and
@@ -680,12 +679,10 @@ pub const Session = struct {
             self.render();
         }
 
-        // Starting from cache means no connection is open. Opening a message
-        // would then pay TCP + TLS + LOGIN before the first byte of mail, so
-        // warm it in the background (this is the worker thread: no freeze)
-        // while the user reads what is already on screen.
-        if (!needs_network and self.source_count > 0) self.start_refresh();
-
+        // And then nothing else: with a cache, the first frame opens no socket.
+        // The connection is made when something is asked of the server -- a
+        // refresh, a body that is not on disk -- and made here, on the thread that
+        // owns it, with the footer saying so.
         while (self.step()) {}
     }
 
@@ -705,12 +702,9 @@ pub const Session = struct {
         for (self.live_sources()) |source| {
             if (!self.in_scope(source.id)) continue;
             if (source.mail.connected()) continue;
-            // It blocks, and there is nothing to be done about that: say so on
-            // screen *before* the wait, or the client looks hung for however long
-            // a handshake takes. Whether the sidebar has folders to show is a
-            // question for the disk, and the disk is read after this.
-            _ = self.say("Connecting…", .{});
-            self.render();
+            // It blocks, and there is nothing to be done about that: the footer
+            // says so *before* the wait.
+            if (!self.connect(source.mail)) return;
             self.reload(self.state.mailbox);
             // Connected now, so the folders can be listed -- on the worker, where
             // a round trip per folder belongs.
@@ -877,6 +871,19 @@ pub const Session = struct {
         // Not in the list any more: the list goes back to the mailbox it was on.
         self.state.named = null;
         self.state.rebuild(&self.store);
+    }
+
+    /// Opens the connection of an account, on this thread: the transport belongs
+    /// to the event loop, and opening it from a worker leaves both waiting.
+    /// Says so before the wait, because a handshake is a second of silence.
+    fn connect(self: *Session, source: core.mail_port.Mail) bool {
+        if (source.connected()) return true;
+        _ = self.say("Connecting…", .{});
+        self.render();
+        source.open();
+        if (source.connected()) return true;
+        self.state.set_alert("Could not connect to the server", .{});
+        return false;
     }
 
     /// Starts a listing when some account's folders are still unknown: the
@@ -1947,6 +1954,18 @@ pub const Session = struct {
         // One connection per account: a refresh owns it until it finishes, and the
         // picture worker is another thread using the same IO.
         if (self.refreshing or self.image_in_flight) return;
+        // The bytes are not on disk, so this needs the server: the connection is
+        // opened here, where the wait can be painted first, and never inside the
+        // worker that owns nothing.
+        if (self.source_for(request.account)) |mail_source| {
+            if (!self.connect(mail_source)) {
+                self.body_request = null;
+                self.body_failed(request.folder, request.id);
+                self.state.set_alert("Could not connect to the server", .{});
+                self.repaint();
+                return;
+            }
+        }
         self.body_request = null;
         self.body_in_flight = true;
         self.body_job.start(request, &self.raw);
@@ -2900,6 +2919,8 @@ const FakeMail = struct {
     /// How many times the session asked this account for mail: the way to see
     /// that an account out of scope is never opened.
     fetch_calls: u32 = 0,
+    /// Set by the `open` thunk of the tests that pretend to open lazily.
+    opened: bool = false,
     /// What the server answered, when it answers at all.
     fetch_failure: ?core.mail_port.Error = null,
     fail_body: bool = false,
@@ -6467,8 +6488,16 @@ test "a click on text that is not a link opens nothing" {
     try testing.expect(rig.session.target_at(2, &out) == null);
 }
 
-fn neverConnected(_: *anyopaque) bool {
-    return false;
+/// The same port, after `open` has been called: this is what the lazy adapter
+/// does, and what tells the session the wait is over.
+fn opensOnDemand(context: *anyopaque) bool {
+    const self: *FakeMail = @ptrCast(@alignCast(context));
+    return self.opened;
+}
+
+fn openOnDemand(context: *anyopaque) void {
+    const self: *FakeMail = @ptrCast(@alignCast(context));
+    self.opened = true;
 }
 
 test "a refresh that would have to open the connection does it here, not in a worker" {
@@ -6482,15 +6511,20 @@ test "a refresh that would have to open the connection does it here, not in a wo
     // The port says the connection was never opened. A worker that opened it
     // would build the TLS stream on a thread that does not own the transport, and
     // the process dies there.
+    // The port says "not connected" until it is opened, which is what the real
+    // lazy adapter does.
     var vtable = rig.fake_mail.mail().vtable.*;
-    vtable.connected = neverConnected;
+    vtable.connected = opensOnDemand;
+    vtable.open = openOnDemand;
+    rig.fake_mail.opened = false;
     rig.session.sources[0].mail = .{ .context = &rig.fake_mail, .vtable = &vtable };
 
     const before = rig.fake_mail.fetch_calls;
     rig.session.start_refresh();
 
-    // The fetch happened on this thread: nothing is running, and the messages are
-    // here.
+    // The connection was opened here, the port now says so, and the fetch
+    // happened on this thread: nothing is running, and the messages are here.
+    try testing.expect(rig.fake_mail.opened);
     try testing.expect(!rig.session.refreshing);
     try testing.expectEqual(before + 1, rig.fake_mail.fetch_calls);
     try testing.expect(rig.session.state.row_count() > 0);
@@ -7528,3 +7562,42 @@ test "switching accounts saves the folders it had to ask for" {
     var file = try std.Io.Dir.cwd().openFile(std.testing.io, file_path, .{});
     file.close(std.testing.io);
 }
+
+test "a connection that will not open says so, and neither refreshes nor reads" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.settle_refresh_for_test();
+
+    // A port that says it is not connected and cannot become connected: the
+    // server is unreachable, or the login is refused.
+    var vtable = rig.fake_mail.mail().vtable.*;
+    vtable.connected = stuckClosed;
+    vtable.open = stuckClose;
+    rig.session.sources[0].mail = .{ .context = &rig.fake_mail, .vtable = &vtable };
+
+    // A refresh gives up honestly instead of hanging on "Connecting…".
+    rig.session.start_refresh();
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Could not connect") != null);
+    try testing.expect(!rig.session.refreshing);
+
+    // And a body that is not on disk fails the same way, without starting a job
+    // on a connection that is not there.
+    rig.session.body_request = .{
+        .account = core.id.AccountId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
+        .place = .{ .mailbox = .inbox },
+        .id = MessageId.from_int(1),
+        .mail = rig.session.sources[0].mail,
+    };
+    _ = rig.session.step();
+    try testing.expect(!rig.session.body_in_flight);
+    try testing.expect(rig.session.body_request == null);
+}
+
+fn stuckClosed(_: *anyopaque) bool {
+    return false;
+}
+
+fn stuckClose(_: *anyopaque) void {}
