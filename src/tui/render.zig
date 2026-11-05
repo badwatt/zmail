@@ -250,7 +250,13 @@ fn render_list(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 pub const SidebarEntry = union(enum) {
     all_accounts,
     account: core.id.AccountId,
-    folder: struct { account: ?core.id.AccountId, mailbox: Mailbox },
+    /// A folder row. `mailbox` is one of the six; `slot` is one of the account's
+    /// own folders, as `LIST` named them. Exactly one is set.
+    folder: struct {
+        account: ?core.id.AccountId,
+        mailbox: ?Mailbox = null,
+        slot: ?u8 = null,
+    },
 };
 
 pub const SidebarRow = struct { y: u16, entry: SidebarEntry };
@@ -267,7 +273,12 @@ pub const SidebarScope = union(enum) {
 /// The rows the sidebar draws, top to bottom: the scopes that choose whose
 /// folders these are, then the folders themselves. The renderer and the mouse
 /// both walk this list, so a label and its hit box cannot drift apart.
-pub fn sidebar_rows(accounts: *const core.state.Accounts, scope: ?core.id.AccountId, rows: []SidebarRow) usize {
+pub fn sidebar_rows(
+    accounts: *const core.state.Accounts,
+    folders: *const core.folder.Table,
+    scope: ?core.id.AccountId,
+    rows: []SidebarRow,
+) usize {
     var count: usize = 0;
     if (count == rows.len) return count;
     rows[count] = .{ .y = 0, .entry = .all_accounts };
@@ -283,6 +294,24 @@ pub fn sidebar_rows(accounts: *const core.state.Accounts, scope: ?core.id.Accoun
 
     // One row says "the folders below belong to the scope above".
     y += 1;
+    if (scope) |account| {
+        // The account's own folders, in the order its server listed them. A
+        // server that has not answered yet leaves the six the app knows.
+        if (!folders.is_empty(account)) {
+            var slot: u8 = 0;
+            while (slot < folders.count(account)) : (slot += 1) {
+                if (count == rows.len) return count;
+                const entry = folders.at(account, slot).?;
+                rows[count] = .{ .y = y, .entry = .{ .folder = if (entry.canonical) |mailbox|
+                    .{ .account = account, .mailbox = mailbox }
+                else
+                    .{ .account = account, .slot = slot } } };
+                count += 1;
+                y += 1;
+            }
+            return count;
+        }
+    }
     for (Mailbox.all) |mailbox| {
         if (count == rows.len) return count;
         rows[count] = .{ .y = y, .entry = .{ .folder = .{ .account = scope, .mailbox = mailbox } } };
@@ -293,9 +322,14 @@ pub fn sidebar_rows(accounts: *const core.state.Accounts, scope: ?core.id.Accoun
 }
 
 /// What the row at `y` is, if it is a row at all.
-pub fn sidebar_hit(accounts: *const core.state.Accounts, scope: ?core.id.AccountId, y: u16) ?SidebarEntry {
+pub fn sidebar_hit(
+    accounts: *const core.state.Accounts,
+    folders: *const core.folder.Table,
+    scope: ?core.id.AccountId,
+    y: u16,
+) ?SidebarEntry {
     var rows: [max_sidebar_rows]SidebarRow = undefined;
-    const count = sidebar_rows(accounts, scope, &rows);
+    const count = sidebar_rows(accounts, folders, scope, &rows);
     for (rows[0..count]) |row| {
         if (row.y == y) return row.entry;
     }
@@ -306,7 +340,14 @@ fn sidebar_active(state: *const State, entry: SidebarEntry) bool {
     return switch (entry) {
         .all_accounts => state.account_filter == null,
         .account => |id| state.account_filter == id,
-        .folder => |folder| state.account_filter == folder.account and state.mailbox == folder.mailbox,
+        .folder => |row| blk: {
+            if (row.slot) |slot| {
+                const ref = state.named orelse break :blk false;
+                break :blk row.account == ref.account and slot == ref.slot;
+            }
+            const mailbox = row.mailbox orelse break :blk false;
+            break :blk state.named == null and state.account_filter == row.account and state.mailbox == mailbox;
+        },
     };
 }
 
@@ -316,7 +357,12 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     out.vline(width, 0, out.rows, '│', theme.border);
 
     var rows: [max_sidebar_rows]SidebarRow = undefined;
-    const count = sidebar_rows(&inputs.state.accounts, inputs.state.account_filter, &rows);
+    const count = sidebar_rows(
+        &inputs.state.accounts,
+        &inputs.state.folders,
+        inputs.state.account_filter,
+        &rows,
+    );
 
     // The rule between the scopes and the folders of the scope on screen.
     const separator: u16 = 1 + inputs.state.accounts.len;
@@ -340,15 +386,27 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
                 render_sidebar_total(inputs, out, row.y, width, id);
             },
             .folder => |folder| {
-                const unread = inputs.store.unread_in(folder.mailbox, folder.account);
+                // The server's own name for a folder the six do not cover.
+                var named_title: []const u8 = "";
+                if (folder.slot) |slot| {
+                    const account = folder.account orelse continue;
+                    named_title = if (inputs.state.folders.at(account, slot)) |entry| entry.name.slice() else "";
+                }
+                const unread = if (folder.mailbox) |mailbox|
+                    inputs.store.unread_in(mailbox, folder.account)
+                else
+                    0;
                 const style = if (active)
                     theme.accent.with_bold()
                 else if (unread > 0)
                     theme.text
                 else
                     theme.dim;
-                _ = out.put_text(3, row.y, folder.mailbox.title(), width -| 4, style);
-                render_sidebar_count(inputs, out, row.y, width, folder.mailbox, folder.account);
+                const title = if (folder.mailbox) |mailbox| mailbox.title() else named_title;
+                out.put_text_truncated(3, row.y, title, width -| 4, style);
+                if (folder.mailbox) |mailbox| {
+                    render_sidebar_count(inputs, out, row.y, width, mailbox, folder.account);
+                }
             },
         }
     }
@@ -2845,7 +2903,7 @@ test "the sidebar lists every account's folders, and a row knows where it leads"
     f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{}, .{});
 
     var rows: [max_sidebar_rows]SidebarRow = undefined;
-    const count = sidebar_rows(&f.state.accounts, null, &rows);
+    const count = sidebar_rows(&f.state.accounts, &f.state.folders, null, &rows);
     // All accounts, the two of them, and the six folders of the scope. The rule
     // between the two halves is a gap in `y`, not a row of its own.
     try testing.expectEqual(@as(usize, 1 + 2 + 6), count);
@@ -2863,7 +2921,7 @@ test "the sidebar lists every account's folders, and a row knows where it leads"
     );
     // The folders are the ones of the scope on screen: this account's, here.
     var account_rows: [max_sidebar_rows]SidebarRow = undefined;
-    const account_count = sidebar_rows(&f.state.accounts, core.id.AccountId.from_int(2), &account_rows);
+    const account_count = sidebar_rows(&f.state.accounts, &f.state.folders, core.id.AccountId.from_int(2), &account_rows);
     try testing.expectEqual(count, account_count);
     try testing.expectEqual(
         SidebarEntry{ .folder = .{ .account = core.id.AccountId.from_int(2), .mailbox = .inbox } },
@@ -2871,9 +2929,9 @@ test "the sidebar lists every account's folders, and a row knows where it leads"
     );
 
     // The same list answers the mouse.
-    try testing.expectEqual(first_account.entry, sidebar_hit(&f.state.accounts, null, 1).?);
-    try testing.expect(sidebar_hit(&f.state.accounts, null, 3) == null);
-    try testing.expect(sidebar_hit(&f.state.accounts, null, 99) == null);
+    try testing.expectEqual(first_account.entry, sidebar_hit(&f.state.accounts, &f.state.folders, null, 1).?);
+    try testing.expect(sidebar_hit(&f.state.accounts, &f.state.folders, null, 3) == null);
+    try testing.expect(sidebar_hit(&f.state.accounts, &f.state.folders, null, 99) == null);
 }
 
 test "with the sidebar on, the folders are on the left and the list starts after the rule" {
@@ -2909,4 +2967,29 @@ test "with the sidebar on, the folders are on the left and the list starts after
     // A folder with unread mail that is not the one on screen still reads as text,
     // not as the dim of a mailbox with nothing in it.
     try testing.expectEqual(f.theme.text.with_bold().fg, out.cells[4][3].style.fg);
+}
+
+test "the sidebar draws the server's own name for a folder the six do not cover" {
+    var f = try fixture();
+    defer f.deinit();
+    const account = core.id.AccountId.from_int(1);
+    f.state.accounts.add(account, "work", .{}, .{});
+    _ = f.state.folders.add(account, "Inbox", .inbox);
+    _ = f.state.folders.add(account, "Clients", null);
+    f.state.account_filter = account;
+    // The second folder of the scope is the one the six do not cover, and it is
+    // the one on screen.
+    f.state.named = .{ .account = account, .slot = 1 };
+
+    var inputs = f.inputs(120, 30);
+    inputs.sidebar = true;
+    var out = Screen.init(120, 30);
+    frame(inputs, &out);
+
+    // Rows: 0 all accounts, 1 the account, 2 the rule, 3 Inbox, 4 Clients.
+    try row_contains(&out, 3, "Inbox");
+    try row_contains(&out, 4, "Clients");
+    // The active folder is the named one, so its row carries the selection.
+    try testing.expectEqual(f.theme.selection.bg, out.cells[4][1].style.bg);
+    try testing.expect(!std.meta.eql(out.cells[3][1].style.bg, f.theme.selection.bg));
 }

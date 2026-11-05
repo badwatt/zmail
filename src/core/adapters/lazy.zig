@@ -12,7 +12,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const mail_port = @import("../ports/mail.zig");
+const port = @import("../ports/mail.zig");
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
 const Message = @import("../domain/message.zig").Message;
 const MessageId = @import("../domain/id.zig").MessageId;
@@ -24,13 +24,14 @@ const Outgoing = @import("../domain/outgoing.zig").Outgoing;
 /// so the next call (an explicit refresh) tries again.
 pub const LazyMail = struct {
     context: *anyopaque,
-    open_fn: *const fn (context: *anyopaque) mail_port.Error!mail_port.Mail,
+    open_fn: *const fn (context: *anyopaque) port.Error!port.Mail,
     close_fn: *const fn (context: *anyopaque) void,
-    inner: ?mail_port.Mail = null,
+    inner: ?port.Mail = null,
 
-    pub fn mail(self: *LazyMail) mail_port.Mail {
+    pub fn mail(self: *LazyMail) port.Mail {
         return .{ .context = self, .vtable = &.{
             .connected = connectedThunk,
+            .folders = foldersThunk,
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
             .fetch_raw = fetchRawThunk,
@@ -50,7 +51,7 @@ pub const LazyMail = struct {
         self.inner = null;
     }
 
-    fn ensure(self: *LazyMail) mail_port.Error!mail_port.Mail {
+    fn ensure(self: *LazyMail) port.Error!port.Mail {
         if (self.inner) |opened| return opened;
         // Keep the reason: a rejected login must be reported as such, not as a
         // generic "could not load".
@@ -64,49 +65,54 @@ pub const LazyMail = struct {
         return self.connected();
     }
 
-    fn fetchThunk(context: *anyopaque, mailbox: Mailbox, out: []Message) mail_port.Error!u32 {
+    fn foldersThunk(context: *anyopaque, out: []port.Listed) port.Error!u32 {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).fetch(mailbox, out);
+        return (try self.ensure()).folders(out);
+    }
+
+    fn fetchThunk(context: *anyopaque, place: port.Place, out: []Message) port.Error!u32 {
+        const self: *LazyMail = @ptrCast(@alignCast(context));
+        return (try self.ensure()).fetch(place, out);
     }
 
     fn fetchBodyThunk(
         context: *anyopaque,
-        mailbox: Mailbox,
+        place: port.Place,
         id: MessageId,
         out: []u8,
-    ) mail_port.Error![]const u8 {
+    ) port.Error![]const u8 {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).fetch_body(mailbox, id, out);
+        return (try self.ensure()).fetch_body(place, id, out);
     }
 
     fn fetchRawThunk(
         context: *anyopaque,
-        mailbox: Mailbox,
+        place: port.Place,
         id: MessageId,
         out: []u8,
-    ) mail_port.Error![]const u8 {
+    ) port.Error![]const u8 {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).fetch_raw(mailbox, id, out);
+        return (try self.ensure()).fetch_raw(place, id, out);
     }
 
-    fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) mail_port.Error!void {
+    fn setFlagsThunk(context: *anyopaque, place: port.Place, id: MessageId, flags: Flags) port.Error!void {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).set_flags(id, flags);
+        return (try self.ensure()).set_flags(place, id, flags);
     }
 
-    fn deleteThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId) mail_port.Error!void {
+    fn deleteThunk(context: *anyopaque, place: port.Place, id: MessageId) port.Error!void {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).delete_message(mailbox, id);
+        return (try self.ensure()).delete_message(place, id);
     }
 
-    fn emptyThunk(context: *anyopaque, mailbox: Mailbox) mail_port.Error!void {
+    fn emptyThunk(context: *anyopaque, place: port.Place) port.Error!void {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).empty_mailbox(mailbox);
+        return (try self.ensure()).empty_mailbox(place);
     }
 
-    fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) mail_port.Error!void {
+    fn moveThunk(context: *anyopaque, place: port.Place, id: MessageId, to: port.Place) port.Error!void {
         const self: *LazyMail = @ptrCast(@alignCast(context));
-        return (try self.ensure()).move_message(id, to);
+        return (try self.ensure()).move_message(place, id, to);
     }
 };
 
@@ -156,7 +162,7 @@ const Opener = struct {
     closes: u32 = 0,
     fail: bool = false,
 
-    fn openMail(context: *anyopaque) mail_port.Error!mail_port.Mail {
+    fn openMail(context: *anyopaque) port.Error!port.Mail {
         const self: *Opener = @ptrCast(@alignCast(context));
         self.opens += 1;
         if (self.fail) return error.Unavailable;
@@ -186,12 +192,12 @@ test "lazy mail: the first call opens, later calls reuse the connection" {
     try testing.expect(!lazy.mail().connected());
 
     var out: [4]Message = undefined;
-    try testing.expectEqual(@as(u32, 1), try lazy.mail().fetch(.inbox, &out));
+    try testing.expectEqual(@as(u32, 1), try lazy.mail().fetch(port.Place.inbox, &out));
     try testing.expectEqual(@as(u32, 1), opener.opens);
     try testing.expect(lazy.connected());
     try testing.expect(lazy.mail().connected());
 
-    try testing.expectEqual(@as(u32, 1), try lazy.mail().fetch(.inbox, &out));
+    try testing.expectEqual(@as(u32, 1), try lazy.mail().fetch(port.Place.inbox, &out));
     try testing.expectEqual(@as(u32, 1), opener.opens);
 
     lazy.close();
@@ -209,7 +215,7 @@ test "lazy mail: the raw message goes through the opened connection" {
     var out: [64]u8 = undefined;
     // The reader renders text and HTML from these same bytes, so they are the
     // message itself -- and they open the connection like any other call.
-    const raw = try lazy.mail().fetch_raw(.inbox, MessageId.from_int(1), &out);
+    const raw = try lazy.mail().fetch_raw(port.Place.inbox, MessageId.from_int(1), &out);
     try testing.expectEqual(@as(u32, 1), opener.opens);
     try testing.expect(raw.len > 0);
 }
@@ -220,11 +226,11 @@ test "lazy mail: a failed open is Unavailable and is retried next time" {
     defer lazy.close();
 
     var out: [1]Message = undefined;
-    try testing.expectError(error.Unavailable, lazy.mail().fetch(.inbox, &out));
+    try testing.expectError(error.Unavailable, lazy.mail().fetch(port.Place.inbox, &out));
     var body_out: [8]u8 = undefined;
     try testing.expectError(
         error.Unavailable,
-        lazy.mail().fetch_body(.inbox, MessageId.from_int(1), &body_out),
+        lazy.mail().fetch_body(port.Place.inbox, MessageId.from_int(1), &body_out),
     );
     try testing.expectEqual(@as(u32, 2), opener.opens);
     try testing.expect(!lazy.connected());
@@ -233,8 +239,8 @@ test "lazy mail: a failed open is Unavailable and is retried next time" {
     var body: [8]u8 = undefined;
     var message = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(1) };
     try opener.mail.seed(&message);
-    _ = lazy.mail().fetch(.inbox, &out) catch {};
-    _ = lazy.mail().fetch_body(.inbox, MessageId.from_int(1), &body) catch {};
+    _ = lazy.mail().fetch(port.Place.inbox, &out) catch {};
+    _ = lazy.mail().fetch_body(port.Place.inbox, MessageId.from_int(1), &body) catch {};
     try testing.expectEqual(@as(u32, 3), opener.opens);
 }
 
@@ -250,11 +256,11 @@ test "lazy mail: delete and empty go through the opened connection" {
     };
     try opener.mail.seed(&message);
 
-    try lazy.mail().delete_message(.trash, MessageId.from_int(1));
+    try lazy.mail().delete_message(port.Place.trash, MessageId.from_int(1));
     try testing.expectEqual(@as(u32, 1), opener.opens);
     try testing.expect(opener.mail.find(MessageId.from_int(1)) == null);
 
-    try lazy.mail().empty_mailbox(.trash);
+    try lazy.mail().empty_mailbox(port.Place.trash);
 }
 
 test "lazy mail: flags and moves go through the opened connection" {
@@ -265,8 +271,8 @@ test "lazy mail: flags and moves go through the opened connection" {
     var message = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(1) };
     try opener.mail.seed(&message);
 
-    try lazy.mail().set_flags(MessageId.from_int(1), .{ .unread = false });
-    try lazy.mail().move_message(MessageId.from_int(1), .trash);
+    try lazy.mail().set_flags(port.Place.inbox, MessageId.from_int(1), .{ .unread = false });
+    try lazy.mail().move_message(port.Place.inbox, MessageId.from_int(1), port.Place.trash);
     try testing.expectEqual(@as(u32, 1), opener.opens);
     try testing.expectEqual(Mailbox.trash, opener.mail.find(MessageId.from_int(1)).?.mailbox);
 }
@@ -321,4 +327,16 @@ test "lazy outbox: sending opens once, and a failure is retried" {
 
     lazy.close();
     try testing.expect(!lazy.connected());
+}
+
+test "lazy mail: the folder list goes through the opened connection" {
+    var opener: Opener = .{};
+    var lazy = opener.lazy();
+    defer lazy.close();
+
+    var out: [16]port.Listed = undefined;
+    const count = try lazy.mail().folders(&out);
+    try testing.expectEqual(@as(u32, 1), opener.opens);
+    try testing.expect(count > 0);
+    try testing.expectEqualStrings("Inbox", out[0].name);
 }

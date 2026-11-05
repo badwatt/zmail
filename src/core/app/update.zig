@@ -234,9 +234,11 @@ fn apply_dismiss(state: *State, store: *Store) void {
 }
 
 fn switch_mailbox(state: *State, store: *Store, mailbox: Mailbox, effects: *Effects) void {
-    if (state.mailbox == mailbox) return;
+    if (state.mailbox == mailbox and state.named == null) return;
 
     state.mailbox = mailbox;
+    // A canonical mailbox is a different list from any named folder.
+    state.named = null;
     effects.add(.{ .refresh = .{ .account = state.account_filter, .mailbox = mailbox, .force = false } });
     state.query.clear();
     state.draft.clear();

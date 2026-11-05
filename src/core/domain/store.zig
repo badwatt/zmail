@@ -10,6 +10,7 @@ const Message = @import("message.zig").Message;
 const MessageId = @import("id.zig").MessageId;
 const AccountId = @import("id.zig").AccountId;
 const Mailbox = @import("mailbox.zig").Mailbox;
+const folder = @import("folder.zig");
 const Flags = @import("message.zig").Flags;
 
 pub const Store = struct {
@@ -124,7 +125,7 @@ pub const Store = struct {
         var write: u32 = 0;
         while (read < self.len) : (read += 1) {
             const message = &self.messages[read];
-            if (message.account == account and message.mailbox == mailbox) continue;
+            if (message.account == account and message.mailbox == mailbox and message.named == folder.none) continue;
             if (write != read) self.messages[write] = self.messages[read];
             write += 1;
         }
@@ -141,6 +142,24 @@ pub const Store = struct {
         return true;
     }
 
+    /// Removes every message of `account` in one of its own folders.
+    pub fn remove_named(self: *Store, account: AccountId, slot: u8) u32 {
+        var read: u32 = 0;
+        var write: u32 = 0;
+        var removed: u32 = 0;
+        while (read < self.len) : (read += 1) {
+            const message = &self.messages[read];
+            if (message.account == account and message.named == slot) {
+                removed += 1;
+                continue;
+            }
+            self.messages[write] = self.messages[read];
+            write += 1;
+        }
+        self.len = write;
+        return removed;
+    }
+
     /// Counts messages in `mailbox`, optionally only one account (null = the
     /// unified view).
     pub fn count_in(self: *const Store, mailbox: Mailbox, account: ?AccountId) u32 {
@@ -148,7 +167,7 @@ pub const Store = struct {
         var index: u32 = 0;
         while (index < self.len) : (index += 1) {
             const message = &self.messages[index];
-            if (message.mailbox != mailbox) continue;
+            if (message.mailbox != mailbox or message.named != folder.none) continue;
             if (account) |filter| {
                 if (message.account != filter) continue;
             }
@@ -162,7 +181,7 @@ pub const Store = struct {
         var index: u32 = 0;
         while (index < self.len) : (index += 1) {
             const message = &self.messages[index];
-            if (message.mailbox != mailbox) continue;
+            if (message.mailbox != mailbox or message.named != folder.none) continue;
             if (account) |filter| {
                 if (message.account != filter) continue;
             }
@@ -375,4 +394,39 @@ test "Store: counts honour the account filter" {
     try testing.expectEqual(@as(u32, 3), store.unread_in(.inbox, null));
     try testing.expectEqual(@as(u32, 2), store.unread_in(.inbox, account_one));
     try testing.expectEqual(@as(u32, 1), store.unread_in(.inbox, account_two));
+}
+
+test "Store: remove_named removes one account's own folder only" {
+    var store = try Store.init(testing.allocator, 8);
+    defer store.deinit(testing.allocator);
+    var first = message_with(1, .inbox, 100);
+    first.account = AccountId.from_int(1);
+    first.named = 2;
+    var second = message_with(2, .inbox, 200);
+    second.account = AccountId.from_int(1);
+    second.named = 2;
+    var third = message_with(3, .inbox, 300);
+    third.account = AccountId.from_int(2);
+    third.named = 2;
+    var canonical = message_with(4, .inbox, 400);
+    canonical.account = AccountId.from_int(1);
+    for ([_]Message{ first, second, third, canonical }) |message| try store.insert(&message);
+
+    try testing.expectEqual(@as(u32, 2), store.remove_named(AccountId.from_int(1), 2));
+    try testing.expectEqual(@as(u32, 2), store.len);
+    // The other account's folder of the same slot, and the canonical inbox, stay.
+    try testing.expectEqual(@as(u32, 1), store.count_in(.inbox, null));
+}
+
+test "Store: a message in one of the account's folders is not in a mailbox" {
+    var store = try Store.init(testing.allocator, 4);
+    defer store.deinit(testing.allocator);
+    var message = message_with(1, .inbox, 100);
+    message.named = 0;
+    try store.insert(&message);
+
+    // It is in Inbox's slot of the account's own list, not in Inbox.
+    try testing.expectEqual(@as(u32, 0), store.count_in(.inbox, null));
+    try testing.expectEqual(@as(u32, 0), store.unread_in(.inbox, null));
+    try testing.expectEqual(@as(u32, 1), store.len);
 }

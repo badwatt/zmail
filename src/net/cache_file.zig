@@ -10,6 +10,7 @@ const core = @import("core");
 const cache_mod = core.cache;
 const sealed = core.sealed;
 const KeyFile = @import("keyfile.zig").KeyFile;
+const folder_name = @import("folder_name.zig");
 const port = core.cache_port;
 const Message = core.message.Message;
 const AccountId = core.id.AccountId;
@@ -51,19 +52,17 @@ pub const FileCache = struct {
         return null;
     }
 
-    fn file_path(self: *const FileCache, account: AccountId, mailbox: Mailbox, buffer: []u8) ?[]const u8 {
+    fn file_path(self: *const FileCache, account: AccountId, folder: []const u8, buffer: []u8) ?[]const u8 {
         const label = self.label_for(account) orelse return null;
-        return std.fmt.bufPrint(buffer, "{s}/{s}/{s}.bin", .{
-            self.base_dir,
-            label,
-            mailbox_file_name(mailbox),
-        }) catch null;
+        var name_buffer: [96]u8 = undefined;
+        const name = folder_name.file_name(folder, &name_buffer);
+        return std.fmt.bufPrint(buffer, "{s}/{s}/{s}.bin", .{ self.base_dir, label, name }) catch null;
     }
 
-    fn loadThunk(context: *anyopaque, account: AccountId, mailbox: Mailbox, out: []Message) port.Error!u32 {
+    fn loadThunk(context: *anyopaque, account: AccountId, folder: []const u8, out: []Message) port.Error!u32 {
         const self: *FileCache = @ptrCast(@alignCast(context));
         var path_buffer: [512]u8 = undefined;
-        const path = self.file_path(account, mailbox, &path_buffer) orelse return 0;
+        const path = self.file_path(account, folder, &path_buffer) orelse return 0;
 
         var file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => return 0,
@@ -80,7 +79,7 @@ pub const FileCache = struct {
         return cache_mod.decode(text, out) catch 0;
     }
 
-    fn saveThunk(context: *anyopaque, account: AccountId, mailbox: Mailbox, messages: []const Message) port.Error!void {
+    fn saveThunk(context: *anyopaque, account: AccountId, folder: []const u8, messages: []const Message) port.Error!void {
         const self: *FileCache = @ptrCast(@alignCast(context));
         if (messages.len == 0) return;
 
@@ -94,7 +93,7 @@ pub const FileCache = struct {
             return error.Unavailable;
 
         var path_buffer: [512]u8 = undefined;
-        const path = self.file_path(account, mailbox, &path_buffer) orelse return;
+        const path = self.file_path(account, folder, &path_buffer) orelse return;
 
         const label = self.label_for(account) orelse return;
         var dir_buffer: [512]u8 = undefined;
@@ -112,14 +111,3 @@ pub const FileCache = struct {
 
 const file_mode: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
 const directory_mode: std.Io.Dir.Permissions = @fromBackingInt(@intCast(0o700));
-
-fn mailbox_file_name(mailbox: Mailbox) []const u8 {
-    return switch (mailbox) {
-        .inbox => "inbox",
-        .sent => "sent",
-        .drafts => "drafts",
-        .archive => "archive",
-        .trash => "trash",
-        .junk => "junk",
-    };
-}

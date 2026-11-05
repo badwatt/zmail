@@ -10,6 +10,7 @@ const assert = std.debug.assert;
 const limits = @import("../limits.zig");
 const Text = @import("../domain/text.zig").Text;
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
+const folder = @import("../domain/folder.zig");
 const Message = @import("../domain/message.zig").Message;
 const MessageId = @import("../domain/id.zig").MessageId;
 const Store = @import("../domain/store.zig").Store;
@@ -164,7 +165,13 @@ pub const Mode = enum { normal, search, help_search };
 pub const State = struct {
     view: View = .list,
     mode: Mode = .normal,
+    /// The canonical mailbox on screen. A named folder, when one is selected,
+    /// is what the list is actually showing; this stays where you were.
     mailbox: Mailbox = .inbox,
+    /// Every account's folders, as `LIST` reported them: the sidebar's list.
+    folders: folder.Table = .{},
+    /// The named folder on screen, when the list is one.
+    named: ?folder.Ref = null,
 
     /// Applied filter. Empty means "everything in this mailbox".
     query: Text(limits.filter_max) = .{},
@@ -233,14 +240,39 @@ pub const State = struct {
         return self.refreshing or self.loading;
     }
 
+    /// Shows one of the account's other folders. `mailbox` is left where it was:
+    /// leaving the folder returns to it.
+    pub fn select_named(self: *State, store: *const Store, ref: folder.Ref) void {
+        self.named = ref;
+        self.query.clear();
+        self.draft.clear();
+        self.mode = .normal;
+        self.view = .list;
+        self.cursor = 0;
+        self.offset = 0;
+        self.reader_scroll = 0;
+        self.opened = .unknown;
+        self.rebuild(store);
+    }
+
+    /// The folder on screen, canonical or named.
+    pub fn folder_on_screen(self: *const State) ?folder.Ref {
+        return self.named;
+    }
+
     pub fn rebuild(self: *State, store: *const Store) void {
         self.visible_len = 0;
         var index: u32 = 0;
         while (index < store.len) : (index += 1) {
             const message = store.at_const(index);
-            if (message.mailbox != self.mailbox) continue;
-            if (self.account_filter) |filter| {
-                if (message.account != filter) continue;
+            if (self.named) |ref| {
+                // One account's named folder: its messages are its own.
+                if (message.account != ref.account or message.named != ref.slot) continue;
+            } else {
+                if (message.mailbox != self.mailbox or message.named != folder.none) continue;
+                if (self.account_filter) |filter| {
+                    if (message.account != filter) continue;
+                }
             }
             if (!message.matches(self.query.slice())) continue;
             assert(self.visible_len < limits.messages_max);

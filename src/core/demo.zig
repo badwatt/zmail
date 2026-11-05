@@ -11,6 +11,7 @@ const MessageId = @import("domain/id.zig").MessageId;
 const AccountId = @import("domain/id.zig").AccountId;
 const Address = @import("domain/address.zig").Address;
 const MemoryMail = @import("adapters/memory_mail.zig").MemoryMail;
+const folder = @import("domain/folder.zig");
 
 const Entry = struct {
     id: u64,
@@ -24,6 +25,9 @@ const Entry = struct {
     account: u8,
     unread: bool = false,
     flagged: bool = false,
+    /// One of the account's own folders, named the way a server names it. Null
+    /// for the six the app knows.
+    folder: ?[]const u8 = null,
 };
 
 /// Ages are relative to `now_unix`, so the list always looks alive ("14m", "2h")
@@ -144,6 +148,40 @@ const entries = [_]Entry{
         .size_bytes = 3_584,
         .account = 1,
     },
+    .{
+        .id = 21,
+        .mailbox = .inbox,
+        .folder = "Clients",
+        .from = "Acme <billing@acme.example>",
+        .subject = "Signed contract",
+        .snippet = "Countersigned by both sides. The scan is attached for your records.",
+        .age_seconds = 3 * 86_400,
+        .size_bytes = 88_400,
+        .account = 2,
+    },
+    .{
+        .id = 22,
+        .mailbox = .inbox,
+        .folder = "Invoices",
+        .from = "Acme <billing@acme.example>",
+        .subject = "Invoice 1180",
+        .snippet = "Due the 30th. Paying early takes two percent off.",
+        .age_seconds = 12 * 86_400,
+        .size_bytes = 41_200,
+        .account = 2,
+        .flagged = true,
+    },
+    .{
+        .id = 23,
+        .mailbox = .inbox,
+        .folder = "Invoices",
+        .from = "Studio Norte <hello@norte.example>",
+        .subject = "Invoice 0042",
+        .snippet = "For the November print run.",
+        .age_seconds = 40 * 86_400,
+        .size_bytes = 39_800,
+        .account = 2,
+    },
 };
 
 /// Fills `mail` with the demo inbox. `now_unix` anchors the relative ages.
@@ -152,7 +190,19 @@ pub fn seed(mail: *MemoryMail, now_unix: i64) !void {
 }
 
 /// Seeds one demo account (1 = personal, 2 = work).
+/// Registers the folders this account has: the six the app knows, by the names a
+/// server would use, and then the account's own.
+fn register_folders(mail: *MemoryMail, account_number: u8) !void {
+    for (Mailbox.all) |mailbox| _ = try mail.add_folder(mailbox.title(), mailbox);
+    for (entries) |entry| {
+        if (entry.account != account_number) continue;
+        const name = entry.folder orelse continue;
+        _ = try mail.add_folder(name, null);
+    }
+}
+
 pub fn seed_for(mail: *MemoryMail, now_unix: i64, account_number: u8) !void {
+    try register_folders(mail, account_number);
     for (entries) |entry| {
         if (entry.account != account_number) continue;
         var message = Message{
@@ -164,6 +214,7 @@ pub fn seed_for(mail: *MemoryMail, now_unix: i64, account_number: u8) !void {
             .size_bytes = entry.size_bytes,
             .flags = .{ .unread = entry.unread, .flagged = entry.flagged },
         };
+        if (entry.folder) |name| message.named = mail.slot_of(name) orelse 0;
         message.subject.set(entry.subject);
         message.snippet.set(entry.snippet);
         try mail.seed(&message);
@@ -192,6 +243,8 @@ test "seed fills every demo mailbox" {
     var drafts: u32 = 0;
     var archive: u32 = 0;
     for (mail.messages[0..mail.len]) |message| {
+        // The account's own folders are not the six, and are counted apart.
+        if (message.named != folder.none) continue;
         switch (message.mailbox) {
             .inbox => inbox += 1,
             .sent => sent += 1,

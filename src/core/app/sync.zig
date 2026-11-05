@@ -7,15 +7,34 @@
 const std = @import("std");
 const Store = @import("../domain/store.zig").Store;
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
+const folder = @import("../domain/folder.zig");
 const AccountId = @import("../domain/id.zig").AccountId;
 const Message = @import("../domain/message.zig").Message;
 
 pub fn replace_mailbox(store: *Store, account: AccountId, mailbox: Mailbox, fetched: []const Message) void {
     _ = store.remove_in(account, mailbox);
-    for (fetched) |*message| {
+    for (fetched) |message| {
+        // The caller asked for this mailbox, so this is where the mail is: an
+        // adapter cannot file a message somewhere the request did not name.
+        var copy = message;
+        copy.account = account;
+        copy.mailbox = mailbox;
+        copy.named = folder.none;
         // A server that sends more than the cache can hold is truncated, not
         // allowed to fail the refresh: partial mail is better than no mail.
-        store.insert(message) catch {};
+        store.insert(&copy) catch {};
+    }
+}
+
+/// The same, for one of the account's own folders: the messages are stamped with
+/// the slot they were asked for, never with a canonical mailbox.
+pub fn replace_named(store: *Store, account: AccountId, slot: u8, fetched: []const Message) void {
+    _ = store.remove_named(account, slot);
+    for (fetched) |message| {
+        var copy = message;
+        copy.account = account;
+        copy.named = slot;
+        store.insert(&copy) catch {};
     }
 }
 
@@ -100,4 +119,41 @@ test "replace_mailbox leaves another account's mailbox alone" {
     replace_mailbox(&store, test_account, .inbox, &.{});
     try testing.expect(store.get(test_account, MessageId.from_int(1)) == null);
     try testing.expect(store.get(other_account, MessageId.from_int(9)) != null);
+}
+
+test "replace_named files messages in one of the account's folders" {
+    var store = try Store.init(testing.allocator, 8);
+    defer store.deinit(testing.allocator);
+    // A message already there, in the same folder and in another one.
+    var stale = message_with(1, .inbox, 100);
+    stale.account = test_account;
+    stale.named = 3;
+    var kept = message_with(2, .inbox, 200);
+    kept.account = test_account;
+    kept.named = 4;
+    try store.insert(&stale);
+    try store.insert(&kept);
+
+    const fresh = message_with(9, .sent, 300);
+    replace_named(&store, test_account, 3, &.{fresh});
+
+    // The folder was replaced, not appended to, and the message is stamped with
+    // the slot it was asked for, not with the mailbox it says.
+    try testing.expectEqual(@as(u32, 2), store.len);
+    var found: ?*Message = null;
+    for (store.messages[0..store.len]) |*message| {
+        if (message.id == MessageId.from_int(9)) found = message;
+    }
+    try testing.expectEqual(@as(u8, 3), found.?.named);
+    try testing.expectEqual(Mailbox.sent, found.?.mailbox);
+}
+
+test "replace_mailbox stamps the mailbox it was asked for" {
+    var store = try Store.init(testing.allocator, 4);
+    defer store.deinit(testing.allocator);
+    const message = message_with(1, .inbox, 100);
+    // A server that answers with the wrong mailbox cannot file the mail elsewhere.
+    replace_mailbox(&store, test_account, .trash, &.{message});
+    try testing.expectEqual(Mailbox.trash, store.at(0).mailbox);
+    try testing.expectEqual(test_account, store.at(0).account);
 }

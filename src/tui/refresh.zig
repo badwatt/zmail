@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const port = core.mail_port;
 
 const Message = core.message.Message;
 const Mailbox = core.mailbox.Mailbox;
@@ -29,22 +30,38 @@ pub const Job = struct {
     thread: std.Thread = undefined,
     state: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(State.done)),
     sources: []const Source = &.{},
-    mailbox: Mailbox = .inbox,
+    /// Which folder every source is asked for: a port is one account's, so one
+    /// place is the whole answer.
+    place: port.Place = port.Place.inbox,
     /// One slot per account: the worker writes each account's envelopes into
     /// its own region so the UI never reads a half-written mailbox.
     buffer: []Message = &.{},
     offsets: [max_accounts]u32 = @splat(0),
     counts: [max_accounts]u32 = @splat(0),
+    /// One region per account for the folders its server listed. Asking is a
+    /// round trip like any other, so it happens on the worker too.
+    folders: []port.Listed = &.{},
+    folder_offsets: [max_accounts]u32 = @splat(0),
+    folder_counts: [max_accounts]u32 = @splat(0),
     /// Per account: did the fetch succeed? A failed account keeps its old mail.
     ok: [max_accounts]bool = @splat(false),
     failures: u32 = 0,
 
     /// Starts the worker. A thread that cannot be spawned is reported as a
     /// finished job with one failure, so the caller has a single code path.
-    pub fn start(job: *Job, sources: []const Source, mailbox: Mailbox, buffer: []Message) void {
+    pub fn start(
+        job: *Job,
+        sources: []const Source,
+        place: port.Place,
+        buffer: []Message,
+        folders: []port.Listed,
+    ) void {
         job.sources = sources;
-        job.mailbox = mailbox;
+        job.place = place;
         job.buffer = buffer;
+        job.folders = folders;
+        job.folder_counts = @splat(0);
+        job.folder_offsets = @splat(0);
         job.failures = 0;
         job.counts = @splat(0);
         job.offsets = @splat(0);
@@ -67,10 +84,17 @@ pub const Job = struct {
 
     fn run(job: *Job) void {
         var offset: u32 = 0;
+        var folder_offset: u32 = 0;
         for (job.sources, 0..) |source, index| {
             job.offsets[index] = offset;
+            job.folder_offsets[index] = folder_offset;
+            if (folder_offset < job.folders.len) {
+                const listed = source.mail.folders(job.folders[folder_offset..]) catch 0;
+                job.folder_counts[index] = listed;
+                folder_offset += listed;
+            }
             const slice = job.buffer[offset..];
-            const count = source.mail.fetch(job.mailbox, slice) catch {
+            const count = source.mail.fetch(job.place, slice) catch {
                 job.failures += 1;
                 continue;
             };
@@ -90,7 +114,7 @@ pub const Job = struct {
 /// wrapped lines and the links are only ever built by the thread that draws them.
 pub const BodyRequest = struct {
     account: AccountId,
-    mailbox: Mailbox,
+    place: port.Place,
     id: core.id.MessageId,
     mail: core.mail_port.Mail,
 };
@@ -131,7 +155,7 @@ pub const BodyJob = struct {
 
     fn runBody(job: *BodyJob) void {
         const request = job.request;
-        if (request.mail.fetch_raw(request.mailbox, request.id, job.buffer)) |raw| {
+        if (request.mail.fetch_raw(request.place, request.id, job.buffer)) |raw| {
             job.len = @intCast(raw.len);
             job.ok = true;
         } else |_| {}

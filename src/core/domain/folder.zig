@@ -1,0 +1,178 @@
+//! Folders: the six mailboxes the app knows by heart, and the ones a server
+//! names.
+//!
+//! `Mailbox` is a closed set, and stays closed: the list, the tabs, the keys and
+//! the actions all speak it. What a server has that the six do not cover
+//! ("Receipts", "[Gmail]/All Mail") is a *slot* in that account's list, learned
+//! from `LIST`, and addressed by name. A message therefore belongs either to a
+//! canonical mailbox or to a named folder of its account -- never to a string
+//! the app has no place for.
+
+const std = @import("std");
+const assert = std.debug.assert;
+const Text = @import("text.zig").Text;
+const Mailbox = @import("mailbox.zig").Mailbox;
+const AccountId = @import("id.zig").AccountId;
+const limits = @import("../limits.zig");
+
+pub const name_max: u32 = limits.mailbox_name_max;
+pub const accounts_max: u8 = 4;
+/// Folders one account may have. A real account with a folder tree fits; a
+/// server that floods `LIST` gets the first ones and no more.
+pub const per_account_max: u8 = 24;
+
+/// The value of `Message.named` for a message that lives in a canonical mailbox.
+pub const none: u8 = 0xff;
+
+/// One folder of one account: what the server calls it, and which of the six it
+/// is, when it is one.
+pub const Entry = struct {
+    name: Text(name_max) = .{},
+    /// The mailbox this folder *is*: "Sent Items" is Sent, "INBOX" is Inbox.
+    canonical: ?Mailbox = null,
+};
+
+/// Identifies one named folder: whose, and which slot of its list.
+pub const Ref = struct {
+    account: AccountId,
+    slot: u8,
+
+    pub fn eql(self: Ref, other: Ref) bool {
+        return self.account == other.account and self.slot == other.slot;
+    }
+};
+
+/// Every account's folders, in the order the server listed them. Bounded, and
+/// allocated with the rest of the state: nothing here can grow at runtime.
+pub const Table = struct {
+    entries: [accounts_max][per_account_max]Entry = @splat(@splat(.{})),
+    len: [accounts_max]u8 = @splat(0),
+
+    fn index(account: AccountId) usize {
+        assert(account.is_known());
+        const position: usize = account.to_int() - 1;
+        assert(position < accounts_max);
+        return position;
+    }
+
+    /// Forgets an account's folders: a new login re-lists them.
+    pub fn reset(self: *Table, account: AccountId) void {
+        const position = index(account);
+        self.entries[position] = @splat(.{});
+        self.len[position] = 0;
+    }
+
+    /// Adds one folder, in the order the server listed it. Returns its slot, or
+    /// null when the account already has as many as we keep. A repeated name is
+    /// the same folder, and keeps its place.
+    pub fn add(self: *Table, account: AccountId, name: []const u8, canonical: ?Mailbox) ?u8 {
+        const position = index(account);
+        const used = self.len[position];
+        var slot: u8 = 0;
+        while (slot < used) : (slot += 1) {
+            const entry = &self.entries[position][slot];
+            if (!std.mem.eql(u8, entry.name.slice(), name)) continue;
+            if (entry.canonical == null) entry.canonical = canonical;
+            return slot;
+        }
+        if (used == per_account_max) return null;
+        self.entries[position][used] = .{ .canonical = canonical };
+        self.entries[position][used].name.set(name);
+        self.len[position] = used + 1;
+        return used;
+    }
+
+    pub fn count(self: *const Table, account: AccountId) u8 {
+        return self.len[index(account)];
+    }
+
+    pub fn is_empty(self: *const Table, account: AccountId) bool {
+        return self.len[index(account)] == 0;
+    }
+
+    pub fn at(self: *const Table, account: AccountId, slot: u8) ?*const Entry {
+        if (slot >= self.len[index(account)]) return null;
+        return &self.entries[index(account)][slot];
+    }
+
+    /// The slot whose folder is `mailbox`, when the account has one.
+    pub fn slot_of(self: *const Table, account: AccountId, mailbox: Mailbox) ?u8 {
+        const used = self.len[index(account)];
+        var slot: u8 = 0;
+        while (slot < used) : (slot += 1) {
+            const entry = &self.entries[index(account)][slot];
+            if (entry.canonical) |canonical| {
+                if (canonical == mailbox) return slot;
+            }
+        }
+        return null;
+    }
+
+    /// The server's name for a canonical mailbox, when `LIST` named it.
+    pub fn name_of(self: *const Table, account: AccountId, mailbox: Mailbox) ?[]const u8 {
+        const slot = self.slot_of(account, mailbox) orelse return null;
+        return self.entries[index(account)][slot].name.slice();
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "folder: a listed folder keeps its slot, and a repeated name keeps it too" {
+    var table: Table = .{};
+    const account = AccountId.from_int(1);
+    try testing.expectEqual(@as(u8, 0), table.add(account, "INBOX", .inbox).?);
+    try testing.expectEqual(@as(u8, 1), table.add(account, "Sent Items", .sent).?);
+    try testing.expectEqual(@as(u8, 2), table.add(account, "Receipts", null).?);
+    try testing.expectEqual(@as(u8, 3), table.count(account));
+
+    // The same name is the same folder, and it can learn what it is.
+    try testing.expectEqual(@as(u8, 2), table.add(account, "Receipts", null).?);
+    try testing.expectEqual(@as(u8, 1), table.add(account, "Sent Items", .sent).?);
+    try testing.expectEqual(@as(u8, 3), table.count(account));
+}
+
+test "folder: names, canonical mapping and slots" {
+    var table: Table = .{};
+    const account = AccountId.from_int(2);
+    _ = table.add(account, "INBOX", .inbox);
+    _ = table.add(account, "Sent Items", .sent);
+    _ = table.add(account, "Receipts", null);
+
+    try testing.expectEqualStrings("Sent Items", table.name_of(account, .sent).?);
+    try testing.expectEqual(@as(?[]const u8, null), table.name_of(account, .trash));
+    try testing.expectEqual(@as(u8, 1), table.slot_of(account, .sent).?);
+    try testing.expectEqual(@as(?u8, null), table.slot_of(account, .junk));
+
+    try testing.expectEqualStrings("Receipts", table.at(account, 2).?.name.slice());
+    try testing.expectEqual(@as(?*const Entry, null), table.at(account, 3));
+    // Another account has its own list.
+    try testing.expectEqual(@as(u8, 0), table.count(AccountId.from_int(1)));
+}
+
+test "folder: an account that floods LIST keeps what fits, and resets" {
+    var table: Table = .{};
+    const account = AccountId.from_int(3);
+    var buffer: [32]u8 = undefined;
+    var index: u8 = 0;
+    while (index < per_account_max) : (index += 1) {
+        const name = std.fmt.bufPrint(&buffer, "Folder {d}", .{index}) catch unreachable;
+        try testing.expect(table.add(account, name, null) != null);
+    }
+    try testing.expectEqual(@as(?u8, null), table.add(account, "One more", null));
+    try testing.expectEqual(per_account_max, table.count(account));
+
+    table.reset(account);
+    try testing.expectEqual(@as(u8, 0), table.count(account));
+    try testing.expectEqual(@as(?*const Entry, null), table.at(account, 0));
+}
+
+test "folder: a slot of one account cannot be read as another's" {
+    var table: Table = .{};
+    _ = table.add(AccountId.from_int(1), "Receipts", null);
+    try testing.expect(table.at(AccountId.from_int(2), 0) == null);
+    try testing.expect(table.at(AccountId.from_int(1), 0) != null);
+}
