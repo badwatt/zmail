@@ -172,7 +172,7 @@ fn write_word(word: []const u8, writer: *std.Io.Writer) std.Io.Writer.Error!void
     var raw: [512]u8 = undefined;
     const decoded = switch (encoding) {
         'B', 'b' => decode_base64(body, &raw),
-        'Q', 'q' => decode_quoted_printable(body, &raw),
+        'Q', 'q' => decode_q_word(body, &raw),
         else => return,
     };
     try stream_text(decoded, charset, writer);
@@ -644,6 +644,17 @@ fn decode_base64(input: []const u8, out: []u8) []const u8 {
 }
 
 fn decode_quoted_printable(input: []const u8, out: []u8) []const u8 {
+    return decode_quoted_printable_inner(input, out, false);
+}
+
+/// The payload of a `Q` encoded word. Same escapes as the body decoder, plus
+/// the one rule that only exists inside a header: `_` is a space (RFC 2047
+/// §4.2), because a header cannot carry a literal one.
+fn decode_q_word(input: []const u8, out: []u8) []const u8 {
+    return decode_quoted_printable_inner(input, out, true);
+}
+
+fn decode_quoted_printable_inner(input: []const u8, out: []u8, underscore_is_space: bool) []const u8 {
     var writer = std.Io.Writer.fixed(out);
     var index: usize = 0;
     while (index < input.len) {
@@ -668,7 +679,8 @@ fn decode_quoted_printable(input: []const u8, out: []u8) []const u8 {
             index += 1;
             continue;
         }
-        writer.writeByte(if (byte == '_') ' ' else byte) catch break;
+        const literal = if (underscore_is_space and byte == '_') ' ' else byte;
+        writer.writeByte(literal) catch break;
         index += 1;
     }
     return writer.buffered();
@@ -789,6 +801,13 @@ test "encoded words: latin-1 payload becomes UTF-8" {
     try testing.expectEqualStrings("café", decode_encoded_words("=?iso-8859-1?Q?caf=E9?=", &out));
 }
 
+test "encoded words: an underscore is the space RFC 2047 could not leave" {
+    // RFC 2047 §4.2: a header cannot carry a literal space inside an encoded
+    // word, so `_` stands for one. That rule is the header's, not the body's.
+    var out: [64]u8 = undefined;
+    try testing.expectEqualStrings("hello world", decode_encoded_words("=?utf-8?Q?hello_world?=", &out));
+}
+
 test "header: finds a folded, case-insensitive value" {
     const block =
         "From: Alice\r\n" ++
@@ -821,6 +840,23 @@ test "text_body: quoted-printable soft breaks and hex escapes" {
     var out: [256]u8 = undefined;
     var scratch: [512]u8 = undefined;
     try testing.expectEqualStrings("café and a very long line\n", text_body(raw, &out, &scratch));
+}
+
+test "text_body: quoted-printable keeps an underscore an underscore" {
+    // RFC 2045 §6.7: in a body, only `=` introduces an escape. Turning `_` into
+    // a space here rewrote every tracking link in a newsletter that carries one,
+    // and the browser then sent the space as %20.
+    const raw =
+        "Content-Type: text/plain; charset=utf-8\r\n" ++
+        "Content-Transfer-Encoding: quoted-printable\r\n" ++
+        "\r\n" ++
+        "https://c.example/CL0/XEJ6AxJjlbjJjQG-OCj2ZlOE_Y5Hb7_EZkFp_5y_h9E=3D452\r\n";
+    var out: [256]u8 = undefined;
+    var scratch: [512]u8 = undefined;
+    try testing.expectEqualStrings(
+        "https://c.example/CL0/XEJ6AxJjlbjJjQG-OCj2ZlOE_Y5Hb7_EZkFp_5y_h9E=452\n",
+        text_body(raw, &out, &scratch),
+    );
 }
 
 test "text_body: base64 bodies decode" {
@@ -1054,7 +1090,8 @@ test "text_body: quoted-printable tolerates LF breaks and broken escapes" {
         "a=\nb =ZZ c_d";
     var out: [64]u8 = undefined;
     var scratch: [128]u8 = undefined;
-    try testing.expectEqualStrings("ab =ZZ c d", text_body(raw, &out, &scratch));
+    // `c_d` keeps its underscore: in a body it is a byte, not a space.
+    try testing.expectEqualStrings("ab =ZZ c_d", text_body(raw, &out, &scratch));
 }
 
 test "text_body: multipart without a closing delimiter still finds the part" {

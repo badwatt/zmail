@@ -5375,6 +5375,69 @@ test "in the HTML view, clicking the words of a link opens its address" {
     try testing.expectEqual(@as(u8, 0), sink.opened);
 }
 
+/// Clicks the words of the anchor at `index`, the way a reader would.
+fn click_anchor(rig: *Rig, index: usize) void {
+    const lay = layout_mod.Layout.compute(100, 24, 0);
+    const text = rig.session.reader_text();
+    const anchor = rig.session.html_anchors[index];
+
+    var row: u16 = 0;
+    var column: u16 = 0;
+    while (row < rig.session.wrapped.len) : (row += 1) {
+        const line = rig.session.wrapped.at(row, text);
+        const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
+        if (anchor.span.start < line_start or anchor.span.start >= line_start + line.len) continue;
+        column = @intCast(anchor.span.start - line_start);
+        break;
+    }
+    const y = lay.reader_body_y + row;
+    _ = rig.session.handle_mouse(.{ .x = column + 2, .y = y, .kind = .press, .button = .left, .ctrl = true });
+}
+
+test "a tracking link opens with the characters the sender meant" {
+    // The mail that found this: HTML, quoted-printable, an address built out of
+    // underscores and an escaped query string. `_` became a space in the body
+    // decoder -- a rule that belongs to headers -- and the browser then sent the
+    // spaces as %20, which is a 404 with a link on it.
+    var rig: Rig = .{};
+    defer rig.deinit();
+    var sink: LinkSink = .{};
+    try rig.start_with_links(&sink);
+
+    try rig.open_reader(
+        "Content-Type: text/html; charset=utf-8\r\n" ++
+            "Content-Transfer-Encoding: quoted-printable\r\n" ++
+            "\r\n" ++
+            "<p><a href=3D\"https://c.example/CL0/XEJ6AxJjlbjJjQG-OCj2ZlOE_Y5Hb7_EZkFp_5y_h9E=3D452" ++
+            "?a=3D1&amp;b=3D2\">read it</a></p>",
+    );
+    try testing.expect(rig.session.html_view);
+    click_anchor(&rig, 0);
+    try testing.expectEqual(@as(u8, 1), sink.opened);
+    try testing.expectEqualStrings(
+        "https://c.example/CL0/XEJ6AxJjlbjJjQG-OCj2ZlOE_Y5Hb7_EZkFp_5y_h9E=452?a=1&b=2",
+        sink.last[0..sink.last_len],
+    );
+}
+
+test "an address that is also the words keeps its underscores on screen" {
+    var rig: Rig = .{};
+    defer rig.deinit();
+    var sink: LinkSink = .{};
+    try rig.start_with_links(&sink);
+
+    try rig.open_reader(
+        "Content-Type: text/html; charset=utf-8\r\n" ++
+            "Content-Transfer-Encoding: quoted-printable\r\n" ++
+            "\r\n" ++
+            "<p><a href=3D\"https://c.example/OE_Y5Hb7\">https://c.example/OE_Y5Hb7</a></p>",
+    );
+    // What the reader sees and what a click opens are the same address.
+    try testing.expect(std.mem.indexOf(u8, rig.session.reader_text(), "https://c.example/OE_Y5Hb7") != null);
+    click_anchor(&rig, 0);
+    try testing.expectEqualStrings("https://c.example/OE_Y5Hb7", sink.last[0..sink.last_len]);
+}
+
 test "in the HTML view the pointer lights up the words of a link" {
     var rig: Rig = .{};
     try rig.start();
