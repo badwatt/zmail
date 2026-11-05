@@ -707,8 +707,8 @@ pub const Session = struct {
             if (source.mail.connected()) continue;
             // It blocks, and there is nothing to be done about that: say so on
             // screen *before* the wait, or the client looks hung for however long
-            // a handshake takes.
-            self.state.listing = self.state.folders.is_empty(source.id);
+            // a handshake takes. Whether the sidebar has folders to show is a
+            // question for the disk, and the disk is read after this.
             _ = self.say("Connecting…", .{});
             self.render();
             self.reload(self.state.mailbox);
@@ -899,7 +899,13 @@ pub const Session = struct {
             if (!self.state.folders.is_empty(source.id)) continue;
             missing = true;
         }
-        if (!missing) return;
+        if (!missing) {
+            // The disk had them after all: nothing to wait for, and the sidebar
+            // must stop saying it is waiting.
+            self.state.listing = false;
+            self.repaint();
+            return;
+        }
 
         var count: u8 = 0;
         for (self.live_sources(), 0..) |source, index| {
@@ -7376,4 +7382,45 @@ test "a warm start reads the folders from disk: no listing, no wait" {
     rig.session.settle_refresh_for_test();
     try testing.expectEqual(@as(u32, 1), cache.folder_saves);
     try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+}
+
+test "an account whose folders are on disk shows them the moment it is opened" {
+    var cache: core.cache_port.Memory = .{ .load_count = 1 };
+    const account = core.id.AccountId.from_int(1);
+    try cache.cache().save_folders(account, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox },
+        .{ .name = "Clients", .title = "Clients" },
+    });
+
+    var rig: Rig = .{};
+    rig.fake_system.size_value = .{ .columns = 120, .rows = 30 };
+    try rig.seed();
+    // A connection that is not open yet: switching to it blocks for a handshake,
+    // which is exactly when the sidebar used to say "listing folders" forever.
+    var opener = LazyOpener{ .target = &rig.fake_mail };
+    rig.sources[0] = .{ .id = account, .label = "azama", .mail = opener.mail() };
+    try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    rig.session.state.account_filter = core.id.AccountId.from_int(2);
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+    rig.session.state.folders.reset(account);
+
+    // Choose it: the handshake happens, and the disk answers the sidebar.
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    try testing.expect(!rig.session.state.listing);
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+    // And the folder rows are back on screen, not the "listing folders" line:
+    // the next tick paints what the sidebar knows.
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    const frame_text = rig.fake_system.output_text();
+    try testing.expect(std.mem.indexOf(u8, frame_text, "Clients") != null);
+    try testing.expect(std.mem.indexOf(u8, frame_text, "listing folders") == null);
+    rig.session.settle_refresh_for_test();
 }
