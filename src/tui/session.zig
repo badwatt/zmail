@@ -354,6 +354,8 @@ pub const Session = struct {
     refresh_index: [core.state.accounts_max]u8 = undefined,
     refresh_count: u8 = 0,
     refresh_target: Target = .{ .mailbox = .inbox },
+    /// The caches' name for the folder being refreshed, fixed when it was asked for.
+    refresh_key: core.text.Text(core.folder.name_max) = .{},
     /// The live account list: a copy of what the launcher built, plus anything
     /// added from the TUI (and minus anything removed).
     sources: [core.state.accounts_max]MailSource = undefined,
@@ -510,13 +512,12 @@ pub const Session = struct {
     /// Runs once, right after the first frame: opens the connections the cache
     /// could not replace. The splash is on screen while this blocks.
     pub fn boot(self: *Session) void {
+        // The sidebar before the network, always: a warm cache means no boot at
+        // all, and the folder list kept on disk is exactly what should be on
+        // screen while nothing has been opened yet.
+        self.load_cached_folders();
         if (!self.needs_boot) return;
         self.needs_boot = false;
-
-        // The sidebar before the network: the folder lists the last run kept are
-        // small, and the accounts should not all look like the six placeholders
-        // while the first connection is made.
-        self.load_cached_folders();
         // Nothing to connect to (a broken config, no accounts): the welcome screen
         // still shows, and the notice under it is what the user needs to read.
         if (self.source_count == 0) return;
@@ -689,6 +690,13 @@ pub const Session = struct {
     }
 
     fn start_refresh(self: *Session) void {
+        self.start_refresh_listing(false);
+    }
+
+    /// `refresh_forced` is the user asking (Ctrl+R): numbers are worth a round
+    /// trip then. Otherwise the folders are asked for only when the disk has
+    /// none -- what is already here is not worth a second of somebody's life.
+    fn start_refresh_listing(self: *Session, refresh_forced: bool) void {
         if (self.refreshing) return;
 
         // A connection nobody has opened yet must be opened here, on the thread
@@ -726,6 +734,7 @@ pub const Session = struct {
         self.load_cached(self.screen_target(), false);
 
         self.refresh_target = self.screen_target();
+        self.refresh_key = core.text.Text(core.folder.name_max).init(self.folder_key(self.refresh_target));
         // The disk first: a folder list is small, and the account you were in an
         // hour ago should not make you wait for a round trip to see its folders.
         self.load_cached_folders();
@@ -737,12 +746,17 @@ pub const Session = struct {
                 self.state.listing = self.state.folders.is_empty(account);
             }
         }
+        var need_listing = refresh_forced;
+        for (self.refresh_sources[0..count]) |source| {
+            if (self.state.folders.is_empty(source.id)) need_listing = true;
+        }
         self.refresh_job.start(
             self.refresh_sources[0..count],
             self.place_of(self.refresh_target),
             self.refresh_scratch,
             &self.folder_scratch,
             false,
+            need_listing,
         );
         self.refreshing = true;
         self.state.refreshing = true;
@@ -798,7 +812,7 @@ pub const Session = struct {
             };
             self.loaded_mask |= mask_bit(@intCast(index), place_slot);
             if (self.deps.cache) |cache| {
-                cache.save(source.id, self.folder_key(self.refresh_target), fetched) catch {};
+                cache.save(source.id, self.refresh_key.slice(), fetched) catch {};
             }
         }
 
@@ -850,12 +864,19 @@ pub const Session = struct {
 
         if (open_name.is_empty()) return;
         // The folder on screen moved, kept its place, or is gone.
+        const old_ref = core.folder.Ref{ .account = account, .slot = old_slot };
         var slot: u8 = 0;
         while (slot < self.state.folders.count(account)) : (slot += 1) {
             const entry = self.state.folders.at(account, slot).?;
             if (!std.mem.eql(u8, entry.name.slice(), open_name.slice())) continue;
             core.sync.reslot(&self.store, account, old_slot, slot);
             self.state.named = .{ .account = account, .slot = slot };
+            // What is still in the air was asked for by the old slot, and the
+            // answer has to land in the new one.
+            const new_ref = core.folder.Ref{ .account = account, .slot = slot };
+            if (self.refresh_target == .named and self.refresh_target.named.eql(old_ref)) {
+                self.refresh_target = .{ .named = new_ref };
+            }
             self.state.rebuild(&self.store);
             return;
         }
@@ -870,6 +891,9 @@ pub const Session = struct {
     /// from the cache, and a folder listing is not a reason to fetch it again.
     fn list_missing_folders(self: *Session) void {
         if (self.refreshing) return;
+        // Before asking the server, ask the disk: what the last run kept is the
+        // answer, and a listing is only for what it did not have.
+        self.load_cached_folders();
         var missing = false;
         for (self.live_sources()) |source| {
             if (!self.state.folders.is_empty(source.id)) continue;
@@ -887,12 +911,14 @@ pub const Session = struct {
         if (count == 0) return;
         self.refresh_count = count;
         self.refresh_target = self.screen_target();
+        self.refresh_key = core.text.Text(core.folder.name_max).init(self.folder_key(self.refresh_target));
         self.state.listing = true;
         self.refresh_job.start(
             self.refresh_sources[0..count],
             self.place_of(self.refresh_target),
             self.refresh_scratch,
             &self.folder_scratch,
+            true,
             true,
         );
         self.refreshing = true;
@@ -942,6 +968,11 @@ pub const Session = struct {
     /// Starts a refresh the way a key would, without going through the key map.
     pub fn start_refresh_for_test(self: *Session) void {
         self.start_refresh();
+    }
+
+    /// The refresh Ctrl+R asks for: the one that re-lists the folders.
+    pub fn start_refresh_listing_for_test(self: *Session) void {
+        self.start_refresh_listing(true);
     }
 
     /// Drains effects that were waiting for the connection, the way the loop does.
@@ -1749,7 +1780,7 @@ pub const Session = struct {
         for (effects) |effect| {
             if (self.state.quit) return;
             switch (effect) {
-                .refresh => self.start_refresh(),
+                .refresh => |args| self.start_refresh_listing(args.force),
                 // The body is never fetched here: the reader is already on screen, and
                 // asking is all this does. `poll_body` starts the worker and the loop
                 // stays free -- Esc works while the bytes are in the air.
@@ -1789,7 +1820,7 @@ pub const Session = struct {
             .edit_account => |args| self.open_settings(args.account),
             .rename_account => |args| self.open_rename(args.account),
             .oauth_account => |args| self.oauth_account(args.account),
-            .refresh => self.start_refresh(),
+            .refresh => |args| self.start_refresh_listing(args.force),
             .send => |outgoing| self.send(&outgoing),
             .edit_body => |request| self.edit_body(request.initial),
             .fetch_body => |args| self.request_body(args.account, args.folder, args.id),
@@ -1896,7 +1927,14 @@ pub const Session = struct {
             self.state.set_alert("That account is not connected", .{});
             return;
         };
-        self.body_request = .{ .account = account, .folder = folder, .place = self.place_of(folder), .id = id, .mail = mail };
+        self.body_request = .{
+            .account = account,
+            .folder = folder,
+            .key = core.text.Text(core.folder.name_max).init(self.folder_key(folder)),
+            .place = self.place_of(folder),
+            .id = id,
+            .mail = mail,
+        };
         self.body_wanted = id;
         self.repaint();
     }
@@ -1936,11 +1974,15 @@ pub const Session = struct {
         }
 
         const raw = self.body_job.bytes();
-        if (self.deps.bodies) |bodies| bodies.save(request.account, self.folder_key(request.folder), request.id, raw) catch {};
+        // The name, not the slot: a slot is a position in the server's list, and
+        // that list can be re-listed while the bytes are in the air.
+        if (self.deps.bodies) |bodies| bodies.save(request.account, request.key.slice(), request.id, raw) catch {};
         // The reader moved on while this was in the air: the bytes are kept for next
         // time and not painted under whatever is on screen now.
         if (!wanted) return;
-        self.set_raw(request.account, request.folder, request.id, raw);
+        // What the reader is showing is the folder on screen: the request is the
+        // one that was waited for, or it would not be painted at all.
+        self.set_raw(request.account, self.screen_target(), request.id, raw);
     }
 
     /// The bytes are in: the spinner has done its job.
@@ -7004,9 +7046,10 @@ test "a named folder that disappears from the list goes back to a mailbox" {
     rig.session.settle_refresh_for_test();
     try testing.expect(rig.session.state.named != null);
 
-    // The server stops listing it: the next refresh has nowhere to leave the list.
+    // The server stops listing it: the next refresh -- the one Ctrl+R asks for,
+    // which is the one that re-lists -- has nowhere to leave the list.
     rig.fake_mail.inner.folder_count = 0;
-    rig.session.start_refresh_for_test();
+    rig.session.start_refresh_listing_for_test();
     rig.session.settle_refresh_for_test();
     try testing.expect(rig.session.state.named == null);
     try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
@@ -7219,3 +7262,118 @@ const LazyOpener = struct {
         return self.lazy.mail();
     }
 };
+
+test "a refresh of the mail does not re-list the folders it already has" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    rig.session.state.folders.reset(account);
+    _ = rig.session.state.folders.add(account, "INBOX", .inbox);
+    _ = rig.session.state.folders.add_counted(account, "Clients", "", null, 3);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // A plain refresh (a scope change, a mailbox switch): the table is already
+    // there, and forty STATUS commands are not worth a second of anybody's time.
+    rig.session.start_refresh_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+    try testing.expectEqual(@as(u32, 3), rig.session.state.folders.at(account, 1).?.unread);
+
+    // Ctrl+R is the user asking for numbers: it lists, and the server's answer
+    // replaces what the disk had.
+    rig.session.start_refresh_listing_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expectEqual(@as(u8, 6), rig.session.state.folders.count(account));
+}
+
+test "a re-list that moves the folder on screen keeps its mail under it" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    const fake = &rig.fake_mail.inner;
+    _ = try fake.add_folder("Clients", null);
+    _ = try fake.add_folder("Invoices", null);
+    var message = Message{
+        .id = MessageId.from_int(5),
+        .account = account,
+        .named = 1,
+        .timestamp_unix = 1_699_999_000,
+    };
+    try fake.seed(&message);
+    rig.session.state.folders.reset(account);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // Open Invoices, which is slot 1 in that list.
+    _ = rig.session.state.folders.add(account, "Clients", null);
+    _ = rig.session.state.folders.add(account, "Invoices", null);
+    rig.session.state.select_named(&rig.session.store, .{ .account = account, .slot = 1 });
+    // A body that was asked for and has not landed yet: its answer is filed by
+    // slot, and the slot is about to move.
+    rig.session.body_request = .{
+        .account = account,
+        .folder = .{ .named = .{ .account = account, .slot = 1 } },
+        .place = .{ .mailbox = .inbox },
+        .id = MessageId.from_int(5),
+        .mail = rig.fake_mail.mail(),
+    };
+    rig.session.settle_refresh_for_test();
+
+    // The server now lists a folder *before* the two it had: every slot below it
+    // moves, and the mail already here has to move with them.
+    fake.folders[2] = .{};
+    fake.folders[2].name.set("Invoices");
+    fake.folders[1] = fake.folders[0];
+    fake.folders[0] = .{};
+    fake.folders[0].name.set("New");
+    fake.folder_count = 3;
+    // The fake server moves its own mail with the folder, as a server would.
+    fake.find(MessageId.from_int(5)).?.named = 2;
+
+    rig.session.start_refresh_listing_for_test();
+    rig.session.settle_refresh_for_test();
+
+    const named = rig.session.state.named orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u8, 2), named.slot);
+    try testing.expectEqualStrings("Invoices", rig.session.state.folders.at(account, 2).?.display());
+    // The message came along: the list under the folder is still its list.
+    try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
+    try testing.expectEqual(@as(u8, 2), rig.session.store.at(rig.session.state.visible[0]).named);
+    // The refresh that asked for the folder keeps the name it asked by, whatever
+    // happened to the slot under it.
+    try testing.expectEqualStrings("Invoices", rig.session.refresh_key.slice());
+}
+
+test "a warm start reads the folders from disk: no listing, no wait" {
+    var cache: core.cache_port.Memory = .{ .load_count = 1 };
+    const account = core.id.AccountId.from_int(1);
+    try cache.cache().save_folders(account, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox },
+        .{ .name = "Clients", .title = "Clients" },
+    });
+
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.sources[0] = .{ .id = account, .label = "account", .mail = rig.fake_mail.mail() };
+    try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.sidebar = true;
+
+    // The mail was cached: nothing boots, and the first refresh is the warm-up
+    // that opens the connection. The folders are still on disk, and reading them
+    // is not a network question.
+    rig.session.needs_boot = false;
+    rig.session.boot();
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+
+    // And the warm-up refresh, with the folders already in hand, does not list.
+    rig.session.start_refresh_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expectEqual(@as(u32, 1), cache.folder_saves);
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+}

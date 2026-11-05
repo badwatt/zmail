@@ -44,6 +44,10 @@ pub const Job = struct {
     /// Only ask for the folder lists: the mail on screen came from the cache, and
     /// a listing is not a reason to fetch it again.
     list_only: bool = false,
+    /// Whether to ask for the folder lists at all. A refresh of the mail does not
+    /// need them: they are on disk, and forty `STATUS` commands are a second of
+    /// the user's life for numbers that have not changed.
+    list_folders: bool = true,
     folder_offsets: [max_accounts]u32 = @splat(0),
     folder_counts: [max_accounts]u32 = @splat(0),
     /// Per account: did the fetch succeed? A failed account keeps its old mail.
@@ -59,12 +63,14 @@ pub const Job = struct {
         buffer: []Message,
         folders: []port.Listed,
         list_only: bool,
+        list_folders: bool,
     ) void {
         job.sources = sources;
         job.place = place;
         job.buffer = buffer;
         job.folders = folders;
         job.list_only = list_only;
+        job.list_folders = list_folders;
         job.folder_counts = @splat(0);
         job.folder_offsets = @splat(0);
         job.failures = 0;
@@ -93,7 +99,7 @@ pub const Job = struct {
         for (job.sources, 0..) |source, index| {
             job.offsets[index] = offset;
             job.folder_offsets[index] = folder_offset;
-            if (folder_offset < job.folders.len) {
+            if (job.list_folders and folder_offset < job.folders.len) {
                 const listed = source.mail.folders(job.folders[folder_offset..]) catch 0;
                 job.folder_counts[index] = listed;
                 folder_offset += listed;
@@ -127,6 +133,9 @@ pub const BodyRequest = struct {
     /// The folder the message is in: its UID means nothing outside it, and one of
     /// the account's own folders is a folder too.
     folder: core.state.MoveTarget = .{ .mailbox = .inbox },
+    /// The name the caches know that folder by, fixed when the body was asked for:
+    /// a slot is a position, and positions move.
+    key: core.text.Text(core.folder.name_max) = .{},
     place: port.Place,
     id: core.id.MessageId,
     mail: core.mail_port.Mail,
