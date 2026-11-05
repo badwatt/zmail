@@ -740,12 +740,7 @@ pub const Session = struct {
         self.load_cached_folders();
         // An account whose folders nobody has listed yet says so in the sidebar:
         // the six the app knows are a placeholder, not an answer.
-        self.state.listing = false;
-        if (self.refresh_target == .mailbox) {
-            if (self.state.account_filter) |account| {
-                self.state.listing = self.state.folders.is_empty(account);
-            }
-        }
+        if (self.refresh_target == .mailbox) {}
         var need_listing = refresh_forced;
         for (self.refresh_sources[0..count]) |source| {
             if (self.state.folders.is_empty(source.id)) need_listing = true;
@@ -817,7 +812,6 @@ pub const Session = struct {
         }
 
         const failures = self.refresh_job.failures;
-        self.state.listing = false;
         self.state.booting = false;
         self.refreshing = false;
         self.state.refreshing = false;
@@ -899,13 +893,8 @@ pub const Session = struct {
             if (!self.state.folders.is_empty(source.id)) continue;
             missing = true;
         }
-        if (!missing) {
-            // The disk had them after all: nothing to wait for, and the sidebar
-            // must stop saying it is waiting.
-            self.state.listing = false;
-            self.repaint();
-            return;
-        }
+        // The disk had them all: nothing to do, and the sidebar already says so.
+        if (!missing) return;
 
         var count: u8 = 0;
         for (self.live_sources(), 0..) |source, index| {
@@ -918,7 +907,6 @@ pub const Session = struct {
         self.refresh_count = count;
         self.refresh_target = self.screen_target();
         self.refresh_key = core.text.Text(core.folder.name_max).init(self.folder_key(self.refresh_target));
-        self.state.listing = true;
         self.refresh_job.start(
             self.refresh_sources[0..count],
             self.place_of(self.refresh_target),
@@ -1182,7 +1170,6 @@ pub const Session = struct {
             &self.state.accounts,
             &self.state.folders,
             self.state.account_filter,
-            self.state.listing,
             mouse.y,
         ) orelse return false;
         switch (entry) {
@@ -7011,13 +6998,12 @@ test "the folders load in the order J walks them, and the sidebar says when they
     // Choosing the account has to ask, and says so while it waits.
     rig.session.state.account_filter = null;
     _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
-    try testing.expect(rig.session.state.listing);
-    // The sidebar offers no rows yet: what it would draw is about to change.
+    // While the listing is in flight the sidebar still draws what it knows: it
+    // is a navigator, and an empty one is worse than a stale one.
     var rows: [32]core.state.MoveRow = undefined;
-    try testing.expectEqual(@as(usize, 0), rig.session.state.folder_rows(&rows));
+    try testing.expect(rig.session.state.folder_rows(&rows) > 0);
 
     rig.session.settle_refresh_for_test();
-    try testing.expect(!rig.session.state.listing);
     try testing.expectEqual(@as(u8, 3), rig.session.state.folders.count(account));
 
     // The list says Archive, INBOX, Clients, and the screen is on Inbox: J goes to
@@ -7082,7 +7068,6 @@ test "the folder list comes from disk before it comes from the network" {
     rig.session.state.account_filter = core.id.AccountId.from_int(2);
     rig.session.state.account_filter = null;
     _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
-    try testing.expect(!rig.session.state.listing);
     try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
     try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, 1).?.display());
     try testing.expectEqual(@as(u32, 2), rig.session.state.folders.at(account, 1).?.unread);
@@ -7168,7 +7153,6 @@ test "the folders are there at startup, without a key to ask for them" {
 
     // No scope change, no key: the sidebar's table is already the account's.
     try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
-    try testing.expect(!rig.session.state.listing);
     try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, 1).?.display());
 }
 
@@ -7204,7 +7188,6 @@ test "the first listing is the only one: the next start reads it from disk" {
         // Before any network work at all: the table is already the account's.
         try testing.expectEqual(cache.folder_count, rig.session.state.folders.count(account));
         rig.session.settle_boot_for_test();
-        try testing.expect(!rig.session.state.listing);
         // And nothing was listed again.
         try testing.expectEqual(@as(u32, 1), cache.folder_saves);
     }
@@ -7245,7 +7228,6 @@ test "the first connection says so before it blocks, and lists the folders after
     // And the folders are asked for once the connection is there.
     rig.session.settle_refresh_for_test();
     try testing.expectEqual(@as(u8, 6), rig.session.state.folders.count(account));
-    try testing.expect(!rig.session.state.listing);
     opener.lazy.close();
 }
 
@@ -7413,7 +7395,6 @@ test "an account whose folders are on disk shows them the moment it is opened" {
     // Choose it: the handshake happens, and the disk answers the sidebar.
     rig.session.state.account_filter = null;
     _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
-    try testing.expect(!rig.session.state.listing);
     try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
     // And the folder rows are back on screen, not the "listing folders" line:
     // the next tick paints what the sidebar knows.
@@ -7493,6 +7474,5 @@ test "the folders survive a restart through the file cache" {
         rig.session.boot();
         // Before any network work: the sidebar is the account's own.
         try testing.expectEqual(@as(u8, 7), rig.session.state.folders.count(account));
-        try testing.expect(!rig.session.state.listing);
     }
 }

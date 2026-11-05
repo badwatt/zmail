@@ -278,7 +278,6 @@ pub fn sidebar_rows(
     accounts: *const core.state.Accounts,
     folders: *const core.folder.Table,
     scope: ?core.id.AccountId,
-    listing: bool,
     rows: []SidebarRow,
 ) usize {
     var count: usize = 0;
@@ -296,9 +295,6 @@ pub fn sidebar_rows(
 
     // One row says "the folders below belong to the scope above".
     y += 1;
-    // The folders are being listed: the sidebar says so, and does not offer the
-    // six as if they were the answer.
-    if (listing) return count;
     if (scope) |account| {
         // The account's own folders, in the order its server listed them. A
         // server that has not answered yet leaves the six the app knows.
@@ -331,11 +327,10 @@ pub fn sidebar_hit(
     accounts: *const core.state.Accounts,
     folders: *const core.folder.Table,
     scope: ?core.id.AccountId,
-    listing: bool,
     y: u16,
 ) ?SidebarEntry {
     var rows: [max_sidebar_rows]SidebarRow = undefined;
-    const count = sidebar_rows(accounts, folders, scope, listing, &rows);
+    const count = sidebar_rows(accounts, folders, scope, &rows);
     for (rows[0..count]) |row| {
         if (row.y == y) return row.entry;
     }
@@ -367,7 +362,6 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         &inputs.state.accounts,
         &inputs.state.folders,
         inputs.state.account_filter,
-        inputs.state.listing,
         &rows,
     );
 
@@ -375,17 +369,6 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const separator: u16 = 1 + inputs.state.accounts.len;
     if (separator < out.rows) out.hline(1, separator, width -| 2, '─', theme.border);
 
-    // Nothing to list yet: say so where the folders will be. A sidebar of six
-    // placeholders looks like an answer, and is not one.
-    if (inputs.state.listing) {
-        const y = separator + 1;
-        if (y < out.rows) {
-            const glyph = spinner_frames[inputs.state.spinner % spinner_frames.len];
-            var buffer: [32]u8 = undefined;
-            const line = std.fmt.bufPrint(&buffer, "{s} listing folders", .{glyph}) catch "listing folders";
-            _ = out.put_text(1, y, line, width -| 2, theme.dim);
-        }
-    }
     for (rows[0..count]) |row| {
         if (row.y >= out.rows) break;
         const active = sidebar_active(inputs.state, row.entry);
@@ -2970,7 +2953,7 @@ test "the sidebar lists every account's folders, and a row knows where it leads"
     f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{}, .{});
 
     var rows: [max_sidebar_rows]SidebarRow = undefined;
-    const count = sidebar_rows(&f.state.accounts, &f.state.folders, null, false, &rows);
+    const count = sidebar_rows(&f.state.accounts, &f.state.folders, null, &rows);
     // All accounts, the two of them, and the six folders of the scope. The rule
     // between the two halves is a gap in `y`, not a row of its own.
     try testing.expectEqual(@as(usize, 1 + 2 + 6), count);
@@ -2988,7 +2971,7 @@ test "the sidebar lists every account's folders, and a row knows where it leads"
     );
     // The folders are the ones of the scope on screen: this account's, here.
     var account_rows: [max_sidebar_rows]SidebarRow = undefined;
-    const account_count = sidebar_rows(&f.state.accounts, &f.state.folders, core.id.AccountId.from_int(2), false, &account_rows);
+    const account_count = sidebar_rows(&f.state.accounts, &f.state.folders, core.id.AccountId.from_int(2), &account_rows);
     try testing.expectEqual(count, account_count);
     try testing.expectEqual(
         SidebarEntry{ .folder = .{ .account = core.id.AccountId.from_int(2), .mailbox = .inbox } },
@@ -2996,9 +2979,9 @@ test "the sidebar lists every account's folders, and a row knows where it leads"
     );
 
     // The same list answers the mouse.
-    try testing.expectEqual(first_account.entry, sidebar_hit(&f.state.accounts, &f.state.folders, null, false, 1).?);
-    try testing.expect(sidebar_hit(&f.state.accounts, &f.state.folders, null, false, 3) == null);
-    try testing.expect(sidebar_hit(&f.state.accounts, &f.state.folders, null, false, 99) == null);
+    try testing.expectEqual(first_account.entry, sidebar_hit(&f.state.accounts, &f.state.folders, null, 1).?);
+    try testing.expect(sidebar_hit(&f.state.accounts, &f.state.folders, null, 3) == null);
+    try testing.expect(sidebar_hit(&f.state.accounts, &f.state.folders, null, 99) == null);
 }
 
 test "with the sidebar on, the folders are on the left and the list starts after the rule" {
@@ -3137,32 +3120,4 @@ test "a server that calls the inbox INBOX still lights the folder you are in" {
     try row_contains(&out, 3, "Inbox");
     try testing.expectEqual(f.theme.selection.bg, out.cells[3][1].style.bg);
     try testing.expect(!std.meta.eql(out.cells[4][1].style.bg, f.theme.selection.bg));
-}
-
-test "while the folders are being listed the sidebar says so, and offers no rows" {
-    var f = try fixture();
-    defer f.deinit();
-    const account = core.id.AccountId.from_int(1);
-    f.state.accounts.add(account, "work", .{}, .{});
-    f.state.account_filter = account;
-    f.state.listing = true;
-
-    var inputs = f.inputs(120, 30);
-    inputs.sidebar = true;
-    var out = Screen.init(120, 30);
-    frame(inputs, &out);
-
-    // The scopes are there, the rule is there, and where the folders will be
-    // there is a line that says they are on their way.
-    try row_contains(&out, 0, "ALL ACCOUNTS");
-    try row_contains(&out, 1, "work");
-    var found = false;
-    var line: u16 = 0;
-    var buffer: [512]u8 = undefined;
-    while (line < 6) : (line += 1) {
-        if (std.mem.indexOf(u8, out.row_text(line, &buffer), "listing folders") != null) found = true;
-    }
-    try testing.expect(found);
-    // Not the six placeholders: those are the answer, and there is no answer yet.
-    try testing.expect(std.mem.indexOf(u8, out.row_text(4, &buffer), "Inbox") == null);
 }

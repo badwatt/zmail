@@ -245,9 +245,6 @@ pub const State = struct {
     account_filter: ?AccountId = null,
     compose: Compose = .{},
 
-    /// A folder list is in flight: the sidebar says so instead of pretending the
-    /// six are all there is.
-    listing: bool = false,
     /// Choosing where the selected message goes: the chooser is open, and this
     /// is the row under its cursor.
     moving: bool = false,
@@ -306,9 +303,6 @@ pub const State = struct {
     /// account's own list when the server gave one, the six the app knows when
     /// it did not.
     pub fn folder_rows(self: *const State, rows: []MoveRow) usize {
-        // Nothing to walk while the list is on its way: the order is about to
-        // change under the key.
-        if (self.listing) return 0;
         var count: usize = 0;
         if (self.account_filter) |account| {
             if (!self.folders.is_empty(account)) {
