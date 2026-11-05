@@ -37,6 +37,9 @@ pub const TlsTransport = struct {
     tls_write_buffer: [std.crypto.tls.Client.min_buffer_len]u8 = undefined,
     opened: bool = false,
 
+    /// How long a TCP connect may take before it is a failure the user can see.
+    pub const connect_timeout_seconds: u8 = 10;
+
     /// Initializes in place: the TLS client captures pointers to this struct's
     /// readers and buffers, so it must never be moved after `open`.
     pub fn open(self: *TlsTransport, gpa: std.mem.Allocator, io: std.Io, host: []const u8, port: u16) OpenError!void {
@@ -44,8 +47,14 @@ pub const TlsTransport = struct {
         // defaults, so establish them here before touching the bundle.
         self.* = .{ .gpa = gpa, .io = io };
         const host_name = std.Io.net.HostName.init(host) catch return error.InvalidHost;
-        self.stream = host_name.connect(io, port, .{ .mode = .stream, .timeout = .none }) catch
-            return error.ConnectFailed;
+        // Bounded, because this call is made on the thread that paints: a server
+        // that accepts nothing -- a firewall, a host that no longer has the
+        // address -- would otherwise freeze the frame for as long as the kernel
+        // feels like waiting.
+        self.stream = host_name.connect(io, port, .{
+            .mode = .stream,
+            .timeout = .{ .duration = .{ .raw = .fromSeconds(connect_timeout_seconds), .clock = .awake } },
+        }) catch return error.ConnectFailed;
         self.stream_reader = self.stream.reader(io, &self.net_read_buffer);
         self.stream_writer = self.stream.writer(io, &self.net_write_buffer);
 
