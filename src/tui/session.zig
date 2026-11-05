@@ -867,7 +867,7 @@ pub const Session = struct {
             self.size.columns,
             self.size.rows,
             self.tag_width(),
-            self.sidebar,
+            self.sidebar_shown(),
         );
         if (lay.too_small) return false;
 
@@ -892,6 +892,18 @@ pub const Session = struct {
         if (mouse.ctrl) return self.click_link(lay, mouse);
         if (self.start_selection(lay, mouse)) return true;
         return false;
+    }
+
+    /// Whether the folder column is part of the frame. Reading a message is a
+    /// page, not a place to choose a folder from: the sidebar goes away and the
+    /// body gets its columns. Help opened over the reader follows it.
+    fn sidebar_shown(self: *Session) bool {
+        if (!self.sidebar) return false;
+        return switch (self.state.view) {
+            .reader => false,
+            .help => self.state.help_return != .reader,
+            else => true,
+        };
     }
 
     /// How wide the account column has to be. One account on screen needs no
@@ -1175,7 +1187,7 @@ pub const Session = struct {
             self.size.columns,
             self.size.rows,
             self.tag_width(),
-            self.sidebar,
+            self.sidebar_shown(),
         );
         // Ctrl is the question "what would this do?": without it the pointer
         // changes nothing, so reading is never disturbed.
@@ -1270,7 +1282,7 @@ pub const Session = struct {
             self.size.columns,
             self.size.rows,
             self.tag_width(),
-            self.sidebar,
+            self.sidebar_shown(),
         );
         const cell = self.body_cell(lay, mouse) orelse return false;
         active.dragTo(cell);
@@ -1288,7 +1300,7 @@ pub const Session = struct {
             self.size.columns,
             self.size.rows,
             self.tag_width(),
-            self.sidebar,
+            self.sidebar_shown(),
         );
         if (self.body_cell(lay, mouse)) |cell| active.dragTo(cell);
 
@@ -2325,7 +2337,7 @@ pub const Session = struct {
             self.size.columns,
             self.size.rows,
             self.tag_width(),
-            self.sidebar,
+            self.sidebar_shown(),
         );
         // One text for the whole frame: what the wrap saw, what the lines point into,
         // and what the picture search reads -- the same bytes, or the offsets lie.
@@ -2352,7 +2364,7 @@ pub const Session = struct {
             .kinds = self.html_kinds[0..self.html_kind_count],
             .selection = self.selection,
             .reduced_motion = self.deps.reduced_motion,
-            .sidebar = self.sidebar,
+            .sidebar = self.sidebar_shown(),
             .elapsed_ms = os.monotonic_ms() - self.splash_started_ms,
             .now_unix = self.now_unix,
             .columns = self.size.columns,
@@ -6518,4 +6530,29 @@ test "a click in the sidebar opens that folder, and the scopes say whose folders
     // neither is the empty space under them.
     try testing.expect(!rig.session.handle_mouse(.{ .x = 4, .y = 2, .kind = .press, .button = .left }));
     try testing.expect(!rig.session.handle_mouse(.{ .x = 4, .y = 22, .kind = .press, .button = .left }));
+}
+
+test "reading a message gives the body the whole width, and the sidebar comes back" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.sidebar = true;
+    try testing.expect(rig.session.sidebar_shown());
+
+    try rig.open_reader("<p>hello</p>");
+    try testing.expectEqual(core.state.View.reader, rig.session.state.view);
+    try testing.expect(!rig.session.sidebar_shown());
+
+    // Help opened over the reader follows the reader; over the list, the list.
+    rig.session.state.view = .help;
+    rig.session.state.help_return = .reader;
+    try testing.expect(!rig.session.sidebar_shown());
+    rig.session.state.help_return = .list;
+    try testing.expect(rig.session.sidebar_shown());
+
+    // A program that switched the column off is not overruled by a view change.
+    rig.session.sidebar = false;
+    rig.session.state.view = .list;
+    try testing.expect(!rig.session.sidebar_shown());
 }
