@@ -320,7 +320,9 @@ pub const Session = struct {
     body_in_flight: bool = false,
     /// The message the reader is waiting for, so a body that arrives after the user
     /// left is cached and not painted over whatever is on screen.
-    body_wanted: ?core.id.MessageId = null,
+    /// Which message the reader is waiting for, named the way a body must be:
+    /// a UID is a folder's, and two folders can both have a 1522.
+    body_wanted: ?ShownMessage = null,
     /// When the footer spinner may stop: a bar that appears and vanishes inside one
     /// frame reads as a glitch, so the body keeps it up for the minimum.
     body_loading_until_ms: i64 = 0,
@@ -952,6 +954,12 @@ pub const Session = struct {
             self.poll_pending();
             self.settle_refresh_for_test();
         }
+    }
+
+    /// Starts the body that is waiting, without waiting for it: what the loop does
+    /// on the tick after the key.
+    pub fn start_body_for_test(self: *Session) void {
+        self.poll_body();
     }
 
     /// Lets a body fetch in the air land, the way the loop would: start it, wait for
@@ -1927,7 +1935,7 @@ pub const Session = struct {
             .id = id,
             .mail = mail,
         };
-        self.body_wanted = id;
+        self.body_wanted = .{ .account = account, .folder = folder, .id = id };
         self.repaint();
     }
 
@@ -1955,7 +1963,10 @@ pub const Session = struct {
         self.body_job.join();
         self.body_in_flight = false;
         const request = self.body_job.request;
-        const wanted = self.body_wanted == request.id;
+        const wanted = if (self.body_wanted) |pending|
+            pending.matches(request.account, request.folder, request.id)
+        else
+            false;
         self.body_wanted = null;
 
         if (!self.body_job.ok) {
@@ -1972,9 +1983,7 @@ pub const Session = struct {
         // The reader moved on while this was in the air: the bytes are kept for next
         // time and not painted under whatever is on screen now.
         if (!wanted) return;
-        // What the reader is showing is the folder on screen: the request is the
-        // one that was waited for, or it would not be painted at all.
-        self.set_raw(request.account, self.screen_target(), request.id, raw);
+        self.set_raw(request.account, request.folder, request.id, raw);
     }
 
     /// The bytes are in: the spinner has done its job.
@@ -7559,4 +7568,35 @@ test "a connection that will not open fails the body, not the client" {
 
 fn stuckFailRaw(_: *anyopaque, _: core.mail_port.Place, _: MessageId, _: []u8) core.mail_port.Error![]const u8 {
     return error.Unavailable;
+}
+
+test "a body that lands for another folder's message is not painted on this one" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    const account = core.id.AccountId.from_int(1);
+    // A UID means something only in the folder it came from: 1 in INBOX and 1 in
+    // "Clients" are two different messages, and the reader can move between them
+    // while the first one's body is still on the wire.
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = account,
+        .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
+    } }});
+    rig.session.start_body_for_test();
+    try testing.expect(rig.session.body_in_flight);
+
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = account,
+        .id = MessageId.from_int(1),
+        .folder = .{ .named = .{ .account = account, .slot = 0 } },
+    } }});
+    rig.session.settle_body_for_test();
+
+    // INBOX's bytes are not the ones on screen: they are kept for the next time
+    // INBOX is opened, and the reader is not shown a message it did not ask for.
+    try testing.expect(rig.session.shown_message == null);
+    try testing.expectEqual(@as(u32, 0), rig.session.body_len);
 }
