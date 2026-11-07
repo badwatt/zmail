@@ -264,8 +264,10 @@ pub fn shows_back(state: *const State, sidebar: bool) bool {
 /// same background a selected row has, so it reads as something to press.
 fn render_back(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     if (!shows_back(inputs.state, lay.sidebar)) return;
-    out.fill_rect(.{ .x = back_x, .y = back_y, .width = back_width, .height = 1 }, ' ', inputs.theme.selection);
-    out.put(back_x + back_width / 2, back_y, '←', inputs.theme.text.with_bold());
+    // The glyph alone: a background would be three cells of highlight around one
+    // character, which reads as something left over. The button is the cells the
+    // pointer and the click use, and neither of them needs to be painted.
+    out.put(back_x + back_width / 2, back_y, '←', inputs.theme.accent.with_bold());
 }
 
 /// The first network load can take a second: say so, beautifully, instead of

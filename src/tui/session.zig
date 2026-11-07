@@ -1107,7 +1107,8 @@ pub const Session = struct {
         if (lay.too_small) return false;
 
         // The arrow in the corner does what Esc does: one click, one layer back.
-        if (mouse.x == render_mod.back_x and mouse.y == render_mod.back_y) {
+        // The whole chip is the button, not the cell the glyph happens to sit in.
+        if (render_mod.in_back(mouse.x, mouse.y)) {
             if (!render_mod.shows_back(&self.state, self.sidebar_shown())) return false;
             return self.apply(.dismiss);
         }
@@ -8086,8 +8087,22 @@ test "the corner is the way back with a mouse, exactly like Esc" {
     try rig.open_reader("From: Alice <alice@example.com>\nSubject: hi\n\nbody");
     try testing.expect(rig.session.state.view == .reader);
 
-    _ = rig.session.handle_mouse(.{ .x = render_mod.back_x, .y = render_mod.back_y, .kind = .press, .button = .left });
-    try testing.expect(rig.session.state.view == .list);
+    // Any cell of the chip is the button, not just the one the glyph sits in: a
+    // click on the arrow itself used to be the one that did nothing.
+    for ([_]u16{ render_mod.back_x, render_mod.back_x + 1, render_mod.back_x + render_mod.back_width - 1 }) |x| {
+        try rig.open_reader("From: Alice <alice@example.com>\nSubject: again\n\nbody");
+        _ = rig.session.handle_mouse(.{ .x = x, .y = render_mod.back_y, .kind = .press, .button = .left });
+        try testing.expect(rig.session.state.view == .list);
+    }
+    // The cell just past it is not the button.
+    try rig.open_reader("From: Alice <alice@example.com>\nSubject: once more\n\nbody");
+    _ = rig.session.handle_mouse(.{
+        .x = render_mod.back_x + render_mod.back_width,
+        .y = render_mod.back_y,
+        .kind = .press,
+        .button = .left,
+    });
+    try testing.expect(rig.session.state.view == .reader);
 
     // The list has nowhere to go, and the click is not a key: nothing happens.
     _ = rig.session.handle_mouse(.{ .x = render_mod.back_x, .y = render_mod.back_y, .kind = .press, .button = .left });
