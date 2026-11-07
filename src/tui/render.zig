@@ -422,15 +422,23 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         }
         switch (row.entry) {
             .all_accounts => {
-                const style = if (active) theme.accent.with_bold() else theme.dim.with_bold();
+                const style = selected_style(
+                    if (active) theme.accent.with_bold() else theme.dim.with_bold(),
+                    theme,
+                    active,
+                );
                 _ = out.put_text(1, row.y, "ALL ACCOUNTS", width -| 2, style);
-                render_sidebar_total(inputs, out, row.y, width, null);
+                render_sidebar_total(inputs, out, row.y, width, null, active);
             },
             .account => |id| {
-                const style = if (active) theme.accent.with_bold() else theme.text.with_bold();
+                const style = selected_style(
+                    if (active) theme.accent.with_bold() else theme.text.with_bold(),
+                    theme,
+                    active,
+                );
                 const label = inputs.state.accounts.label_for(id);
                 out.put_text_truncated(1, row.y, label, width -| 4, style);
-                render_sidebar_total(inputs, out, row.y, width, id);
+                render_sidebar_total(inputs, out, row.y, width, id, active);
             },
             .folder => |folder| {
                 // The server's own name for a folder the six do not cover.
@@ -451,20 +459,19 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
                     entry.unread
                 else
                     0;
-                const style = if (active)
-                    theme.accent.with_bold()
-                else if (unread > 0)
-                    theme.text
-                else
-                    theme.dim;
+                const style = selected_style(
+                    if (active) theme.accent.with_bold() else if (unread > 0) theme.text else theme.dim,
+                    theme,
+                    active,
+                );
                 const title = if (folder.mailbox) |mailbox| mailbox.title() else named_title;
                 out.put_text_truncated(3, row.y, title, width -| 4, style);
                 if (folder.mailbox) |mailbox| {
-                    render_sidebar_count(inputs, out, row.y, width, mailbox, folder.account);
+                    render_sidebar_count(inputs, out, row.y, width, mailbox, folder.account, active);
                 } else if (unread > 0) {
                     var unread_buffer: [8]u8 = undefined;
                     const number = if (unread > 999) "999" else std.fmt.bufPrint(&unread_buffer, "{d}", .{unread}) catch "";
-                    put_right(out, width -| 2, row.y, number, inputs.theme.accent);
+                    put_right(out, width -| 2, row.y, number, selected_style(inputs.theme.accent, inputs.theme, active));
                 }
             },
         }
@@ -473,13 +480,20 @@ fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 
 /// Unread everywhere in a scope: a group row counts what is behind it, not
 /// what one of its folders happens to hold.
-fn render_sidebar_total(inputs: Inputs, out: *Screen, y: u16, width: u16, account: ?core.id.AccountId) void {
+fn render_sidebar_total(
+    inputs: Inputs,
+    out: *Screen,
+    y: u16,
+    width: u16,
+    account: ?core.id.AccountId,
+    active: bool,
+) void {
     var total: u32 = 0;
     for (Mailbox.all) |mailbox| total += inputs.store.unread_in(mailbox, account);
     if (total == 0) return;
     var buffer: [8]u8 = undefined;
     const count = if (total > 999) "999" else std.fmt.bufPrint(&buffer, "{d}", .{total}) catch "";
-    put_right(out, width -| 2, y, count, inputs.theme.accent);
+    put_right(out, width -| 2, y, count, selected_style(inputs.theme.accent, inputs.theme, active));
 }
 
 fn render_sidebar_count(
@@ -489,12 +503,13 @@ fn render_sidebar_count(
     width: u16,
     mailbox: Mailbox,
     account: ?core.id.AccountId,
+    active: bool,
 ) void {
     const unread = inputs.store.unread_in(mailbox, account);
     if (unread == 0) return;
     var buffer: [8]u8 = undefined;
     const count = if (unread > 999) "999" else std.fmt.bufPrint(&buffer, "{d}", .{unread}) catch "";
-    put_right(out, width -| 2, y, count, inputs.theme.accent);
+    put_right(out, width -| 2, y, count, selected_style(inputs.theme.accent, inputs.theme, active));
 }
 
 /// The "move to" chooser: the account's folders, the selected one marked, over
@@ -3574,4 +3589,39 @@ test "every mark stands a cell clear of the address it marks" {
     // the over and the address is exactly the one blank cell.
     const address_at = std.mem.indexOf(u8, row, "mailto:me@example.com").?;
     try testing.expectEqual(@as(u16, 1), screen.text_columns(row[mark_end..address_at]));
+}
+
+test "the selected row of the sidebar is one colour, letters included" {
+    var f = try fixture();
+    defer f.deinit();
+    const account = core.id.AccountId.from_int(1);
+    f.state.accounts.add(account, "work", try core.address.Address.init("me@work.example"), .{});
+    f.state.account_filter = account;
+    f.state.rebuild(&f.store);
+
+    var out: Screen = .{};
+    const theme = Theme.dark();
+    frame(.{
+        .state = &f.state,
+        .store = &f.store,
+        .theme = &theme,
+        .body = "",
+        .wrapped = null,
+        .columns = 100,
+        .rows = 24,
+        .sidebar = true,
+        .now_unix = 1_700_000_000,
+    }, &out);
+
+    // The scope on screen is the first account: its row is the selected one, and
+    // the bar must not have holes where the letters are.
+    const row = out.cells[1][0..layout_mod.sidebar_width];
+    for (row) |cell| {
+        try testing.expectEqual(theme.selection.bg, cell.style.bg);
+    }
+    // A row that is not selected is not painted: nothing to punch through.
+    const other = out.cells[0][0..layout_mod.sidebar_width];
+    for (other) |cell| {
+        try testing.expect(!std.meta.eql(theme.selection.bg, cell.style.bg));
+    }
 }
