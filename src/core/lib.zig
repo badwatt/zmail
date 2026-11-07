@@ -17,6 +17,7 @@ pub const meta = @import("meta.zig");
 pub const text = @import("domain/text.zig");
 pub const id = @import("domain/id.zig");
 pub const mailbox = @import("domain/mailbox.zig");
+pub const folder = @import("domain/folder.zig");
 pub const address = @import("domain/address.zig");
 pub const message = @import("domain/message.zig");
 pub const outgoing = @import("domain/outgoing.zig");
@@ -73,6 +74,7 @@ test {
     _ = @import("domain/text.zig");
     _ = @import("domain/id.zig");
     _ = @import("domain/mailbox.zig");
+    _ = @import("domain/folder.zig");
     _ = @import("domain/address.zig");
     _ = @import("domain/message.zig");
     _ = @import("domain/outgoing.zig");

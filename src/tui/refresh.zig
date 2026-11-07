@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const port = core.mail_port;
 
 const Message = core.message.Message;
 const Mailbox = core.mailbox.Mailbox;
@@ -29,22 +30,51 @@ pub const Job = struct {
     thread: std.Thread = undefined,
     state: std.atomic.Value(u8) = std.atomic.Value(u8).init(@backingInt(State.done)),
     sources: []const Source = &.{},
-    mailbox: Mailbox = .inbox,
+    /// Which folder each source is asked for, one per source: two accounts can
+    /// call the same folder by different names ("Sent" and "[Gmail]/Sent Mail"),
+    /// and the caller knows both.
+    places: []const port.Place = &.{},
+    place: port.Place = port.Place.inbox,
     /// One slot per account: the worker writes each account's envelopes into
     /// its own region so the UI never reads a half-written mailbox.
     buffer: []Message = &.{},
     offsets: [max_accounts]u32 = @splat(0),
     counts: [max_accounts]u32 = @splat(0),
+    /// One region per account for the folders its server listed. Asking is a
+    /// round trip like any other, so it happens on the worker too.
+    folders: []port.Listed = &.{},
+    /// Only ask for the folder lists: the mail on screen came from the cache, and
+    /// a listing is not a reason to fetch it again.
+    list_only: bool = false,
+    /// Whether to ask for the folder lists at all. A refresh of the mail does not
+    /// need them: they are on disk, and forty `STATUS` commands are a second of
+    /// the user's life for numbers that have not changed.
+    list_folders: bool = true,
+    folder_offsets: [max_accounts]u32 = @splat(0),
+    folder_counts: [max_accounts]u32 = @splat(0),
     /// Per account: did the fetch succeed? A failed account keeps its old mail.
     ok: [max_accounts]bool = @splat(false),
     failures: u32 = 0,
 
     /// Starts the worker. A thread that cannot be spawned is reported as a
     /// finished job with one failure, so the caller has a single code path.
-    pub fn start(job: *Job, sources: []const Source, mailbox: Mailbox, buffer: []Message) void {
+    pub fn start(
+        job: *Job,
+        sources: []const Source,
+        places: []const port.Place,
+        buffer: []Message,
+        folders: []port.Listed,
+        list_only: bool,
+        list_folders: bool,
+    ) void {
         job.sources = sources;
-        job.mailbox = mailbox;
+        job.places = places;
         job.buffer = buffer;
+        job.folders = folders;
+        job.list_only = list_only;
+        job.list_folders = list_folders;
+        job.folder_counts = @splat(0);
+        job.folder_offsets = @splat(0);
         job.failures = 0;
         job.counts = @splat(0);
         job.offsets = @splat(0);
@@ -67,10 +97,32 @@ pub const Job = struct {
 
     fn run(job: *Job) void {
         var offset: u32 = 0;
+        var folder_offset: u32 = 0;
         for (job.sources, 0..) |source, index| {
             job.offsets[index] = offset;
+            job.folder_offsets[index] = folder_offset;
+            if (job.list_folders and folder_offset < job.folders.len) {
+                const listed = source.mail.folders(job.folders[folder_offset..]) catch 0;
+                job.folder_counts[index] = listed;
+                folder_offset += listed;
+            }
+            // A listing-only job leaves the mail alone: what is on screen came
+            // from the cache a moment ago, and asking again would be a socket for
+            // something nobody asked to refresh.
+            if (job.list_only) continue;
+
             const slice = job.buffer[offset..];
-            const count = source.mail.fetch(job.mailbox, slice) catch {
+            var place = if (index < job.places.len) job.places[index] else port.Place.inbox;
+            // The list just came back, so the name to use is the one it carried --
+            // not the one the sidebar had a second ago. That is what makes a folder
+            // work the first time whether it is Sent, Trash, or one of the account's
+            // own, and whether the saved list was written before or after the folder
+            // was renamed.
+            if (place.mailbox) |mailbox| {
+                const listed = job.folders[job.folder_offsets[index]..][0..job.folder_counts[index]];
+                if (listed_name(listed, mailbox)) |fresh| place.name = fresh;
+            }
+            const count = source.mail.fetch(place, slice) catch {
                 job.failures += 1;
                 continue;
             };
@@ -82,6 +134,17 @@ pub const Job = struct {
     }
 };
 
+/// The name the server just listed for a canonical mailbox, when it listed one.
+pub fn listed_name(listed: []const port.Listed, mailbox: core.mailbox.Mailbox) ?[]const u8 {
+    for (listed) |folder| {
+        const canonical = folder.canonical orelse continue;
+        if (canonical != mailbox) continue;
+        if (folder.name.len == 0) continue;
+        return folder.name;
+    }
+    return null;
+}
+
 /// One message's body, fetched off the loop.
 ///
 /// The same shape as `Job`, and for the same reason: the transport blocks, the reader
@@ -90,7 +153,13 @@ pub const Job = struct {
 /// wrapped lines and the links are only ever built by the thread that draws them.
 pub const BodyRequest = struct {
     account: AccountId,
-    mailbox: Mailbox,
+    /// The folder the message is in: its UID means nothing outside it, and one of
+    /// the account's own folders is a folder too.
+    folder: core.state.MoveTarget = .{ .mailbox = .inbox },
+    /// The name the caches know that folder by, fixed when the body was asked for:
+    /// a slot is a position, and positions move.
+    key: core.text.Text(core.folder.name_max) = .{},
+    place: port.Place,
     id: core.id.MessageId,
     mail: core.mail_port.Mail,
 };
@@ -131,7 +200,7 @@ pub const BodyJob = struct {
 
     fn runBody(job: *BodyJob) void {
         const request = job.request;
-        if (request.mail.fetch_raw(request.mailbox, request.id, job.buffer)) |raw| {
+        if (request.mail.fetch_raw(request.place, request.id, job.buffer)) |raw| {
             job.len = @intCast(raw.len);
             job.ok = true;
         } else |_| {}
@@ -198,3 +267,21 @@ pub const ImageJob = struct {
         job.state.store(@backingInt(State.done), .release);
     }
 };
+
+const testing = std.testing;
+
+test "the name to fetch by is the one the listing just brought" {
+    const listed = [_]port.Listed{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox },
+        .{ .name = "[Gmail]/Sent Mail", .title = "Sent Mail", .canonical = .sent },
+        .{ .name = "Clients", .title = "Clients" },
+    };
+    try testing.expectEqualStrings("[Gmail]/Sent Mail", listed_name(&listed, .sent).?);
+    try testing.expectEqualStrings("INBOX", listed_name(&listed, .inbox).?);
+    // A folder this server does not have is not invented: the caller keeps what
+    // it had and lets the SELECT say so.
+    try testing.expectEqual(@as(?[]const u8, null), listed_name(&listed, .trash));
+    // A folder with no name of its own cannot be selected by one.
+    const nameless = [_]port.Listed{.{ .name = "", .canonical = .junk }};
+    try testing.expectEqual(@as(?[]const u8, null), listed_name(&nameless, .junk));
+}

@@ -44,6 +44,11 @@ pub const TlsTransport = struct {
         // defaults, so establish them here before touching the bundle.
         self.* = .{ .gpa = gpa, .io = io };
         const host_name = std.Io.net.HostName.init(host) catch return error.InvalidHost;
+        // No timeout: Zig 0.17's `Threaded` does not implement one for a POSIX
+        // connect -- it is a `@panic` in the standard library, not an error we
+        // could catch -- so the client does not ask for what it cannot have. The
+        // wait is bounded by the kernel, and the frame that says "Connecting…"
+        // goes out first.
         self.stream = host_name.connect(io, port, .{ .mode = .stream, .timeout = .none }) catch
             return error.ConnectFailed;
         self.stream_reader = self.stream.reader(io, &self.net_read_buffer);

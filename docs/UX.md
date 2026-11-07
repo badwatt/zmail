@@ -16,20 +16,52 @@ Design rules, in priority order:
 ## Layout
 
 ```
-row 0            header: app name + mailbox tabs + unread counts
-row 1            rule
-rows 2..h-3      list rows (or the reader body)
+columns 0..21    the folder sidebar
+column 22        the rule that separates it from the content
+columns 24..     the content
+
+row 0            the first row of the list -- there is no bar over it
+rows 0..h-3      list rows (or the reader body)
 row h-3          rule
 row h-2          breathing room
 row h-1          footer: contextual hints (left) + position (right)
 ```
 
-The reader uses the full screen: subject on row 0, metadata on row 1, a rule on
-row 2, body from row 3, its own rule and footer at the bottom.
+The list owns the top of the screen: with folders on the left, a bar showing the
+same folders would be the same list twice, so there is no bar. The reader takes
+the whole width as well -- the sidebar is for choosing a folder, and reading is
+not choosing -- with the subject on row 0, metadata on row 1, a rule on row 2,
+body from row 3, its own rule and footer at the bottom.
 
-Below 40 columns or 10 rows the client says so instead of drawing garbage. Below
-76 columns the tabs collapse to the active mailbox plus its unread count; `Tab`
-still switches.
+Below 84 columns there is no room for both, so the sidebar is not drawn and a
+one-line header comes back (`zmail  Inbox 3`): without it nothing would say which
+folder is on screen. Below 40 columns or 10 rows the client says so instead of
+drawing garbage.
+
+### The sidebar
+
+```
+ ALL ACCOUNTS       3
+ personal           3
+ work
+ ────────────────────
+   Inbox             3
+   Sent
+   Drafts            1
+   Clients
+   Invoices          1
+```
+
+The top rows are the scope: every account at once, or one of them. The rule says
+"the folders below belong to the scope above". Choosing a scope asks that account
+what folders it has (`LIST`), and the numbers come from `STATUS`: the six the app
+knows are counted from the store, the rest from what the server last said. A
+folder whose name carries a namespace (`[Gmail]/All Mail`) is shown without it,
+one row each, with `…` when even that does not fit; a name that only holds other
+folders (`[Gmail]`) is not a folder and is not listed.
+
+`J` and `K` walk the folders in the order the sidebar shows them, and a click on
+a row does the same.
 
 ### List rows
 
@@ -77,8 +109,8 @@ them.
 | `Ctrl+C` | quit. Nothing else does: not `Esc`, `q`, `h`, or `Ctrl+Q` |
 | `Ctrl+R` | refresh from the server |
 | `/` | search the list |
-| `Tab` `]` / `Shift+Tab` `[` | next / previous mailbox |
-| `1`–`6` | Inbox, Sent, Drafts, Archive, Trash, Junk |
+| `J` / `K` | next / previous folder, in the order the sidebar shows them |
+| `1`–`9` | the folder in that position in the sidebar |
 | `a` / `A` | next account scope / the accounts overlay |
 | `j` `k` `g` `G`, `↑` `↓` `Home` `End` | move: down, up, first, last |
 | `Ctrl+D` `Ctrl+U` / `Ctrl+F` `Ctrl+B`, `PageDown` `PageUp` | half a page / a page |
@@ -91,6 +123,7 @@ them.
 | `c` / `r` | compose / reply |
 | `u` / `s` `*` | read or unread / star or unstar |
 | `d` / `#` `Delete` | archive / move to Trash |
+| `m` | move to another folder: `j`/`k` choose, `Enter` moves, `Esc` cancels |
 | `X` / `E` | delete for good (Trash only) / empty Trash |
 | click, wheel | select a row (again to open it), scroll |
 
@@ -103,7 +136,7 @@ them.
 | `o` | the whole mail in a browser, pictures and all |
 | `H` | HTML view, or the plain text one. The HTML is read by zmail itself: no browser, no external program |
 | `i` | the pictures the message carries: the ones in it, and the ones it points at (fetched by `curl`, off the loop) |
-| `\` | every header: to, cc, reply-to, date, message-id |
+| `\` | every header: the account it arrived at, from, to, cc, reply-to, date, message-id |
 | `Ctrl+click` / `drag` | open the link under the pointer / select and copy |
 
 | Writing | |
@@ -380,3 +413,9 @@ The accounts overlay (`A`) lists "All accounts" first and then your accounts by
 name, whatever order the config file uses. The choice is remembered in
 `~/.config/zmail/scope`, so the next start opens on the same account — or on all
 of them, if that is what you picked last.
+
+Every place — each account, and "All accounts", which is a place of its own — keeps
+the folder it was reading while the app is open: going from `work` on Sent to
+`home` on Drafts and back to `work` puts you on Sent again. Nothing about it is
+written down, though: a restart opens on the first folder, so the morning starts in
+the same place every time.

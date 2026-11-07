@@ -52,6 +52,9 @@ pub const Inputs = struct {
     cover: []const u8 = &.{},
     /// Set when the user asked for no motion: the splash draws its still frame.
     reduced_motion: bool = false,
+    /// The folder sidebar is wanted. It is drawn only when the terminal can
+    /// afford it; `Layout` decides.
+    sidebar: bool = false,
     /// Milliseconds since the first screen went up. The splash's only clock: the loop
     /// and the painter thread both read it, so the mark cannot jump when one hands
     /// over to the other.
@@ -182,7 +185,13 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
     // previous view. The flush still compares rows, so this costs nothing on
     // the wire.
     out.clear();
-    const lay = layout_mod.Layout.compute(out.columns, out.rows, inputs.state.accounts.max_label());
+    out.shift = 0;
+    const lay = layout_mod.Layout.compute_with(
+        out.columns,
+        out.rows,
+        inputs.state.accounts.max_label(),
+        inputs.sidebar,
+    );
     if (lay.too_small) {
         render_too_small(inputs, out);
         return;
@@ -190,6 +199,13 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
     if (inputs.state.booting) {
         splash.draw(out, inputs.state, inputs.theme, inputs.elapsed_ms, inputs.reduced_motion);
         return;
+    }
+
+    // The sidebar is painted where it lives, then everything else is shifted
+    // past it: one rule and one blank column, and no renderer knows it is there.
+    if (lay.sidebar) {
+        render_sidebar(inputs, lay, out);
+        out.shift = lay.shift;
     }
 
     switch (inputs.state.view) {
@@ -209,6 +225,7 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
             render_accounts(inputs, lay, out);
         },
     }
+    if (inputs.state.moving) render_move(inputs, lay, out);
     render_footer(inputs, lay, out);
 }
 
@@ -219,14 +236,254 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
 const spinner_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
 
 fn render_list(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
-    if (inputs.state.mode == .search) {
+    if (inputs.state.mode == .search and lay.show_header) {
         render_search_bar(inputs, lay, out);
-    } else {
+        out.hline(0, lay.top_rule_y, lay.columns, '─', inputs.theme.border);
+    } else if (lay.show_header) {
         render_tabs(inputs, lay, out);
+        out.hline(0, lay.top_rule_y, lay.columns, '─', inputs.theme.border);
     }
-    out.hline(0, lay.top_rule_y, lay.columns, '─', inputs.theme.border);
     render_rows(inputs, lay, out);
     out.hline(0, lay.bottom_rule_y, lay.columns, '─', inputs.theme.border);
+}
+
+/// One row of the folder sidebar and what a click on it means.
+pub const SidebarEntry = union(enum) {
+    all_accounts,
+    account: core.id.AccountId,
+    /// A folder row. `mailbox` is one of the six; `slot` is one of the account's
+    /// own folders, as `LIST` named them. Exactly one is set.
+    folder: struct {
+        account: ?core.id.AccountId,
+        mailbox: ?Mailbox = null,
+        slot: ?u8 = null,
+    },
+};
+
+pub const SidebarRow = struct { y: u16, entry: SidebarEntry };
+
+/// The scopes, the rule under them, and the six folders of the scope on screen.
+pub const max_sidebar_rows: usize = 1 + core.state.accounts_max + Mailbox.all.len;
+
+/// A scope row: every account at once, or one of them.
+pub const SidebarScope = union(enum) {
+    all_accounts,
+    account: core.id.AccountId,
+};
+
+/// The rows the sidebar draws, top to bottom: the scopes that choose whose
+/// folders these are, then the folders themselves. The renderer and the mouse
+/// both walk this list, so a label and its hit box cannot drift apart.
+pub fn sidebar_rows(
+    accounts: *const core.state.Accounts,
+    folders: *const core.folder.Table,
+    scope: ?core.id.AccountId,
+    rows: []SidebarRow,
+) usize {
+    var count: usize = 0;
+    if (count == rows.len) return count;
+    rows[count] = .{ .y = 0, .entry = .all_accounts };
+    count += 1;
+
+    var y: u16 = 1;
+    for (accounts.items[0..accounts.len]) |account| {
+        if (count == rows.len) return count;
+        rows[count] = .{ .y = y, .entry = .{ .account = account.id } };
+        count += 1;
+        y += 1;
+    }
+
+    // One row says "the folders below belong to the scope above".
+    y += 1;
+    if (scope) |account| {
+        // The account's own folders, in the order its server listed them. A
+        // server that has not answered yet leaves the six the app knows.
+        if (!folders.is_empty(account)) {
+            var slot: u8 = 0;
+            while (slot < folders.count(account)) : (slot += 1) {
+                if (count == rows.len) return count;
+                const entry = folders.at(account, slot).?;
+                rows[count] = .{ .y = y, .entry = .{ .folder = if (entry.canonical) |mailbox|
+                    .{ .account = account, .mailbox = mailbox }
+                else
+                    .{ .account = account, .slot = slot } } };
+                count += 1;
+                y += 1;
+            }
+            return count;
+        }
+    }
+    for (Mailbox.all) |mailbox| {
+        if (count == rows.len) return count;
+        rows[count] = .{ .y = y, .entry = .{ .folder = .{ .account = scope, .mailbox = mailbox } } };
+        count += 1;
+        y += 1;
+    }
+    return count;
+}
+
+/// What the row at `y` is, if it is a row at all.
+pub fn sidebar_hit(
+    accounts: *const core.state.Accounts,
+    folders: *const core.folder.Table,
+    scope: ?core.id.AccountId,
+    y: u16,
+) ?SidebarEntry {
+    var rows: [max_sidebar_rows]SidebarRow = undefined;
+    const count = sidebar_rows(accounts, folders, scope, &rows);
+    for (rows[0..count]) |row| {
+        if (row.y == y) return row.entry;
+    }
+    return null;
+}
+
+fn sidebar_active(state: *const State, entry: SidebarEntry) bool {
+    return switch (entry) {
+        .all_accounts => state.account_filter == null,
+        .account => |id| state.account_filter == id,
+        .folder => |row| blk: {
+            if (row.slot) |slot| {
+                const ref = state.named orelse break :blk false;
+                break :blk row.account == ref.account and slot == ref.slot;
+            }
+            const mailbox = row.mailbox orelse break :blk false;
+            break :blk state.named == null and state.account_filter == row.account and state.mailbox == mailbox;
+        },
+    };
+}
+
+fn render_sidebar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    const theme = inputs.theme;
+    const width = lay.sidebar_width;
+    out.vline(width, 0, out.rows, '│', theme.border);
+
+    var rows: [max_sidebar_rows]SidebarRow = undefined;
+    const count = sidebar_rows(
+        &inputs.state.accounts,
+        &inputs.state.folders,
+        inputs.state.account_filter,
+        &rows,
+    );
+
+    // The rule between the scopes and the folders of the scope on screen.
+    const separator: u16 = 1 + inputs.state.accounts.len;
+    if (separator < out.rows) out.hline(1, separator, width -| 2, '─', theme.border);
+
+    for (rows[0..count]) |row| {
+        if (row.y >= out.rows) break;
+        const active = sidebar_active(inputs.state, row.entry);
+        if (active) {
+            out.fill_rect(.{ .x = 0, .y = row.y, .width = width, .height = 1 }, ' ', theme.selection);
+        }
+        switch (row.entry) {
+            .all_accounts => {
+                const style = if (active) theme.accent.with_bold() else theme.dim.with_bold();
+                _ = out.put_text(1, row.y, "ALL ACCOUNTS", width -| 2, style);
+                render_sidebar_total(inputs, out, row.y, width, null);
+            },
+            .account => |id| {
+                const style = if (active) theme.accent.with_bold() else theme.text.with_bold();
+                const label = inputs.state.accounts.label_for(id);
+                out.put_text_truncated(1, row.y, label, width -| 4, style);
+                render_sidebar_total(inputs, out, row.y, width, id);
+            },
+            .folder => |folder| {
+                // The server's own name for a folder the six do not cover.
+                var named_title: []const u8 = "";
+                if (folder.slot) |slot| {
+                    const account = folder.account orelse continue;
+                    named_title = if (inputs.state.folders.at(account, slot)) |entry| entry.display() else "";
+                }
+                // The six are counted from the store, the others from what the
+                // server said about them.
+                const named_entry = if (folder.slot) |slot|
+                    (if (folder.account) |account| inputs.state.folders.at(account, slot) else null)
+                else
+                    null;
+                const unread = if (folder.mailbox) |mailbox|
+                    inputs.store.unread_in(mailbox, folder.account)
+                else if (named_entry) |entry|
+                    entry.unread
+                else
+                    0;
+                const style = if (active)
+                    theme.accent.with_bold()
+                else if (unread > 0)
+                    theme.text
+                else
+                    theme.dim;
+                const title = if (folder.mailbox) |mailbox| mailbox.title() else named_title;
+                out.put_text_truncated(3, row.y, title, width -| 4, style);
+                if (folder.mailbox) |mailbox| {
+                    render_sidebar_count(inputs, out, row.y, width, mailbox, folder.account);
+                } else if (unread > 0) {
+                    var unread_buffer: [8]u8 = undefined;
+                    const number = if (unread > 999) "999" else std.fmt.bufPrint(&unread_buffer, "{d}", .{unread}) catch "";
+                    put_right(out, width -| 2, row.y, number, inputs.theme.accent);
+                }
+            },
+        }
+    }
+}
+
+/// Unread everywhere in a scope: a group row counts what is behind it, not
+/// what one of its folders happens to hold.
+fn render_sidebar_total(inputs: Inputs, out: *Screen, y: u16, width: u16, account: ?core.id.AccountId) void {
+    var total: u32 = 0;
+    for (Mailbox.all) |mailbox| total += inputs.store.unread_in(mailbox, account);
+    if (total == 0) return;
+    var buffer: [8]u8 = undefined;
+    const count = if (total > 999) "999" else std.fmt.bufPrint(&buffer, "{d}", .{total}) catch "";
+    put_right(out, width -| 2, y, count, inputs.theme.accent);
+}
+
+fn render_sidebar_count(
+    inputs: Inputs,
+    out: *Screen,
+    y: u16,
+    width: u16,
+    mailbox: Mailbox,
+    account: ?core.id.AccountId,
+) void {
+    const unread = inputs.store.unread_in(mailbox, account);
+    if (unread == 0) return;
+    var buffer: [8]u8 = undefined;
+    const count = if (unread > 999) "999" else std.fmt.bufPrint(&buffer, "{d}", .{unread}) catch "";
+    put_right(out, width -| 2, y, count, inputs.theme.accent);
+}
+
+/// The "move to" chooser: the account's folders, the selected one marked, over
+/// the list it is about.
+fn render_move(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    const message = inputs.state.selected_const(inputs.store) orelse return;
+    var rows: [16]core.state.MoveRow = undefined;
+
+    const count = inputs.state.move_rows(message, &rows);
+    if (count == 0) return;
+
+    const visible: u16 = @intCast(@min(count, 12));
+    const card_width: u16 = @min(44, lay.columns -| 4);
+    // Title on the top border, one row per folder, the hint, the bottom border.
+    const card_height: u16 = visible + 3;
+    const rect = Rect{
+        .x = (lay.columns -| card_width) / 2,
+        .y = (lay.rows -| card_height) / 2,
+        .width = card_width,
+        .height = card_height,
+    };
+    out.card(rect, inputs.theme.text, inputs.theme.border);
+    _ = out.put_text(rect.x + 2, rect.y, " Move to ", card_width -| 4, inputs.theme.accent.with_bold());
+
+    const cursor = @min(@as(usize, inputs.state.move_cursor), count - 1);
+    for (rows[0..visible], 0..) |row, index| {
+        const y = rect.y + 1 + @as(u16, @intCast(index));
+        const style = if (index == cursor) inputs.theme.accent.with_bold() else inputs.theme.text;
+        if (index == cursor) {
+            out.fill_rect(.{ .x = rect.x + 1, .y = y, .width = card_width -| 2, .height = 1 }, ' ', inputs.theme.selection);
+        }
+        out.put_text_truncated(rect.x + 2, y, row.title, card_width -| 4, style);
+    }
+    _ = out.put_text(rect.x + 2, rect.y + 1 + visible, "Enter move · Esc cancel", card_width -| 4, inputs.theme.dim);
 }
 
 fn render_tabs(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
@@ -281,6 +538,22 @@ fn render_unread_count(inputs: Inputs, y: u16, x: u16, mailbox: Mailbox, out: *S
     else
         std.fmt.bufPrint(&buffer, "{d}", .{unread}) catch "";
     _ = out.put_text(x, y, count, layout_mod.tab_count_width, inputs.theme.accent.with_bold());
+}
+
+/// The search prompt as one footer row: what is typed, a cursor, and how many
+/// messages match.
+fn render_search_line(inputs: Inputs, y: u16, limit: u16, out: *Screen) void {
+    _ = out.put_text(1, y, "/", 1, inputs.theme.accent.with_bold());
+    const draft = inputs.state.draft.slice();
+    const written = out.put_text(3, y, draft, limit -| 4, inputs.theme.text);
+    out.put(3 + written, y, ' ', inputs.theme.text.with_reverse());
+
+    var buffer: [24]u8 = undefined;
+    const label = if (inputs.state.visible_len == 1)
+        std.fmt.bufPrint(&buffer, "1 match", .{}) catch ""
+    else
+        std.fmt.bufPrint(&buffer, "{d} matches", .{inputs.state.visible_len}) catch "";
+    put_right(out, limit -| 1, y, label, inputs.theme.dim);
 }
 
 fn render_search_bar(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
@@ -499,16 +772,14 @@ fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     // The store is the live copy, but a refresh can drop a message while it is
     // on screen: what the reader shows comes from the snapshot taken when it was
     // opened, so the page never blanks under the cursor.
-    const stored = if (inputs.state.opened_account.is_known())
-        inputs.store.get_const(inputs.state.opened_account, inputs.state.opened)
-    else
-        null;
+    const stored = inputs.state.opened_message(inputs.store);
 
     const header = Header{
         .subject = if (stored) |message| message.subject.slice() else inputs.state.opened_subject.slice(),
         .from = if (stored) |message| message.from else inputs.state.opened_from,
         .timestamp_unix = if (stored) |message| message.timestamp_unix else inputs.state.opened_time,
         .size_bytes = if (stored) |message| message.size_bytes else inputs.state.opened_size,
+        .account = if (stored) |message| message.account else inputs.state.opened_account,
     };
 
     if (header.subject.len == 0 and !inputs.state.opened.is_known()) {
@@ -538,7 +809,30 @@ const Header = struct {
     from: core.address.Address,
     timestamp_unix: i64,
     size_bytes: u32,
+    /// Which of the reader's mailboxes the message came to: the one thing a
+    /// message cannot say about itself, and the first thing a reader with two
+    /// accounts asks.
+    account: core.id.AccountId = .unknown,
 };
+
+/// The account a message arrived at, as one line: `work <me@work.example>`.
+fn account_line(inputs: Inputs, account: core.id.AccountId, buffer: []u8) []const u8 {
+    if (!account.is_known()) return "";
+    const address = inputs.state.accounts.address_for(account) orelse return "";
+    // An account that never got an address is not an address of "@".
+    if (address.local.is_empty() and address.domain.is_empty()) return "";
+    var address_buffer: [core.limits.address_max]u8 = undefined;
+    const spec = address.addr_spec(&address_buffer);
+    if (spec.len == 0) return "";
+    const label = inputs.state.accounts.label_for(account);
+    var writer = std.Io.Writer.fixed(buffer);
+    if (label.len > 0) {
+        writer.print("{s} <{s}>", .{ label, spec }) catch {};
+    } else {
+        writer.print("{s}", .{spec}) catch {};
+    }
+    return writer.buffered();
+}
 
 fn render_reader_meta(inputs: Inputs, lay: layout_mod.Layout, header: Header, out: *Screen) void {
     var date_buffer: [16]u8 = undefined;
@@ -561,8 +855,17 @@ fn render_reader_meta(inputs: Inputs, lay: layout_mod.Layout, header: Header, ou
     } else {
         writer.print("From {s}", .{address}) catch {};
     }
+    // To whom: the header when the message has one, and the mailbox it arrived at
+    // when it does not -- a notification addressed to you alone often does not, and
+    // "which of my accounts is this" is the question that remains.
+    var account_buffer: [core.limits.address_max + 32]u8 = undefined;
+    const own = account_line(inputs, header.account, &account_buffer);
     const to = inputs.details.to.slice();
-    if (to.len > 0) writer.print("  to {s}", .{to}) catch {};
+    if (to.len > 0) {
+        writer.print("  to {s}", .{to}) catch {};
+    } else if (own.len > 0) {
+        writer.print("  to {s}", .{own}) catch {};
+    }
     writer.print("  ·  {s}  ·  {s}", .{ date, size }) catch {};
     _ = out.put_text(1, lay.reader_meta_y, writer.buffered(), lay.columns - 2, inputs.theme.dim);
 }
@@ -789,6 +1092,7 @@ const list_hints = [_]Hint{
     .{ .keys = "c", .action = "compose" },
     .{ .keys = "r", .action = "reply" },
     .{ .keys = "d", .action = "archive" },
+    .{ .keys = "m", .action = "move to another folder" },
     .{ .keys = "^R", .action = "refresh" },
     .{ .keys = "?", .action = "help" },
 };
@@ -855,6 +1159,12 @@ fn render_footer(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const limit = lay.columns -| (right_width + 3);
     put_right(out, lay.columns - 2, y, right, inputs.theme.dim);
 
+    // With no bar over the list, a search is typed where the hints live: one
+    // prompt row, and the list never moves under it.
+    if (inputs.state.mode == .search and !lay.show_header) {
+        render_search_line(inputs, y, limit, out);
+        return;
+    }
     if (!inputs.state.status.is_empty()) {
         const style = if (inputs.state.status_alert) inputs.theme.alert else inputs.theme.accent;
         out.put_text_truncated(1, y, inputs.state.status.slice(), limit -| 1, style);
@@ -921,8 +1231,8 @@ const help_rows = [_]Hint{
     .{ .keys = "Ctrl+C", .action = "quit (the only way out)" },
     .{ .keys = "/", .action = "search the list" },
     .{ .keys = "Ctrl+R", .action = "refresh from the server" },
-    .{ .keys = "Tab / [ ]", .action = "next / previous mailbox" },
-    .{ .keys = "1 - 6", .action = "the six mailboxes, in order" },
+    .{ .keys = "J / K", .action = "next / previous folder" },
+    .{ .keys = "1 - 9", .action = "the folder in that position, as the sidebar lists it" },
     .{ .keys = "a / A", .action = "next account / accounts overlay" },
     .{ .keys = "", .action = "-- the list" },
     .{ .keys = "Enter / l / →", .action = "open the message" },
@@ -935,6 +1245,7 @@ const help_rows = [_]Hint{
     .{ .keys = "u", .action = "read or unread" },
     .{ .keys = "s / *", .action = "star or unstar" },
     .{ .keys = "d", .action = "archive" },
+    .{ .keys = "m", .action = "move to another folder" },
     .{ .keys = "# / Delete", .action = "move to Trash" },
     .{ .keys = "X", .action = "delete for good (Trash only)" },
     .{ .keys = "E", .action = "empty Trash" },
@@ -969,12 +1280,12 @@ const help_rows = [_]Hint{
 /// What the card must mention, checked by a test: a key that works and is not
 /// here is a key nobody will find.
 const required_in_help = [_][]const u8{
-    "Ctrl+C",    "Ctrl+R", "Tab",    "1 - 6",      "a",      "A",        "/",     "j",
-    "k",         "g",      "G",      "Ctrl+D",     "Ctrl+F", "PageDown", "Space", "Enter",
-    "l",         "o",      "c",      "r",          "u",      "s",        "d",     "#",
-    "X",         "E",      "q",      "h",          "Esc",    "H",        "i",     "drag",
-    "Shift+Tab", "Ctrl+S", "Ctrl+U", "Ctrl+E",     "n",      "e",        "Up",    "Down",
-    "Home",      "End",    "Delete", "Ctrl+click",
+    "Ctrl+C", "Ctrl+R",    "Tab",    "1 - 9",  "a",          "A",        "/",     "j",
+    "k",      "g",         "G",      "Ctrl+D", "Ctrl+F",     "PageDown", "Space", "Enter",
+    "l",      "o",         "c",      "r",      "u",          "s",        "d",     "#",
+    "m",      "X",         "E",      "q",      "h",          "Esc",      "H",     "i",
+    "drag",   "Shift+Tab", "Ctrl+S", "Ctrl+U", "Ctrl+E",     "n",        "e",     "Up",
+    "Down",   "Home",      "End",    "Delete", "Ctrl+click",
 };
 
 const account_rows_max = 8;
@@ -1040,10 +1351,7 @@ fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 fn render_details(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const details = inputs.details;
     var from_buffer: [core.limits.address_max]u8 = undefined;
-    const stored = if (inputs.state.opened_account.is_known())
-        inputs.store.get_const(inputs.state.opened_account, inputs.state.opened)
-    else
-        null;
+    const stored = inputs.state.opened_message(inputs.store);
     const from = if (stored) |message| message.from else inputs.state.opened_from;
     const from_address = from.addr_spec(&from_buffer);
     const card_width: u16 = @min(76, lay.columns - 4);
@@ -1056,8 +1364,13 @@ fn render_details(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     out.card(rect, inputs.theme.text, inputs.theme.border);
     _ = out.put_text(rect.x + 2, rect.y, " Details ", card_width -| 4, inputs.theme.accent.with_bold());
 
+    var account_buffer: [core.limits.address_max + 32]u8 = undefined;
+    const account_id = if (stored) |message| message.account else inputs.state.opened_account;
+    const account = account_line(inputs, account_id, &account_buffer);
+
     var row: u16 = rect.y + 1;
     const rows = [_]struct { label: []const u8, value: []const u8 }{
+        .{ .label = "Account", .value = account },
         .{ .label = "From", .value = from_address },
         .{ .label = "To", .value = details.to.slice() },
         .{ .label = "Cc", .value = details.cc.slice() },
@@ -1395,6 +1708,35 @@ test "frame renders the search bar with the draft and a cursor" {
 
     try row_contains(&out, 0, "/ inv");
     try testing.expect(out.cells[0][6].style.attrs.reverse);
+}
+
+test "with the sidebar on, the search prompt is the footer row" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", .{}, .{});
+    f.state.mode = .search;
+    f.state.draft.set("a");
+    f.state.query.set("a");
+    f.state.rebuild(&f.store);
+
+    var inputs = f.inputs(120, 30);
+    inputs.sidebar = true;
+    var out = Screen.init(120, 30);
+    frame(inputs, &out);
+
+    // No bar over the list, so the prompt takes the row the hints would have.
+    try row_contains(&out, 29, "/ a");
+    try row_contains(&out, 29, "matches");
+    // The cursor sits after the typed text, and the row is shifted past the sidebar.
+    const shift: u16 = layout_mod.sidebar_width + 2;
+    try testing.expect(out.cells[29][shift + 4].style.attrs.reverse);
+
+    // One match is not "1 matches".
+    f.state.draft.set("tokens");
+    f.state.query.set("tokens");
+    f.state.rebuild(&f.store);
+    frame(inputs, &out);
+    try row_contains(&out, 29, "1 match");
 }
 
 test "frame renders the reader: subject, metadata, and body" {
@@ -2084,7 +2426,8 @@ test "a sender with no display name is just the address, not twice" {
     }, &out);
 
     try testing.expect(screen_contains(&out, "From bob@example.com"));
-    try testing.expect(!screen_contains(&out, "<bob@example.com>"));
+    // The sender is not named twice: an address with no display name is the name.
+    try testing.expect(!screen_contains(&out, "From bob@example.com <bob@example.com>"));
 }
 
 test "the help card names every key that works" {
@@ -2634,4 +2977,304 @@ test "the meta line says who the message was sent to" {
         if (std.mem.indexOf(u8, out.row_text(line, &row_buffer), "to bob@example.com") != null) found = true;
     }
     try testing.expect(found);
+}
+
+test "the sidebar lists every account's folders, and a row knows where it leads" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", .{}, .{});
+    f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{}, .{});
+
+    var rows: [max_sidebar_rows]SidebarRow = undefined;
+    const count = sidebar_rows(&f.state.accounts, &f.state.folders, null, &rows);
+    // All accounts, the two of them, and the six folders of the scope. The rule
+    // between the two halves is a gap in `y`, not a row of its own.
+    try testing.expectEqual(@as(usize, 1 + 2 + 6), count);
+    try testing.expectEqual(SidebarEntry.all_accounts, rows[0].entry);
+    try testing.expectEqual(@as(u16, 0), rows[0].y);
+
+    const first_account = rows[1];
+    try testing.expectEqual(@as(u16, 1), first_account.y);
+    try testing.expectEqual(SidebarEntry{ .account = core.id.AccountId.from_int(1) }, first_account.entry);
+    // The rule sits at y = 3, so the folders start under it.
+    try testing.expectEqual(@as(u16, 4), rows[3].y);
+    try testing.expectEqual(
+        SidebarEntry{ .folder = .{ .account = null, .mailbox = .inbox } },
+        rows[3].entry,
+    );
+    // The folders are the ones of the scope on screen: this account's, here.
+    var account_rows: [max_sidebar_rows]SidebarRow = undefined;
+    const account_count = sidebar_rows(&f.state.accounts, &f.state.folders, core.id.AccountId.from_int(2), &account_rows);
+    try testing.expectEqual(count, account_count);
+    try testing.expectEqual(
+        SidebarEntry{ .folder = .{ .account = core.id.AccountId.from_int(2), .mailbox = .inbox } },
+        account_rows[3].entry,
+    );
+
+    // The same list answers the mouse.
+    try testing.expectEqual(first_account.entry, sidebar_hit(&f.state.accounts, &f.state.folders, null, 1).?);
+    try testing.expect(sidebar_hit(&f.state.accounts, &f.state.folders, null, 3) == null);
+    try testing.expect(sidebar_hit(&f.state.accounts, &f.state.folders, null, 99) == null);
+}
+
+test "with the sidebar on, the folders are on the left and the list starts after the rule" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "home", .{}, .{});
+    f.state.accounts.add(core.id.AccountId.from_int(2), "work", .{}, .{});
+    f.store.at(0).account = core.id.AccountId.from_int(2);
+    f.state.rebuild(&f.store);
+
+    // The list is on another mailbox of the first account: Sent is the active row,
+    // and the unread Inbox beside it is not.
+    f.state.mailbox = .sent;
+    f.state.account_filter = core.id.AccountId.from_int(1);
+    var inputs = f.inputs(120, 30);
+    inputs.sidebar = true;
+    var out = Screen.init(120, 30);
+    frame(inputs, &out);
+
+    try row_contains(&out, 0, "ALL ACCOUNTS");
+    try row_contains(&out, 1, "home");
+    try row_contains(&out, 2, "work");
+    try row_contains(&out, 4, "Inbox");
+    // The rule is the sidebar's last column, and the list starts next to it.
+    try testing.expectEqual(@as(u21, '│'), out.cells[0][layout_mod.sidebar_width].ch);
+    try testing.expectEqual(@as(u21, ' '), out.cells[0][layout_mod.sidebar_width + 1].ch);
+    // No bar over the list: the first row of mail is row 0 of the screen.
+    try row_contains(&out, 0, "Alice Rivera");
+    // The scope row counts what is behind it, at the sidebar's right edge.
+    try testing.expectEqual(@as(u21, '2'), out.cells[0][layout_mod.sidebar_width - 2].ch);
+    // A folder row counts its own mailbox, in the scope on screen: one unread each.
+    try testing.expectEqual(@as(u21, '1'), out.cells[4][layout_mod.sidebar_width - 2].ch);
+    // A folder with unread mail that is not the one on screen still reads as text,
+    // not as the dim of a mailbox with nothing in it.
+    try testing.expectEqual(f.theme.text.with_bold().fg, out.cells[4][3].style.fg);
+}
+
+test "the sidebar draws the server's own name for a folder the six do not cover" {
+    var f = try fixture();
+    defer f.deinit();
+    const account = core.id.AccountId.from_int(1);
+    f.state.accounts.add(account, "work", .{}, .{});
+    _ = f.state.folders.add(account, "Inbox", .inbox);
+    _ = f.state.folders.add(account, "Clients", null);
+    f.state.account_filter = account;
+    // The second folder of the scope is the one the six do not cover, and it is
+    // the one on screen.
+    f.state.named = .{ .account = account, .slot = 1 };
+
+    var inputs = f.inputs(120, 30);
+    inputs.sidebar = true;
+    var out = Screen.init(120, 30);
+    frame(inputs, &out);
+
+    // Rows: 0 all accounts, 1 the account, 2 the rule, 3 Inbox, 4 Clients.
+    try row_contains(&out, 3, "Inbox");
+    try row_contains(&out, 4, "Clients");
+    // The active folder is the named one, so its row carries the selection.
+    try testing.expectEqual(f.theme.selection.bg, out.cells[4][1].style.bg);
+    try testing.expect(!std.meta.eql(out.cells[3][1].style.bg, f.theme.selection.bg));
+}
+
+test "the move chooser lists the account's folders over the list" {
+    var f = try fixture();
+    defer f.deinit();
+    const account = core.id.AccountId.from_int(1);
+    f.state.accounts.add(account, "work", .{}, .{});
+    _ = f.state.folders.add(account, "Inbox", .inbox);
+    _ = f.state.folders.add(account, "Clients", null);
+    // The first message is in Inbox, so the chooser offers Clients.
+    f.store.at(0).account = account;
+    f.state.moving = true;
+    f.state.move_cursor = 1;
+
+    var inputs = f.inputs(100, 24);
+    inputs.sidebar = true;
+    var out = Screen.init(100, 24);
+    frame(inputs, &out);
+
+    try row_contains(&out, 0, "Alice Rivera");
+    // The card says what it is, and where the cursor is.
+    var found = false;
+    var line: u16 = 0;
+    var buffer: [512]u8 = undefined;
+    while (line < out.rows) : (line += 1) {
+        const text = out.row_text(line, &buffer);
+        if (std.mem.indexOf(u8, text, "Move to") != null) found = true;
+        if (std.mem.indexOf(u8, text, "Enter move") != null) found = true;
+    }
+    try testing.expect(found);
+    try testing.expect(std.mem.indexOf(u8, out.row_text(0, &buffer), "Inbox") == null);
+}
+
+test "a named folder with more unread than fits is counted as 999" {
+    var f = try fixture();
+    defer f.deinit();
+    const account = core.id.AccountId.from_int(1);
+    f.state.accounts.add(account, "work", .{}, .{});
+    _ = f.state.folders.add_counted(account, "Clients", "", null, 1500);
+    f.state.account_filter = account;
+
+    var inputs = f.inputs(100, 24);
+    inputs.sidebar = true;
+    var out = Screen.init(100, 24);
+    frame(inputs, &out);
+
+    var buffer: [512]u8 = undefined;
+    const row = out.row_text(3, &buffer);
+    try testing.expect(std.mem.indexOf(u8, row, "Clients") != null);
+    try testing.expect(std.mem.indexOf(u8, row, "999") != null);
+    // Its name is still readable: the count does not eat the folder.
+    try testing.expect(std.mem.indexOf(u8, row, "15") == null);
+}
+
+test "a server that calls the inbox INBOX still lights the folder you are in" {
+    var f = try fixture();
+    defer f.deinit();
+    const account = core.id.AccountId.from_int(1);
+    f.state.accounts.add(account, "work", .{}, .{});
+    // Gmail's shape: the name is INBOX, the flag may not say so, and the app
+    // still knows it is the Inbox -- so the row is the one the list is on.
+    _ = f.state.folders.add(account, "INBOX", .inbox);
+    _ = f.state.folders.add(account, "Clients", null);
+    f.state.account_filter = account;
+    f.state.mailbox = .inbox;
+    f.state.named = null;
+
+    var inputs = f.inputs(120, 30);
+    inputs.sidebar = true;
+    var out = Screen.init(120, 30);
+    frame(inputs, &out);
+
+    // Rows: 0 all accounts, 1 the account, 2 the rule, 3 Inbox, 4 Clients. The
+    // six keep the app's own words: "INBOX" is Inbox, like "[Gmail]/Sent Mail"
+    // is Sent.
+    try row_contains(&out, 3, "Inbox");
+    try testing.expectEqual(f.theme.selection.bg, out.cells[3][1].style.bg);
+    try testing.expect(!std.meta.eql(out.cells[4][1].style.bg, f.theme.selection.bg));
+}
+
+test "the reader's header is the message in the folder it was opened from" {
+    var store = try core.store.Store.init(testing.allocator, 4);
+    defer store.deinit(testing.allocator);
+    // The same number in two folders: a UID is unique in its own folder and
+    // nowhere else, so 7 in INBOX is one message and 7 in "Importantes" another.
+    var inbox: core.message.Message = .{
+        .id = MessageId.from_int(7),
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+    };
+    inbox.subject.set("tune my music");
+    try store.insert(&inbox);
+
+    var label: core.message.Message = .{
+        .id = MessageId.from_int(7),
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+    };
+    label.named = 0;
+    label.subject.set("GitHub: a new sign-in");
+    try store.insert(&label);
+
+    var state: State = .{ .list_rows = 20 };
+    state.view = .reader;
+    state.opened_account = core.id.AccountId.from_int(1);
+    state.opened = MessageId.from_int(7);
+    state.opened_folder = .{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 0 } };
+    state.opened_subject.set("GitHub: a new sign-in");
+
+    var out: Screen = .{};
+    frame(.{
+        .state = &state,
+        .store = &store,
+        .theme = &Theme.dark(),
+        .body = "",
+        .wrapped = null,
+        .columns = 100,
+        .rows = 24,
+        .now_unix = 1_700_000_000,
+    }, &out);
+
+    var row_buffer: [512]u8 = undefined;
+    var line: u16 = 0;
+    var found = false;
+    while (line < out.rows) : (line += 1) {
+        if (std.mem.indexOf(u8, out.row_text(line, &row_buffer), "GitHub: a new sign-in") != null) found = true;
+        try testing.expect(std.mem.indexOf(u8, out.row_text(line, &row_buffer), "tune my music") == null);
+    }
+    try testing.expect(found);
+}
+
+test "a message with no To header says which mailbox it arrived at" {
+    var store = try core.store.Store.init(testing.allocator, 2);
+    defer store.deinit(testing.allocator);
+
+    var message = core.message.Message{
+        .id = core.id.MessageId.from_int(1),
+        .account = core.id.AccountId.from_int(2),
+        .mailbox = .inbox,
+        .timestamp_unix = 1_700_000_000,
+        .from = try core.address.Address.init("GitHub <noreply@github.com>"),
+    };
+    message.subject.set("[GitHub] Actions minutes");
+    try store.insert(&message);
+
+    var state = State{};
+    state.accounts.add(core.id.AccountId.from_int(1), "work", try core.address.Address.init("me@work.example"), .{});
+    state.accounts.add(core.id.AccountId.from_int(2), "home", try core.address.Address.init("me@home.example"), .{});
+    state.view = .reader;
+    state.opened_account = message.account;
+    state.opened = message.id;
+    state.rebuild(&store);
+
+    var out: Screen = .{};
+    frame(.{
+        .state = &state,
+        .store = &store,
+        .theme = &Theme.dark(),
+        .body = "text",
+        .columns = 110,
+        .rows = 24,
+        .now_unix = 1_700_000_000,
+    }, &out);
+
+    // A notification addressed to you alone often has no To at all: the line says
+    // where it landed instead, which is the question a reader with two accounts has.
+    try testing.expect(screen_contains(&out, "to home <me@home.example>"));
+
+    // And with the card open, the account is a row of its own.
+    var details_copy = core.headers.Details{};
+    details_copy.to.set("me@home.example");
+    var card: Screen = .{};
+    frame(.{
+        .state = &state,
+        .store = &store,
+        .theme = &Theme.dark(),
+        .body = "text",
+        .details = &details_copy,
+        .show_details = true,
+        .columns = 110,
+        .rows = 24,
+        .now_unix = 1_700_000_000,
+    }, &card);
+    try testing.expect(screen_contains(&card, "Account"));
+    try testing.expect(screen_contains(&card, "home <me@home.example>"));
+}
+
+test "the account line says the label and the address it knows" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "work", try core.address.Address.init("me@work.example"), .{});
+    f.state.accounts.add(core.id.AccountId.from_int(2), "", try core.address.Address.init("me@home.example"), .{});
+    f.state.accounts.add(core.id.AccountId.from_int(3), "broken", .{}, .{});
+
+    var buffer: [core.limits.address_max + 32]u8 = undefined;
+    const inputs = Inputs{ .state = &f.state, .store = &f.store, .theme = &Theme.dark() };
+    try testing.expectEqualStrings("work <me@work.example>", account_line(inputs, core.id.AccountId.from_int(1), &buffer));
+    // No label: the address is the whole answer.
+    try testing.expectEqualStrings("me@home.example", account_line(inputs, core.id.AccountId.from_int(2), &buffer));
+    // No address and no such account: nothing rather than a guess.
+    try testing.expectEqualStrings("", account_line(inputs, core.id.AccountId.from_int(3), &buffer));
+    try testing.expectEqualStrings("", account_line(inputs, .unknown, &buffer));
 }

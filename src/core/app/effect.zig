@@ -10,14 +10,19 @@ const assert = std.debug.assert;
 const limits = @import("../limits.zig");
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
 const MessageId = @import("../domain/id.zig").MessageId;
+const MoveTarget = @import("state.zig").MoveTarget;
 const Flags = @import("../domain/message.zig").Flags;
 const AccountId = @import("../domain/id.zig").AccountId;
 const Outgoing = @import("../domain/outgoing.zig").Outgoing;
 
 pub const Effect = union(enum) {
-    sync_flags: struct { account: AccountId, id: MessageId, flags: Flags },
-    move_message: struct { account: AccountId, id: MessageId, to: Mailbox },
-    fetch_body: struct { account: AccountId, mailbox: Mailbox, id: MessageId },
+    /// The folder is part of the address: the message may be in one of the
+    /// account's own folders, and its UID only means something there.
+    sync_flags: struct { account: AccountId, id: MessageId, flags: Flags, folder: MoveTarget },
+    /// Where a message goes, and where it was: a move needs both, because the
+    /// message may not be in the folder on screen.
+    move_message: struct { account: AccountId, id: MessageId, from: MoveTarget, to: MoveTarget },
+    fetch_body: struct { account: AccountId, id: MessageId, folder: MoveTarget },
     /// Null account means every account (the unified view).
     refresh: struct { account: ?AccountId, mailbox: Mailbox, force: bool = false },
     /// Accounts: rewrite the config without this one.
@@ -29,9 +34,9 @@ pub const Effect = union(enum) {
     /// Accounts: run the provider's OAuth2 flow.
     oauth_account: struct { account: AccountId },
     /// Remove for good (only offered in Trash).
-    delete_message: struct { account: AccountId, mailbox: Mailbox, id: MessageId },
-    /// Empty a mailbox for good (only offered in Trash). Null account = all.
-    empty_mailbox: struct { account: ?AccountId, mailbox: Mailbox },
+    delete_message: struct { account: AccountId, id: MessageId, folder: MoveTarget },
+    /// Empty a folder for good (only offered in Trash). Null account = all.
+    empty_mailbox: struct { account: ?AccountId, folder: MoveTarget },
     /// Hand the message to the outbox. The body is borrowed from compose state.
     send: Outgoing,
     /// Hand the body to the user's editor. `initial` is borrowed from compose
@@ -72,7 +77,7 @@ test "Effects: starts empty and grows in order" {
 
     const id = MessageId.from_int(7);
     const account = AccountId.from_int(1);
-    effects.add(.{ .fetch_body = .{ .account = account, .mailbox = .inbox, .id = id } });
+    effects.add(.{ .fetch_body = .{ .account = account, .id = id, .folder = .{ .mailbox = .inbox } } });
     effects.add(.{ .refresh = .{ .account = account, .mailbox = .inbox } });
 
     try testing.expect(!effects.is_empty());
@@ -86,7 +91,7 @@ test "Effects: fills to the declared bound" {
     const id = MessageId.from_int(1);
     var index: u32 = 0;
     while (index < limits.actions_max) : (index += 1) {
-        effects.add(.{ .fetch_body = .{ .account = AccountId.from_int(1), .mailbox = .inbox, .id = id } });
+        effects.add(.{ .fetch_body = .{ .account = AccountId.from_int(1), .id = id, .folder = .{ .mailbox = .inbox } } });
     }
     try testing.expectEqual(limits.actions_max, effects.len);
 }

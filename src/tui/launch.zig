@@ -216,6 +216,10 @@ fn run_session(
     }) catch return .{ .message = "Not enough memory to start" };
     defer session.deinit();
 
+    // The folders the accounts have, on the left, where a mail client keeps
+    // them. Off in the fixtures: a test that draws 100x24 is testing the list.
+    session.sidebar = true;
+
     session.loop();
     // The terminal belongs to the shell again: the pointer shape and the bar are ours to
     // put back, and a chain left behind is a chain in every later command.

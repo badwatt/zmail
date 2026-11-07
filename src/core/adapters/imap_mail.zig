@@ -35,6 +35,9 @@ pub const ImapMail = struct {
     raw: [limits.body_max]u8 = undefined,
     scratch: [limits.body_max]u8 = undefined,
     selected: ?Mailbox = null,
+    /// The server's name of what is selected, and whether it is one of the six.
+    selected_name: Text(limits.mailbox_name_max) = .{},
+    selected_named: bool = false,
     exists: u32 = 0,
     /// Mailbox names learned from LIST: "Sent" is "Sent Items" on some servers.
     listed: bool = false,
@@ -76,6 +79,7 @@ pub const ImapMail = struct {
 
     pub fn mail(self: *ImapMail) port.Mail {
         return .{ .context = self, .vtable = &.{
+            .folders = foldersThunk,
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
             .fetch_raw = fetchRawThunk,
@@ -89,6 +93,12 @@ pub const ImapMail = struct {
     const Entry = struct {
         mailbox: ?Mailbox = null,
         name: Text(limits.mailbox_name_max) = .{},
+        /// What the sidebar shows: the name without the namespace that only
+        /// holds it. `[Gmail]/All Mail` is a folder called "All Mail".
+        title: Text(limits.mailbox_name_max) = .{},
+        /// False for a name Gmail-style servers use as a heading ("[Gmail]"):
+        /// it cannot be selected, so it is not a folder of its own.
+        selectable: bool = true,
     };
 
     fn listOnce(self: *ImapMail) void {
@@ -99,10 +109,28 @@ pub const ImapMail = struct {
         const count = self.client.list(&raw) catch return;
         const bounded = @min(count, @as(u32, raw.len));
         for (raw[0..bounded], 0..) |entry, index| {
-            self.entries[index] = .{ .mailbox = entry.mailbox };
+            // INBOX is Inbox by definition (RFC 3501 §5.1), whether the server
+            // bothered to flag it or not: without this it becomes a folder named
+            // "INBOX" that the app treats as a stranger.
+            const mailbox = entry.mailbox orelse if (std.ascii.eqlIgnoreCase(entry.name, "INBOX")) Mailbox.inbox else null;
+            self.entries[index] = .{ .mailbox = mailbox, .selectable = entry.selectable };
             self.entries[index].name.set(entry.name);
         }
         self.entry_count = bounded;
+
+        // A folder under a heading shows without the heading: the row is the
+        // folder, not the path to it.
+        for (self.entries[0..bounded]) |*entry| {
+            entry.title.set(entry.name.slice());
+            for (self.entries[0..bounded]) |heading| {
+                if (heading.selectable) continue;
+                const prefix = heading.name.slice();
+                if (entry.name.slice().len <= prefix.len + 1) continue;
+                if (!std.ascii.startsWithIgnoreCase(entry.name.slice(), prefix)) continue;
+                if (entry.name.slice()[prefix.len] != '/') continue;
+                entry.title.set(entry.name.slice()[prefix.len + 1 ..]);
+            }
+        }
     }
 
     /// The server's name for a logical mailbox, or null when LIST says the
@@ -125,48 +153,106 @@ pub const ImapMail = struct {
         return mailbox.title();
     }
 
-    /// Selects the mailbox, learning the server's names on the first refusal.
-    /// Returns false when the mailbox does not exist on this server.
-    fn selectIfNeeded(self: *ImapMail, mailbox: Mailbox) port.Error!bool {
-        if (self.selected) |current| {
-            if (current == mailbox) return true;
+    /// Selects the folder a port call names, learning the server's names for the
+    /// six mailboxes on the first refusal. Returns false when it does not exist.
+    fn selectIfNeeded(self: *ImapMail, place: port.Place) port.Error!bool {
+        if (place.mailbox) |mailbox| {
+            if (self.selected == mailbox and !self.selected_named and !self.selected_name.is_empty()) return true;
+        } else if (self.selected_named and std.mem.eql(u8, self.selected_name.slice(), place.name)) {
+            return true;
         }
 
-        const name = self.serverName(mailbox) orelse return false;
-        self.exists = self.client.select_name(name) catch |err| switch (err) {
-            error.NotFound => blk: {
-                if (self.listed) return false;
-                self.listOnce();
-                const retry = self.serverName(mailbox) orelse return false;
-                break :blk self.client.select_name(retry) catch |second| return mapError(second);
-            },
-            else => return mapError(err),
-        };
-        self.selected = mailbox;
+        if (place.mailbox) |mailbox| {
+            // The caller may already know what this server calls the folder -- the
+            // sidebar's list is saved for exactly that -- and then there is nothing
+            // to discover: no refused SELECT, no LIST, no second round trip.
+            const name = if (place.name.len > 0) place.name else self.serverName(mailbox) orelse return false;
+            self.exists = self.client.select_name(name) catch |err| switch (err) {
+                error.NotFound => blk: {
+                    // A refused name is not an empty folder: it may be wrong even
+                    // when it came from the saved list, because a folder can be
+                    // renamed between two runs. One more LIST is what tells the
+                    // difference, and it costs a round trip on the worker -- which
+                    // is cheaper than a folder that shows nothing and never says
+                    // why.
+                    self.listed = false;
+                    self.listOnce();
+                    const retry = self.serverName(mailbox) orelse blk2: {
+                        if (place.name.len > 0) break :blk2 place.name;
+                        return false;
+                    };
+                    break :blk self.client.select_name(retry) catch |second| return mapError(second);
+                },
+                else => return mapError(err),
+            };
+            self.selected = mailbox;
+            self.selected_name.set(name);
+            self.selected_named = false;
+            return true;
+        }
+
+        // A folder the server named itself: no aliases to try, no LIST to learn.
+        self.exists = self.client.select_name(place.name) catch |err| return mapError(err);
+        self.selected = null;
+        self.selected_name.set(place.name);
+        self.selected_named = true;
         return true;
     }
 
-    fn fetchThunk(context: *anyopaque, mailbox: Mailbox, out: []Message) port.Error!u32 {
+    /// The account's folders, as the server listed them.
+    /// How many folders get a `STATUS` per listing. The sidebar shows the top of
+    /// the list; asking about forty of them is a second of round trips for numbers
+    /// nobody scrolls to.
+    pub const max_status_per_listing: u8 = 8;
+
+    fn foldersThunk(context: *anyopaque, out: []port.Listed) port.Error!u32 {
         const self: *ImapMail = @ptrCast(@alignCast(context));
-        if (!try self.selectIfNeeded(mailbox)) return 0;
+        self.listOnce();
+        var index: u32 = 0;
+        var written: u32 = 0;
+        while (index < self.entry_count and written < out.len) : (index += 1) {
+            const entry = &self.entries[index];
+            // A heading holds folders; it is not one.
+            if (!entry.selectable) continue;
+            // The numbers come from STATUS: one round trip each, so only the top
+            // of the list gets one. A folder whose count failed is still a folder:
+            // zero unread, not an error that loses the list.
+            const numbers = if (written < max_status_per_listing)
+                self.client.status(entry.name.slice()) catch response_mod.Status{}
+            else
+                response_mod.Status{};
+            out[written] = .{
+                .name = entry.name.slice(),
+                .title = entry.title.slice(),
+                .canonical = entry.mailbox,
+                .unread = numbers.unseen,
+            };
+            written += 1;
+        }
+        return written;
+    }
+
+    fn fetchThunk(context: *anyopaque, place: port.Place, out: []Message) port.Error!u32 {
+        const self: *ImapMail = @ptrCast(@alignCast(context));
+        if (!try self.selectIfNeeded(place)) return 0;
 
         const total = @min(self.exists, @as(u32, @intCast(out.len)));
         if (total == 0) return 0;
-        const count = self.client.fetch_envelopes(mailbox, 1, total, out) catch |err| return mapError(err);
+        const count = self.client.fetch_envelopes(place.mailbox orelse .inbox, 1, total, out) catch |err| return mapError(err);
         for (out[0..count]) |*message| message.account = self.account;
         return count;
     }
 
     fn fetchBodyThunk(
         context: *anyopaque,
-        mailbox: Mailbox,
+        place: port.Place,
         id: MessageId,
         out: []u8,
     ) port.Error![]const u8 {
         const self: *ImapMail = @ptrCast(@alignCast(context));
         // UIDs are per mailbox, and after a cached start no mailbox may be
         // selected yet: select before fetching, always.
-        if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
+        if (!try self.selectIfNeeded(place)) return error.NotFound;
         const uid = try uid_of(id);
 
         // The words only. A message with a certificate as a PDF is a megabyte of
@@ -191,12 +277,12 @@ pub const ImapMail = struct {
 
     fn fetchRawThunk(
         context: *anyopaque,
-        mailbox: Mailbox,
+        place: port.Place,
         id: MessageId,
         out: []u8,
     ) port.Error![]const u8 {
         const self: *ImapMail = @ptrCast(@alignCast(context));
-        if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
+        if (!try self.selectIfNeeded(place)) return error.NotFound;
         const raw = self.client.fetch_body(try uid_of(id), &self.raw) catch |err| return mapError(err);
         // Truncate, never refuse: an attachment-heavy message is still a
         // message, and the text of it is almost always in the part that fits.
@@ -205,26 +291,28 @@ pub const ImapMail = struct {
         return out[0..length];
     }
 
-    fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) port.Error!void {
+    fn setFlagsThunk(context: *anyopaque, _: port.Place, id: MessageId, flags: Flags) port.Error!void {
         const self: *ImapMail = @ptrCast(@alignCast(context));
         self.client.set_flags(try uid_of(id), flags) catch |err| return mapError(err);
     }
 
-    fn deleteThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId) port.Error!void {
+    fn deleteThunk(context: *anyopaque, place: port.Place, id: MessageId) port.Error!void {
         const self: *ImapMail = @ptrCast(@alignCast(context));
-        if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
+        if (!try self.selectIfNeeded(place)) return error.NotFound;
         self.client.delete_message(try uid_of(id)) catch |err| return mapError(err);
     }
 
-    fn emptyThunk(context: *anyopaque, mailbox: Mailbox) port.Error!void {
+    fn emptyThunk(context: *anyopaque, place: port.Place) port.Error!void {
         const self: *ImapMail = @ptrCast(@alignCast(context));
-        if (!try self.selectIfNeeded(mailbox)) return error.NotFound;
+        if (!try self.selectIfNeeded(place)) return error.NotFound;
         self.client.empty_mailbox() catch |err| return mapError(err);
     }
 
-    fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) port.Error!void {
+    fn moveThunk(context: *anyopaque, place: port.Place, id: MessageId, to: port.Place) port.Error!void {
         const self: *ImapMail = @ptrCast(@alignCast(context));
-        const name = self.serverName(to) orelse return error.NotFound;
+        if (!try self.selectIfNeeded(place)) return error.NotFound;
+        const mailbox = to.mailbox orelse return error.Rejected;
+        const name = self.serverName(mailbox) orelse return error.NotFound;
         self.client.move_message_to(try uid_of(id), name) catch |err| return mapError(err);
     }
 };
@@ -294,7 +382,7 @@ test "open logs in and fetch selects the mailbox once" {
     const mail = imap.mail();
 
     var messages: [8]Message = undefined;
-    try testing.expectEqual(@as(u32, 2), try mail.fetch(.inbox, &messages));
+    try testing.expectEqual(@as(u32, 2), try mail.fetch(port.Place.inbox, &messages));
     try testing.expectEqualStrings("first", messages[0].subject.slice());
     try testing.expectEqualStrings("Alice", messages[0].from.label());
     try testing.expectEqual(MessageId.from_int(10), messages[0].id);
@@ -321,7 +409,7 @@ test "fetch of an empty mailbox does not ask for envelopes" {
     defer imap.close();
 
     var messages: [4]Message = undefined;
-    try testing.expectEqual(@as(u32, 0), try imap.mail().fetch(.inbox, &messages));
+    try testing.expectEqual(@as(u32, 0), try imap.mail().fetch(port.Place.inbox, &messages));
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "FETCH") == null);
 }
 
@@ -338,7 +426,7 @@ test "fetch truncates to the caller's buffer" {
     defer imap.close();
 
     var messages: [1]Message = undefined;
-    try testing.expectEqual(@as(u32, 1), try imap.mail().fetch(.inbox, &messages));
+    try testing.expectEqual(@as(u32, 1), try imap.mail().fetch(port.Place.inbox, &messages));
     try testing.expectEqualStrings("a", messages[0].subject.slice());
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "FETCH 1:1 ") != null);
 }
@@ -356,8 +444,8 @@ test "switching mailbox selects again" {
     const mail = imap.mail();
 
     var messages: [4]Message = undefined;
-    _ = try mail.fetch(.inbox, &messages);
-    _ = try mail.fetch(.archive, &messages);
+    _ = try mail.fetch(port.Place.inbox, &messages);
+    _ = try mail.fetch(port.Place.archive, &messages);
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "SELECT \"Archive\"") != null);
 }
 
@@ -378,9 +466,9 @@ test "body, flags, and move reach the right commands" {
 
     var body: [64]u8 = undefined;
     // The part's own headers say it is base64, and the text comes out decoded.
-    try testing.expectEqualStrings("hi there", try mail.fetch_body(.inbox, MessageId.from_int(7), &body));
-    try mail.set_flags(MessageId.from_int(7), .{ .unread = false });
-    try mail.move_message(MessageId.from_int(7), .trash);
+    try testing.expectEqualStrings("hi there", try mail.fetch_body(port.Place.inbox, MessageId.from_int(7), &body));
+    try mail.set_flags(port.Place.inbox, MessageId.from_int(7), .{ .unread = false });
+    try mail.move_message(port.Place.inbox, MessageId.from_int(7), port.Place.trash);
 
     const output = scripted.output_text();
     try testing.expect(std.mem.indexOf(u8, output, "UID FETCH 7 (BODYSTRUCTURE)") != null);
@@ -404,7 +492,7 @@ test "a message whose shape is not understood is read whole, not refused" {
     defer imap.close();
 
     var body: [64]u8 = undefined;
-    try testing.expectEqualStrings("hi", try imap.mail().fetch_body(.inbox, MessageId.from_int(7), &body));
+    try testing.expectEqualStrings("hi", try imap.mail().fetch_body(port.Place.inbox, MessageId.from_int(7), &body));
     const output = scripted.output_text();
     try testing.expect(std.mem.indexOf(u8, output, "BODY.PEEK[]<0.") != null);
 }
@@ -421,10 +509,10 @@ test "the raw message is handed over as sent, cut to the caller's buffer" {
     defer imap.close();
 
     var out: [128]u8 = undefined;
-    try testing.expectEqualStrings(message, try imap.mail().fetch_raw(.inbox, MessageId.from_int(7), &out));
+    try testing.expectEqualStrings(message, try imap.mail().fetch_raw(port.Place.inbox, MessageId.from_int(7), &out));
 
     var small: [8]u8 = undefined;
-    try testing.expectEqualStrings(message[0..8], try imap.mail().fetch_raw(.inbox, MessageId.from_int(7), &small));
+    try testing.expectEqualStrings(message[0..8], try imap.mail().fetch_raw(port.Place.inbox, MessageId.from_int(7), &small));
 }
 
 test "delete flags the message and expunges it, falling back without UIDPLUS" {
@@ -438,7 +526,7 @@ test "delete flags the message and expunges it, falling back without UIDPLUS" {
     defer testing.allocator.destroy(imap);
     try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
-    try imap.mail().delete_message(.inbox, MessageId.from_int(7));
+    try imap.mail().delete_message(port.Place.inbox, MessageId.from_int(7));
 
     const output = scripted.output_text();
     try testing.expect(std.mem.indexOf(u8, output, "UID STORE 7 +FLAGS.SILENT (\\Deleted)") != null);
@@ -458,8 +546,8 @@ test "delete uses UID EXPUNGE when the server supports it, and empty clears all"
     defer testing.allocator.destroy(imap);
     try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
     defer imap.close();
-    try imap.mail().delete_message(.inbox, MessageId.from_int(7));
-    try imap.mail().empty_mailbox(.inbox);
+    try imap.mail().delete_message(port.Place.inbox, MessageId.from_int(7));
+    try imap.mail().empty_mailbox(port.Place.inbox);
 
     const output = scripted.output_text();
     try testing.expect(std.mem.indexOf(u8, output, "STORE 1:* +FLAGS.SILENT (\\Deleted)") != null);
@@ -477,9 +565,9 @@ test "delete in a mailbox the server does not have is NotFound" {
     defer imap.close();
     try testing.expectError(
         error.NotFound,
-        imap.mail().delete_message(.inbox, MessageId.from_int(7)),
+        imap.mail().delete_message(port.Place.inbox, MessageId.from_int(7)),
     );
-    try testing.expectError(error.NotFound, imap.mail().empty_mailbox(.inbox));
+    try testing.expectError(error.NotFound, imap.mail().empty_mailbox(port.Place.inbox));
 }
 
 test "open_token logs in with a bearer token" {
@@ -492,7 +580,7 @@ test "open_token logs in with a bearer token" {
     defer imap.close();
 
     var messages: [2]Message = undefined;
-    try testing.expectEqual(@as(u32, 1), try imap.mail().fetch(.inbox, &messages));
+    try testing.expectEqual(@as(u32, 1), try imap.mail().fetch(port.Place.inbox, &messages));
     try testing.expectEqualStrings("token mail", messages[0].subject.slice());
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "AUTHENTICATE XOAUTH2") != null);
 }
@@ -524,7 +612,7 @@ test "a mailbox the server does not have is empty, not an error" {
     const mail = imap.mail();
 
     var messages: [2]Message = undefined;
-    try testing.expectEqual(@as(u32, 1), try mail.fetch(.sent, &messages));
+    try testing.expectEqual(@as(u32, 1), try mail.fetch(port.Place.sent, &messages));
     try testing.expectEqualStrings("hi", messages[0].subject.slice());
     try testing.expectEqual(Mailbox.sent, messages[0].mailbox);
 
@@ -547,11 +635,11 @@ test "a mailbox absent from LIST is empty, and its body is NotFound" {
     const mail = imap.mail();
 
     var messages: [1]Message = undefined;
-    try testing.expectEqual(@as(u32, 0), try mail.fetch(.inbox, &messages));
+    try testing.expectEqual(@as(u32, 0), try mail.fetch(port.Place.inbox, &messages));
 
     var body: [8]u8 = undefined;
-    try testing.expectError(error.NotFound, mail.fetch_body(.inbox, MessageId.from_int(9), &body));
-    try testing.expectError(error.NotFound, mail.move_message(MessageId.from_int(9), .inbox));
+    try testing.expectError(error.NotFound, mail.fetch_body(port.Place.inbox, MessageId.from_int(9), &body));
+    try testing.expectError(error.NotFound, mail.move_message(port.Place.inbox, MessageId.from_int(9), port.Place.inbox));
 }
 
 test "every client error maps onto one of the port's three cases" {
@@ -572,4 +660,177 @@ test "close logs out and closes the transport" {
     imap.close();
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "LOGOUT") != null);
     try testing.expectEqual(@as(u32, 1), scripted.close_calls);
+}
+
+test "the folders LIST named are the ones the sidebar can show" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "* LIST (\\Sent) \"/\" \"Sent Items\"\r\n" ++
+        "* LIST () \"/\" \"Clients\"\r\n" ++
+        "a2 OK LIST done\r\n" };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var out: [8]port.Listed = undefined;
+    const count = try imap.mail().folders(&out);
+    try testing.expectEqual(@as(u32, 2), count);
+    // The special-use flag is what says "this is Sent", whatever the server calls it.
+    try testing.expectEqualStrings("Sent Items", out[0].name);
+    try testing.expectEqual(Mailbox.sent, out[0].canonical.?);
+    // A folder the six do not cover has no canonical mailbox, and keeps its name.
+    try testing.expectEqual(@as(?Mailbox, null), out[1].canonical);
+    try testing.expectEqualStrings("Clients", out[1].name);
+}
+
+test "a folder the server named itself is selected by that name" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "* 0 EXISTS\r\n" ++
+        "a2 OK [READ-WRITE] selected\r\n" };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var messages: [2]Message = undefined;
+    // The folder is not one of the six, so the name is the whole address.
+    try testing.expectEqual(@as(u32, 0), try imap.mail().fetch(port.Place.named("Clients"), &messages));
+    try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "SELECT \"Clients\"") != null);
+}
+
+test "a Gmail-shaped LIST gives folders, not the namespace that holds them" {
+    var scripted: Scripted = .{
+        .input = login_ok ++
+            "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n" ++
+            "* LIST (\\Noselect \\HasChildren) \"/\" \"[Gmail]\"\r\n" ++
+            "* LIST (\\Drafts \\HasNoChildren) \"/\" \"[Gmail]/Drafts\"\r\n" ++
+            "* LIST (\\Sent \\HasNoChildren) \"/\" \"[Gmail]/Sent Mail\"\r\n" ++
+            "* LIST (\\All \\HasNoChildren) \"/\" \"[Gmail]/All Mail\"\r\n" ++
+            "* LIST (\\Trash \\HasNoChildren) \"/\" \"[Gmail]/Trash\"\r\n" ++
+            "a2 OK LIST done\r\n" ++
+            // One STATUS per selectable folder, in the order they were listed.
+            "* STATUS \"INBOX\" (UNSEEN 4 MESSAGES 100)\r\n" ++
+            "a3 OK done\r\n" ++
+            "* STATUS \"[Gmail]/Drafts\" (UNSEEN 0 MESSAGES 2)\r\n" ++
+            "a4 OK done\r\n" ++
+            "* STATUS \"[Gmail]/Sent Mail\" (UNSEEN 0 MESSAGES 9)\r\n" ++
+            "a5 OK done\r\n" ++
+            "* STATUS \"[Gmail]/All Mail\" (UNSEEN 7 MESSAGES 900)\r\n" ++
+            "a6 OK done\r\n" ++
+            "* STATUS \"[Gmail]/Trash\" (UNSEEN 0 MESSAGES 1)\r\n" ++
+            "a7 OK done\r\n",
+    };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var out: [8]port.Listed = undefined;
+    const count = try imap.mail().folders(&out);
+    // Five: the heading is not a folder, and INBOX is Inbox.
+    try testing.expectEqual(@as(u32, 5), count);
+
+    try testing.expectEqualStrings("INBOX", out[0].name);
+    try testing.expectEqual(Mailbox.inbox, out[0].canonical.?);
+    try testing.expectEqual(@as(u32, 4), out[0].unread);
+
+    // The children show without the name of the heading they sit under, and keep
+    // the full name for the port: that is what the server answers to.
+    try testing.expectEqualStrings("[Gmail]/All Mail", out[3].name);
+    try testing.expectEqualStrings("All Mail", out[3].title);
+    try testing.expectEqual(@as(u32, 7), out[3].unread);
+    try testing.expectEqualStrings("Sent Mail", out[2].title);
+    // Nothing offers "[Gmail]" as somewhere to go.
+    for (out[0..count]) |listed| {
+        try testing.expect(!std.mem.eql(u8, listed.name, "[Gmail]"));
+    }
+}
+
+test "a mailbox with more folders than the sidebar shows does not ask about all of them" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "* LIST () \"/\" \"A\"\r\n" ++
+        "* LIST () \"/\" \"B\"\r\n" ++
+        "* LIST () \"/\" \"C\"\r\n" ++
+        "* LIST () \"/\" \"D\"\r\n" ++
+        "* LIST () \"/\" \"E\"\r\n" ++
+        "* LIST () \"/\" \"F\"\r\n" ++
+        "* LIST () \"/\" \"G\"\r\n" ++
+        "* LIST () \"/\" \"H\"\r\n" ++
+        "* LIST () \"/\" \"I\"\r\n" ++
+        "* LIST () \"/\" \"J\"\r\n" ++
+        "a2 OK LIST done\r\n" ++
+        "* STATUS \"A\" (UNSEEN 1 MESSAGES 3)\r\n" ++ "a3 OK done\r\n" ++
+        "* STATUS \"B\" (UNSEEN 2 MESSAGES 3)\r\n" ++ "a4 OK done\r\n" ++
+        "* STATUS \"C\" (UNSEEN 3 MESSAGES 3)\r\n" ++ "a5 OK done\r\n" ++
+        "* STATUS \"D\" (UNSEEN 4 MESSAGES 3)\r\n" ++ "a6 OK done\r\n" ++
+        "* STATUS \"E\" (UNSEEN 5 MESSAGES 3)\r\n" ++ "a7 OK done\r\n" ++
+        "* STATUS \"F\" (UNSEEN 6 MESSAGES 3)\r\n" ++ "a8 OK done\r\n" ++
+        "* STATUS \"G\" (UNSEEN 7 MESSAGES 3)\r\n" ++ "a9 OK done\r\n" ++
+        "* STATUS \"H\" (UNSEEN 8 MESSAGES 3)\r\n" ++ "a10 OK done\r\n" };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var out: [16]port.Listed = undefined;
+    const count = try imap.mail().folders(&out);
+    try testing.expectEqual(@as(u32, 10), count);
+    // Eight asked, and the last two are folders without a number rather than
+    // folders without a row.
+    try testing.expectEqual(@as(u32, 8), out[ImapMail.max_status_per_listing - 1].unread);
+    try testing.expectEqual(@as(u32, 0), out[ImapMail.max_status_per_listing].unread);
+    try testing.expectEqualStrings("I", out[ImapMail.max_status_per_listing].name);
+}
+
+test "a folder the caller can name is selected by that name, without a LIST" {
+    var scripted: Scripted = .{ .input = login_ok ++
+        "* SELECT \"[Gmail]/Sent Mail\"\r\n" ++
+        "* 0 EXISTS\r\n" ++
+        "a2 OK [READ-WRITE] selected\r\n" };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    // "Sent" is "[Gmail]/Sent Mail" here, and the sidebar's saved list is what
+    // says so: one SELECT, and no LIST to discover it after a refusal.
+    var messages: [1]Message = undefined;
+    try testing.expectEqual(@as(u32, 0), try imap.mail().fetch(
+        .{ .mailbox = .sent, .name = "[Gmail]/Sent Mail" },
+        &messages,
+    ));
+    try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "SELECT \"[Gmail]/Sent Mail\"") != null);
+    try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "LIST") == null);
+}
+
+test "a saved name that no longer selects is re-listed, not shown as empty" {
+    var scripted: Scripted = .{
+        .input = login_ok ++
+            // The name the sidebar remembered: the folder has been renamed since.
+            "a2 NO [TRYCREATE] Unknown mailbox\r\n" ++
+            // The listing says what it is now, with the special-use flag.
+            "* LIST (\\HasNoChildren \\Sent) \"/\" \"Sent Items\"\r\n" ++
+            "a3 OK LIST completed\r\n" ++
+            "* SELECT \"Sent Items\"\r\n" ++
+            "* 1 EXISTS\r\n" ++
+            "a4 OK [READ-WRITE] selected\r\n" ++
+            "* 1 FETCH (UID 7 ENVELOPE (NIL \"hello\" ((\"Me\" NIL \"me\" \"example.com\")) NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
+            "a5 OK FETCH completed\r\n",
+    };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var messages: [2]Message = undefined;
+    const count = try imap.mail().fetch(.{ .mailbox = .sent, .name = "Sent Items Old" }, &messages);
+    try testing.expectEqual(@as(u32, 1), count);
+    try testing.expectEqualStrings("hello", messages[0].subject.slice());
+    try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "LIST \"\" \"*\"") != null);
 }

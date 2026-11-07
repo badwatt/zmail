@@ -20,6 +20,11 @@ const Viewport = @import("command.zig").Viewport;
 const Effect = @import("effect.zig").Effect;
 const Effects = @import("effect.zig").Effects;
 const State = @import("state.zig").State;
+const MoveTarget = @import("state.zig").MoveTarget;
+const folder_of = @import("state.zig").folder_of;
+const same_folder = @import("state.zig").same_folder;
+const MoveRow = @import("state.zig").MoveRow;
+const folder = @import("../domain/folder.zig");
 const View = @import("state.zig").View;
 
 pub fn apply(state: *State, store: *Store, command: Command) Effects {
@@ -34,15 +39,30 @@ pub fn apply(state: *State, store: *Store, command: Command) Effects {
     // A confirmation only survives the command that asked for it.
     if (command != .empty_trash) state.pending_empty = false;
 
+    // The chooser takes Enter and Esc, and gives them back when it closes.
+    if (state.moving) switch (command) {
+        .open_selected => {
+            confirm_move(state, store, &effects);
+            return effects;
+        },
+        .dismiss => {
+            cancel_move(state);
+            return effects;
+        },
+        else => {},
+    };
+
     switch (command) {
         .noop => {},
         .quit => state.quit = true,
         .move => |move| apply_move(state, move),
         .open_selected => apply_open(state, store, &effects),
         .dismiss => apply_dismiss(state, store),
-        .next_mailbox => switch_mailbox(state, store, state.mailbox.next(), &effects),
-        .previous_mailbox => switch_mailbox(state, store, state.mailbox.previous(), &effects),
+        .next_folder => step_folder(state, store, &effects, true),
+        .begin_move => begin_move(state, store),
+        .previous_folder => step_folder(state, store, &effects, false),
         .select_mailbox => |mailbox| switch_mailbox(state, store, mailbox, &effects),
+        .select_folder => |index| select_folder(state, store, &effects, index),
         .toggle_unread => toggle_unread(state, store, &effects),
         .toggle_flag => toggle_flag(state, store, &effects),
         .archive_selected => move_selected(state, store, .archive, "Archived", &effects),
@@ -136,7 +156,77 @@ fn cycle_account(state: *State, store: *Store) void {
     state.rebuild(store);
 }
 
+/// The Nth folder the sidebar shows, by the number the reader pressed: the
+/// sidebar's order is the server's, and it is the only numbering on screen.
+fn select_folder(state: *State, store: *Store, effects: *Effects, index: u8) void {
+    var rows: [32]MoveRow = undefined;
+    const count = state.folder_rows(&rows);
+    if (index >= count) return;
+    go_to(state, store, effects, rows[index].target);
+}
+
+/// The message the reader is on, or the status line saying there is none: the
+/// same three lines at the top of every rule that acts on one.
+fn selected_or_say(state: *State, store: *Store) ?*Message {
+    return state.selected(store) orelse {
+        state.set_status("No message selected", .{});
+        return null;
+    };
+}
+
+/// The folder on screen, as a target.
+fn current_folder(state: *const State) MoveTarget {
+    if (state.named) |ref| return .{ .named = ref };
+    return .{ .mailbox = state.mailbox };
+}
+
+/// Walks the folders in the order the sidebar shows them, which is the order the
+/// server listed them -- not the order of the six in the code. `J` from Inbox goes
+/// to whatever the sidebar drew under it.
+fn step_folder(state: *State, store: *Store, effects: *Effects, forward: bool) void {
+    var rows: [32]MoveRow = undefined;
+    const count = state.folder_rows(&rows);
+    if (count == 0) return;
+
+    const current = current_folder(state);
+    var index: usize = if (forward) 0 else count - 1;
+    for (rows[0..count], 0..) |row, position| {
+        if (!same_folder(current, row.target)) continue;
+        index = if (forward) (position + 1) % count else (position + count - 1) % count;
+        break;
+    }
+    go_to(state, store, effects, rows[index].target);
+}
+
+/// Goes to one folder: one of the six is a mailbox, the rest are the account's.
+fn go_to(state: *State, store: *Store, effects: *Effects, target: MoveTarget) void {
+    switch (target) {
+        .mailbox => |mailbox| switch_mailbox(state, store, mailbox, effects),
+        .named => |ref| switch_named(state, store, ref, effects),
+    }
+}
+
+fn switch_named(state: *State, store: *Store, ref: folder.Ref, effects: *Effects) void {
+    if (state.named) |current| {
+        if (current.eql(ref)) return;
+    }
+    state.named = ref;
+    effects.add(.{ .refresh = .{ .account = ref.account, .mailbox = state.mailbox, .force = false } });
+    state.query.clear();
+    state.draft.clear();
+    state.mode = .normal;
+    state.view = .list;
+    state.cursor = 0;
+    state.offset = 0;
+    state.reader_scroll = 0;
+    state.opened = .unknown;
+    state.rebuild(store);
+}
+
 fn apply_move(state: *State, move: Move) void {
+    // The chooser owns the movement keys while it is open: the list under it
+    // does not move.
+    if (state.moving) return move_chooser(state, move);
     switch (state.view) {
         .list => move_cursor(state, move),
         .reader => scroll_reader(state, move),
@@ -189,15 +279,13 @@ fn scroll_reader(state: *State, move: Move) void {
 fn apply_open(state: *State, store: *Store, effects: *Effects) void {
     if (state.view != .list) return;
 
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     state.opened = message.id;
     state.opened_account = message.account;
     state.opened_subject.set(message.subject.slice());
     state.opened_from = message.from;
+    state.opened_folder = folder_of(message);
     state.opened_time = message.timestamp_unix;
     state.opened_size = message.size_bytes;
     state.view = .reader;
@@ -205,9 +293,9 @@ fn apply_open(state: *State, store: *Store, effects: *Effects) void {
 
     if (message.is_unread()) {
         message.flags = message.flags.mark_read();
-        effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
+        effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags, .folder = folder_of(message) } });
     }
-    effects.add(.{ .fetch_body = .{ .account = message.account, .mailbox = message.mailbox, .id = message.id } });
+    effects.add(.{ .fetch_body = .{ .account = message.account, .id = message.id, .folder = folder_of(message) } });
 }
 
 fn apply_dismiss(state: *State, store: *Store) void {
@@ -234,9 +322,11 @@ fn apply_dismiss(state: *State, store: *Store) void {
 }
 
 fn switch_mailbox(state: *State, store: *Store, mailbox: Mailbox, effects: *Effects) void {
-    if (state.mailbox == mailbox) return;
+    if (state.mailbox == mailbox and state.named == null) return;
 
     state.mailbox = mailbox;
+    // A canonical mailbox is a different list from any named folder.
+    state.named = null;
     effects.add(.{ .refresh = .{ .account = state.account_filter, .mailbox = mailbox, .force = false } });
     state.query.clear();
     state.draft.clear();
@@ -250,13 +340,10 @@ fn switch_mailbox(state: *State, store: *Store, mailbox: Mailbox, effects: *Effe
 }
 
 fn toggle_unread(state: *State, store: *Store, effects: *Effects) void {
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     message.flags = message.flags.toggle_unread();
-    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
+    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags, .folder = folder_of(message) } });
     if (message.is_unread()) {
         state.set_status("Marked unread", .{});
     } else {
@@ -265,13 +352,10 @@ fn toggle_unread(state: *State, store: *Store, effects: *Effects) void {
 }
 
 fn toggle_flag(state: *State, store: *Store, effects: *Effects) void {
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     message.flags = message.flags.toggle_flagged();
-    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags } });
+    effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags, .folder = folder_of(message) } });
     if (message.is_flagged()) {
         state.set_status("Starred", .{});
     } else {
@@ -375,20 +459,17 @@ fn delete_forever(state: *State, store: *Store, effects: *Effects) void {
         state.set_status("Only in Trash: d moves a message here first", .{});
         return;
     }
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     const account = message.account;
     const id = message.id;
-    _ = store.remove_by_id(account, id);
+    _ = store.remove_by_id(account, folder_of(message), id);
     state.rebuild(store);
     if (state.view == .reader) {
         state.view = .list;
         state.reader_scroll = 0;
     }
-    effects.add(.{ .delete_message = .{ .account = account, .mailbox = .trash, .id = id } });
+    effects.add(.{ .delete_message = .{ .account = account, .id = id, .folder = .{ .mailbox = .trash } } });
     state.set_status("Deleted for good", .{});
 }
 
@@ -418,45 +499,101 @@ fn empty_trash(state: *State, store: *Store, effects: *Effects) void {
     }
     state.pending_empty = false;
 
-    effects.add(.{ .empty_mailbox = .{ .account = state.account_filter, .mailbox = .trash } });
+    effects.add(.{ .empty_mailbox = .{ .account = state.account_filter, .folder = .{ .mailbox = .trash } } });
     if (state.account_filter) |filter| {
         _ = store.remove_in(filter, .trash);
     } else {
         // Whatever account a trashed message belongs to, it goes.
-        var index: u32 = 0;
-        while (index < store.len) {
-            const message = store.at(index);
-            if (message.mailbox == .trash) {
-                _ = store.remove_by_id(message.account, message.id);
-                continue;
-            }
-            index += 1;
-        }
+        _ = store.remove(.{ .mailbox_any = .trash });
     }
     state.rebuild(store);
     if (state.view == .reader) state.view = .list;
     state.set_status("Trash emptied", .{});
 }
 
-fn move_selected(state: *State, store: *Store, target: Mailbox, status_text: []const u8, effects: *Effects) void {
+fn begin_move(state: *State, store: *Store) void {
+    const message = selected_or_say(state, store) orelse return;
+    var rows: [8]MoveRow = undefined;
+    if (state.move_rows(message, &rows) == 0) {
+        state.set_status("No folders to move to", .{});
+        return;
+    }
+    state.moving = true;
+    state.move_cursor = 0;
+    state.set_status("Move to: j/k choose, Enter moves, Esc cancels", .{});
+}
+
+fn move_chooser(state: *State, move: Move) void {
+    switch (move) {
+        .down => state.move_cursor +|= 1,
+        .up => state.move_cursor -|= 1,
+        .top => state.move_cursor = 0,
+        .bottom => state.move_cursor = 15,
+        else => {},
+    }
+}
+
+fn cancel_move(state: *State) void {
+    state.moving = false;
+    state.set_status("Move cancelled", .{});
+}
+
+fn confirm_move(state: *State, store: *Store, effects: *Effects) void {
     const message = state.selected(store) orelse {
+        state.moving = false;
         state.set_status("No message selected", .{});
         return;
     };
+    var rows: [16]MoveRow = undefined;
+    const count = state.move_rows(message, &rows);
+    if (count == 0) {
+        state.moving = false;
+        state.set_status("No folders to move to", .{});
+        return;
+    }
+    const index = @min(@as(usize, state.move_cursor), count - 1);
+    state.moving = false;
+    // The chooser does not offer the folder the message is already in, so this
+    // moves: its answer is only ever true.
+    _ = move_to(state, store, message, rows[index].target, effects);
+    state.set_status("Moved to {s}", .{rows[index].title});
+}
 
-    if (message.mailbox == target) {
+fn move_selected(state: *State, store: *Store, target: Mailbox, status_text: []const u8, effects: *Effects) void {
+    const message = selected_or_say(state, store) orelse return;
+    if (!move_to(state, store, message, .{ .mailbox = target }, effects)) {
         state.set_status("Already in {s}", .{target.title()});
         return;
     }
+    state.set_status("{s}", .{status_text});
+}
 
-    message.mailbox = target;
-    effects.add(.{ .move_message = .{ .account = message.account, .id = message.id, .to = target } });
+/// A message goes to a folder: the store says so now, the server is told on a later
+/// tick, and the reader goes back to the list -- the message it was reading is not
+/// where it was. The keys, the archive and the chooser all land here, and the answer
+/// is whether it moved: a message already there is not news, and the caller says so.
+fn move_to(state: *State, store: *Store, message: *Message, target: MoveTarget, effects: *Effects) bool {
+    const from = folder_of(message);
+    if (same_folder(from, target)) return false;
+    switch (target) {
+        .mailbox => |mailbox| {
+            message.mailbox = mailbox;
+            message.named = folder.none;
+        },
+        .named => |ref| message.named = ref.slot,
+    }
+    effects.add(.{ .move_message = .{
+        .account = message.account,
+        .id = message.id,
+        .from = from,
+        .to = target,
+    } });
     if (state.view == .reader) {
         state.view = .list;
         state.reader_scroll = 0;
     }
     state.rebuild(store);
-    state.set_status("{s}", .{status_text});
+    return true;
 }
 
 fn begin_search(state: *State) void {
@@ -516,10 +653,7 @@ fn start_compose(state: *State, store: *Store) void {
 }
 
 fn start_reply(state: *State, store: *Store) void {
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     state.compose.reset();
     var address_buffer: [limits.address_max]u8 = undefined;
@@ -933,7 +1067,7 @@ test "delete_forever removes the message and asks the server, in Trash only" {
     const effects = apply(&fixture.state, &fixture.store, .delete_forever);
     try expect_effects(&effects, &.{.{ .delete_message = .{
         .account = AccountId.from_int(1),
-        .mailbox = .trash,
+        .folder = .{ .mailbox = .trash },
         .id = MessageId.from_int(1),
     } }});
     try testing.expectEqual(before - 1, fixture.store.len);
@@ -987,7 +1121,7 @@ test "empty_trash asks once, then empties the scope" {
 
     _ = apply(&fixture.state, &fixture.store, .empty_trash);
     const effects = apply(&fixture.state, &fixture.store, .empty_trash);
-    try expect_effects(&effects, &.{.{ .empty_mailbox = .{ .account = null, .mailbox = .trash } }});
+    try expect_effects(&effects, &.{.{ .empty_mailbox = .{ .account = null, .folder = .{ .mailbox = .trash } } }});
     try testing.expectEqual(@as(u32, 0), fixture.state.visible_len);
     try testing.expectEqualStrings("Trash emptied", fixture.state.status.slice());
 }
@@ -1034,7 +1168,7 @@ test "empty_trash honours the account filter" {
     const effects = apply(&fixture.state, &fixture.store, .empty_trash);
     try expect_effects(&effects, &.{.{ .empty_mailbox = .{
         .account = AccountId.from_int(1),
-        .mailbox = .trash,
+        .folder = .{ .mailbox = .trash },
     } }});
 
     // Only account 1's trash went away.
@@ -1171,8 +1305,8 @@ test "open: marks an unread message read, fetches the body, and switches view" {
     try testing.expect(!fixture.store.at(0).is_unread());
 
     try expect_effects(&effects, &.{
-        .{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false } } },
-        .{ .fetch_body = .{ .account = AccountId.from_int(1), .mailbox = .inbox, .id = MessageId.from_int(1) } },
+        .{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false }, .folder = .{ .mailbox = .inbox } } },
+        .{ .fetch_body = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .folder = .{ .mailbox = .inbox } } },
     });
 }
 
@@ -1182,7 +1316,7 @@ test "open: an already-read message only fetches the body" {
     fixture.store.at(0).flags = .{ .unread = false };
 
     const effects = apply(&fixture.state, &fixture.store, .open_selected);
-    try expect_effects(&effects, &.{.{ .fetch_body = .{ .account = AccountId.from_int(1), .mailbox = .inbox, .id = MessageId.from_int(1) } }});
+    try expect_effects(&effects, &.{.{ .fetch_body = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .folder = .{ .mailbox = .inbox } } }});
 }
 
 test "open: an empty list explains itself and stays put" {
@@ -1239,12 +1373,12 @@ test "next and previous mailbox cycle and ask the adapter to load them" {
     var fixture = try ready();
     defer fixture.store.deinit(testing.allocator);
 
-    const effects = apply(&fixture.state, &fixture.store, .next_mailbox);
+    const effects = apply(&fixture.state, &fixture.store, .next_folder);
     try testing.expectEqual(Mailbox.sent, fixture.state.mailbox);
     try testing.expectEqual(@as(u32, 1), fixture.state.visible_len);
     try expect_effects(&effects, &.{.{ .refresh = .{ .account = null, .mailbox = .sent, .force = false } }});
 
-    _ = apply(&fixture.state, &fixture.store, .previous_mailbox);
+    _ = apply(&fixture.state, &fixture.store, .previous_folder);
     try testing.expectEqual(Mailbox.inbox, fixture.state.mailbox);
 }
 
@@ -1293,7 +1427,7 @@ test "toggle_unread flips the flag, syncs it, and reports the new state" {
     var effects = apply(&fixture.state, &fixture.store, .toggle_unread);
     try testing.expect(!fixture.store.at(0).is_unread());
     try testing.expectEqualStrings("Marked read", fixture.state.status.slice());
-    try expect_effects(&effects, &.{.{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false } } }});
+    try expect_effects(&effects, &.{.{ .sync_flags = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .flags = .{ .unread = false }, .folder = .{ .mailbox = .inbox } } }});
 
     effects = apply(&fixture.state, &fixture.store, .toggle_unread);
     try testing.expect(fixture.store.at(0).is_unread());
@@ -1344,7 +1478,7 @@ test "archive moves the message out of the list and syncs the server" {
     try testing.expectEqual(Mailbox.archive, fixture.store.at(0).mailbox);
     try testing.expectEqual(@as(u32, 2), fixture.state.visible_len);
     try testing.expectEqualStrings("Archived", fixture.state.status.slice());
-    try expect_effects(&effects, &.{.{ .move_message = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .to = .archive } }});
+    try expect_effects(&effects, &.{.{ .move_message = .{ .account = AccountId.from_int(1), .id = MessageId.from_int(1), .from = .{ .mailbox = .inbox }, .to = .{ .mailbox = .archive } } }});
 }
 
 test "archive from the reader returns to the list" {
@@ -1981,4 +2115,222 @@ test "a user command clears the status, a viewport update does not" {
 
     _ = apply(&fixture.state, &fixture.store, .{ .move = .down });
     try testing.expect(fixture.state.status.is_empty());
+}
+
+test "moving to a folder the six do not cover uses its slot, and names both ends" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    // The account has one folder of its own, holding one message.
+    _ = fixture.state.folders.add(AccountId.from_int(1), "Clients", null);
+    _ = fixture.state.folders.add_counted(AccountId.from_int(1), "Clients", "", null, 1);
+    fixture.store.at(0).mailbox = .inbox;
+    _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
+    const effects = apply(&fixture.state, &fixture.store, .begin_move);
+    try testing.expect(fixture.state.moving);
+    try testing.expectEqual(@as(usize, 0), effects.len);
+
+    const moved = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expect(!fixture.state.moving);
+    try testing.expectEqual(@as(u8, 0), fixture.store.at(0).named);
+    // The two ends of the move are both named: where it was, and where it goes.
+    try expect_effects(&moved, &.{.{ .move_message = .{
+        .account = AccountId.from_int(1),
+        .id = MessageId.from_int(1),
+        .from = .{ .mailbox = .inbox },
+        .to = .{ .named = .{ .account = AccountId.from_int(1), .slot = 0 } },
+    } }});
+}
+
+test "the chooser leaves out the folder the message is already in" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
+
+    var rows: [16]MoveRow = undefined;
+    const count = fixture.state.move_rows(fixture.store.at(0), &rows);
+    // Five of the six: Inbox is where it is.
+    try testing.expectEqual(@as(usize, 5), count);
+    for (rows[0..count]) |row| {
+        try testing.expect(row.target != .mailbox or row.target.mailbox != .inbox);
+    }
+
+    // Esc closes without moving anything.
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    try testing.expect(fixture.state.moving);
+    const none = apply(&fixture.state, &fixture.store, .dismiss);
+    try testing.expect(!fixture.state.moving);
+    try testing.expectEqual(@as(usize, 0), none.len);
+    try testing.expectEqual(Mailbox.inbox, fixture.store.at(0).mailbox);
+}
+
+test "moving a message that is in one of the account's folders names that folder" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = fixture.state.folders.add(AccountId.from_int(1), "Clients", null);
+    _ = fixture.state.folders.add(AccountId.from_int(1), "Sent", .sent);
+    fixture.store.at(0).named = 0;
+    fixture.state.select_named(&fixture.store, .{ .account = AccountId.from_int(1), .slot = 0 });
+    try testing.expectEqual(@as(u32, 1), fixture.state.visible_len);
+
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    const moved = apply(&fixture.state, &fixture.store, .open_selected);
+    // It leaves the named folder for the first one the chooser offers, and the
+    // effect says where it came from -- the folder of its slot, not the mailbox.
+    try testing.expectEqual(Mailbox.sent, fixture.store.at(0).mailbox);
+    try testing.expectEqual(
+        MoveTarget{ .named = .{ .account = AccountId.from_int(1), .slot = 0 } },
+        moved.slice()[0].move_message.from,
+    );
+}
+
+test "the chooser refuses to open when there is nowhere to go" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+
+    // No message selected: nothing to move.
+    fixture.state.visible_len = 0;
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    try testing.expect(!fixture.state.moving);
+    try testing.expectEqualStrings("No message selected", fixture.state.status.slice());
+
+    // One folder, and the message is already in it: no chooser either.
+    var store = try Store.init(testing.allocator, 2);
+    defer store.deinit(testing.allocator);
+    var state: State = .{ .list_rows = 4 };
+    var lonely = message_with(1, "only", .inbox, 100);
+    lonely.named = 0;
+    try store.insert(&lonely);
+    _ = state.folders.add(AccountId.from_int(1), "Clients", null);
+    state.select_named(&store, .{ .account = AccountId.from_int(1), .slot = 0 });
+    _ = apply(&state, &store, .begin_move);
+    try testing.expect(!state.moving);
+    try testing.expectEqualStrings("No folders to move to", state.status.slice());
+
+    // Enter with nothing to choose from closes it and moves nothing.
+    state.moving = true;
+    const effects = apply(&state, &store, .open_selected);
+    try testing.expect(!state.moving);
+    try testing.expectEqual(@as(usize, 0), effects.len);
+}
+
+test "the chooser walks with j/k, Home and End, and stays in range" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    try testing.expect(fixture.state.moving);
+
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .down });
+    try testing.expectEqual(@as(u8, 1), fixture.state.move_cursor);
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .up });
+    try testing.expectEqual(@as(u8, 0), fixture.state.move_cursor);
+    // Up at the top stays at the top.
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .up });
+    try testing.expectEqual(@as(u8, 0), fixture.state.move_cursor);
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .bottom });
+    try testing.expect(fixture.state.move_cursor > 0);
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .top });
+    try testing.expectEqual(@as(u8, 0), fixture.state.move_cursor);
+    // A page movement does nothing to the chooser.
+    _ = apply(&fixture.state, &fixture.store, .{ .move = .page_down });
+    try testing.expectEqual(@as(u8, 0), fixture.state.move_cursor);
+
+    // Confirm past the end uses the last row, not a row that is not there.
+    fixture.state.move_cursor = 15;
+    const effects = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expectEqual(@as(usize, 1), effects.len);
+}
+
+test "confirming a move with no message selected closes the chooser" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    fixture.state.moving = true;
+    fixture.state.visible_len = 0;
+    const effects = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expect(!fixture.state.moving);
+    try testing.expectEqual(@as(usize, 0), effects.len);
+    try testing.expectEqualStrings("No message selected", fixture.state.status.slice());
+}
+
+test "moving from the reader goes back to the list it just changed" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    _ = apply(&fixture.state, &fixture.store, .{ .select_mailbox = .inbox });
+    _ = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expectEqual(View.reader, fixture.state.view);
+
+    _ = apply(&fixture.state, &fixture.store, .begin_move);
+    const effects = apply(&fixture.state, &fixture.store, .open_selected);
+    try testing.expectEqual(View.list, fixture.state.view);
+    try testing.expectEqual(@as(u32, 0), fixture.state.reader_scroll);
+    try testing.expectEqual(@as(usize, 1), effects.len);
+}
+
+test "J walks the folders in the order the sidebar shows them" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    const account = AccountId.from_int(1);
+    // The server's order is not the order of the six: Archive, Inbox, Trash.
+    _ = fixture.state.folders.add(account, "Archive", .archive);
+    _ = fixture.state.folders.add(account, "INBOX", .inbox);
+    _ = fixture.state.folders.add(account, "Trash", .trash);
+    fixture.state.account_filter = account;
+    fixture.state.mailbox = .inbox;
+    fixture.state.rebuild(&fixture.store);
+
+    // From Inbox, J goes to the row drawn under it: Trash.
+    _ = apply(&fixture.state, &fixture.store, .next_folder);
+    try testing.expectEqual(Mailbox.trash, fixture.state.mailbox);
+
+    // And K comes back.
+    _ = apply(&fixture.state, &fixture.store, .previous_folder);
+    try testing.expectEqual(Mailbox.inbox, fixture.state.mailbox);
+
+    // Wrap around both ends.
+    _ = apply(&fixture.state, &fixture.store, .previous_folder);
+    try testing.expectEqual(Mailbox.archive, fixture.state.mailbox);
+    _ = apply(&fixture.state, &fixture.store, .previous_folder);
+    try testing.expectEqual(Mailbox.trash, fixture.state.mailbox);
+}
+
+test "stepping onto the folder you are already in is not a step" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    const account = AccountId.from_int(1);
+    // One folder of its own, and the screen is on it: J wraps onto itself.
+    _ = fixture.state.folders.add(account, "Clients", null);
+    fixture.state.select_named(&fixture.store, .{ .account = account, .slot = 0 });
+    const effects = apply(&fixture.state, &fixture.store, .next_folder);
+    try testing.expectEqual(@as(usize, 0), effects.len);
+    try testing.expectEqual(folder.Ref{ .account = account, .slot = 0 }, fixture.state.named.?);
+}
+
+test "the number keys follow the sidebar, not the order of the six in the code" {
+    var fixture = try ready();
+    defer fixture.store.deinit(testing.allocator);
+    const account = AccountId.from_int(1);
+    // A server whose list is its own: Inbox, Drafts, Destacados, Sent, ...
+    _ = fixture.state.folders.add(account, "INBOX", .inbox);
+    _ = fixture.state.folders.add(account, "Drafts", .drafts);
+    _ = fixture.state.folders.add(account, "Destacados", null);
+    _ = fixture.state.folders.add(account, "Sent", .sent);
+    fixture.state.account_filter = account;
+    fixture.state.rebuild(&fixture.store);
+
+    // 2 is the second row on screen: Drafts, not Sent.
+    _ = apply(&fixture.state, &fixture.store, .{ .select_folder = 1 });
+    try testing.expectEqual(Mailbox.drafts, fixture.state.mailbox);
+
+    // 4 is Sent, because that is where the sidebar put it.
+    _ = apply(&fixture.state, &fixture.store, .{ .select_folder = 3 });
+    try testing.expectEqual(Mailbox.sent, fixture.state.mailbox);
+
+    // 3 is a folder of the account's own.
+    _ = apply(&fixture.state, &fixture.store, .{ .select_folder = 2 });
+    try testing.expectEqualStrings("Destacados", fixture.state.folders.at(account, fixture.state.named.?.slot).?.display());
+
+    // Past the end: nothing happens, and nothing breaks.
+    const before = fixture.state.mailbox;
+    _ = apply(&fixture.state, &fixture.store, .{ .select_folder = 20 });
+    try testing.expectEqual(before, fixture.state.mailbox);
 }

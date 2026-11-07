@@ -53,6 +53,9 @@ pub const Fetch = struct {
 pub const ListEntry = struct {
     name: []const u8 = "",
     mailbox: ?Mailbox = null,
+    /// False for a name that only holds other folders ("[Gmail]"): it cannot be
+    /// selected, so it is a heading, not a folder.
+    selectable: bool = true,
 };
 
 pub const Untagged = union(enum) {
@@ -66,8 +69,17 @@ pub const Untagged = union(enum) {
     expunge: u32,
     fetch: Fetch,
     list: ListEntry,
+    /// `* STATUS "Sent" (UNSEEN 3 MESSAGES 42)`: what a folder holds without
+    /// selecting it.
+    status: Status,
     capabilities: []const u8,
     other: []const u8,
+};
+
+/// A folder's numbers, from STATUS.
+pub const Status = struct {
+    unseen: u32 = 0,
+    messages: u32 = 0,
 };
 
 pub const Response = union(enum) {
@@ -136,6 +148,7 @@ fn untagged(rest: []const u8, scratch: []u8) Error!Untagged {
         var list_len: usize = 0;
         return .{ .list = try parseList(tail, scratch, &list_len) };
     }
+    if (std.ascii.eqlIgnoreCase(first, "STATUS")) return .{ .status = try parseStatus(tail) };
     return .{ .other = rest };
 }
 
@@ -151,6 +164,23 @@ fn sequenceResponse(sequence: u32, tail: []const u8, scratch: []u8) Error!Untagg
     return .{ .other = tail };
 }
 
+/// `"Sent" (UNSEEN 3 MESSAGES 42)`: the numbers a folder reports about itself.
+/// Anything else in the list is skipped: a server may answer in any order.
+fn parseStatus(text: []const u8) Error!Status {
+    const open = std.mem.indexOfScalar(u8, text, '(') orelse return error.Malformed;
+    const close = std.mem.indexOfScalarPos(u8, text, open, ')') orelse return error.Malformed;
+
+    var status = Status{};
+    var tokens = std.mem.tokenizeAny(u8, text[open + 1 .. close], " \t");
+    while (tokens.next()) |key| {
+        const value = tokens.next() orelse return error.Malformed;
+        const number = std.fmt.parseInt(u32, value, 10) catch return error.Malformed;
+        if (std.ascii.eqlIgnoreCase(key, "UNSEEN")) status.unseen = number;
+        if (std.ascii.eqlIgnoreCase(key, "MESSAGES")) status.messages = number;
+    }
+    return status;
+}
+
 /// `(\Sent \HasNoChildren) "/" "Sent"`: flags, delimiter, name.
 fn parseList(text: []const u8, scratch: []u8, scratch_len: *usize) Error!ListEntry {
     var tokens = tokenizer.Tokenizer.init(text);
@@ -164,6 +194,7 @@ fn parseList(text: []const u8, scratch: []u8, scratch_len: *usize) Error!ListEnt
             .close_paren => break,
             .atom => |flag| {
                 if (specialUse(flag)) |mailbox| entry.mailbox = mailbox;
+                if (std.ascii.eqlIgnoreCase(flag, "\\Noselect")) entry.selectable = false;
             },
             else => {},
         }
@@ -187,6 +218,7 @@ fn parseList(text: []const u8, scratch: []u8, scratch_len: *usize) Error!ListEnt
 }
 
 fn specialUse(flag: []const u8) ?Mailbox {
+    if (std.ascii.eqlIgnoreCase(flag, "\\Inbox")) return .inbox;
     if (std.ascii.eqlIgnoreCase(flag, "\\Sent")) return .sent;
     if (std.ascii.eqlIgnoreCase(flag, "\\Drafts")) return .drafts;
     if (std.ascii.eqlIgnoreCase(flag, "\\Trash")) return .trash;
@@ -723,4 +755,20 @@ test "internal dates: every shape error returns null" {
 
 test "negative zone offsets" {
     try testing.expectEqual(@as(i64, 1_700_018_000), parseInternalDate("14-Nov-2023 22:13:20 -0500").?);
+}
+
+test "STATUS says how much of a folder nobody has read" {
+    const status = (try parse_test("* STATUS \"Clients\" (MESSAGES 42 UNSEEN 3)")).untagged.status;
+    try testing.expectEqual(@as(u32, 3), status.unseen);
+    try testing.expectEqual(@as(u32, 42), status.messages);
+
+    // A key we do not model is skipped, not an error: the server may add more.
+    const sparse = (try parse_test("* STATUS \"Sent\" (UNSEEN 1 RECENT 0)")).untagged.status;
+    try testing.expectEqual(@as(u32, 1), sparse.unseen);
+    try testing.expectEqual(@as(u32, 0), sparse.messages);
+
+    // A malformed list is a malformed response, not a folder with no mail.
+    try testing.expectError(error.Malformed, parse_test("* STATUS \"Sent\" UNSEEN 1"));
+    try testing.expectError(error.Malformed, parse_test("* STATUS \"Sent\" (UNSEEN)"));
+    try testing.expectError(error.Malformed, parse_test("* STATUS \"Sent\" (UNSEEN many)"));
 }

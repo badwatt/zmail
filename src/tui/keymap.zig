@@ -87,19 +87,20 @@ fn normal_key(key: Key, view: View) ?Command {
     return switch (key) {
         .char => |codepoint| char_command(codepoint, view),
         .enter => .open_selected,
-        .tab => .next_mailbox,
-        .back_tab => .previous_mailbox,
         .up => .{ .move = .up },
         .down => .{ .move = .down },
         .home => .{ .move = .top },
         .end => .{ .move = .bottom },
         .page_up => .{ .move = .page_up },
         .page_down => .{ .move = .page_down },
-        .left, .escape => if (view == .list) null else .dismiss,
+        // Esc goes back one layer, and in the list the layer under it is the
+        // chooser that may be open: it is never a key that does nothing.
+        .escape => .dismiss,
+        .left => if (view == .list) null else .dismiss,
         .right => if (view == .list) .open_selected else null,
         .backspace => null,
         .delete => .delete_selected,
-        .insert, .unknown, .mouse => null,
+        .tab, .back_tab, .insert, .unknown, .mouse => null,
         .ctrl => |letter| ctrl_command(letter),
     };
 }
@@ -124,11 +125,14 @@ fn char_command(codepoint: u21, view: View) ?Command {
         '#' => .delete_selected,
         '/' => .begin_search,
         '?' => .toggle_help,
+        'm' => .begin_move,
         'a' => .cycle_account,
         'A' => .open_accounts,
-        '[' => .previous_mailbox,
-        ']' => .next_mailbox,
-        '1'...'6' => .{ .select_mailbox = Mailbox.from_index(@intCast(codepoint - '1')) },
+        // Folders are a column in the sidebar, so they are walked with the same
+        // letters that walk the rows, shifted one level down.
+        'J' => .next_folder,
+        'K' => .previous_folder,
+        '1'...'9' => .{ .select_folder = @intCast(codepoint - '1') },
         else => null,
     };
 }
@@ -253,7 +257,7 @@ test "opening and dismissing" {
         .{ .key = .{ .char = 'l' }, .expected = .open_selected },
         .{ .key = .{ .char = 'o' }, .expected = .open_selected },
         .{ .key = .right, .expected = .open_selected },
-        .{ .key = .escape, .expected = null },
+        .{ .key = .escape, .expected = .dismiss },
         .{ .key = .{ .char = 'q' }, .expected = null },
         .{ .key = .{ .char = 'h' }, .expected = null },
         .{ .key = .{ .char = 'x' }, .expected = null },
@@ -273,17 +277,16 @@ test "in the reader, escape, left, h and q go back; right does nothing" {
 
 test "mailbox switching" {
     const cases = [_]Case{
-        .{ .key = .tab, .expected = .next_mailbox },
-        .{ .key = .back_tab, .expected = .previous_mailbox },
-        .{ .key = .{ .char = ']' }, .expected = .next_mailbox },
-        .{ .key = .{ .char = '[' }, .expected = .previous_mailbox },
-        .{ .key = .{ .char = '1' }, .expected = .{ .select_mailbox = .inbox } },
-        .{ .key = .{ .char = '2' }, .expected = .{ .select_mailbox = .sent } },
-        .{ .key = .{ .char = '3' }, .expected = .{ .select_mailbox = .drafts } },
-        .{ .key = .{ .char = '4' }, .expected = .{ .select_mailbox = .archive } },
-        .{ .key = .{ .char = '5' }, .expected = .{ .select_mailbox = .trash } },
-        .{ .key = .{ .char = '6' }, .expected = .{ .select_mailbox = .junk } },
-        .{ .key = .{ .char = '7' }, .expected = null },
+        .{ .key = .{ .char = 'J' }, .expected = .next_folder },
+        .{ .key = .{ .char = 'K' }, .expected = .previous_folder },
+        .{ .key = .{ .char = '1' }, .expected = .{ .select_folder = 0 } },
+        .{ .key = .{ .char = '2' }, .expected = .{ .select_folder = 1 } },
+        .{ .key = .{ .char = '3' }, .expected = .{ .select_folder = 2 } },
+        .{ .key = .{ .char = '4' }, .expected = .{ .select_folder = 3 } },
+        .{ .key = .{ .char = '5' }, .expected = .{ .select_folder = 4 } },
+        .{ .key = .{ .char = '6' }, .expected = .{ .select_folder = 5 } },
+        // The sidebar can show more than six folders on a real server.
+        .{ .key = .{ .char = '9' }, .expected = .{ .select_folder = 8 } },
         .{ .key = .{ .char = '0' }, .expected = null },
     };
     for (cases) |case| try check(case);
@@ -329,6 +332,7 @@ test "actions: unread, flag, archive, delete, search, help, refresh" {
         .{ .key = .{ .char = '?' }, .expected = .toggle_help },
         .{ .key = .{ .ctrl = 'r' }, .expected = .refresh },
         .{ .key = .{ .char = 'a' }, .expected = .cycle_account },
+        .{ .key = .{ .char = 'm' }, .expected = .begin_move },
     };
     for (cases) |case| try check(case);
 }

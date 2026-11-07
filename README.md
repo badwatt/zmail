@@ -43,11 +43,14 @@ catches up.
   progress bar (`OSC 9;4`) running while it lands.
 - **One connection at a time, and never in your way.** A refresh does not stop the
   keys: the effects that need the socket wait in a line instead of blocking the loop.
+- **Every folder your account has.** The sidebar is `LIST`, not a fixed set of six: the
+  scope on top, then the folders of the account you are in, with the unread counts the
+  server reports. `J`/`K` walk them, `m` moves a message into one.
 - **Reads HTML itself.** `core/html.zig` turns a message into text with headings,
   lists and links — no browser, no Electron, no external program.
 - **Pictures and details.** `i` shows the images a message carries or points at
   (fetched with `curl`, off the loop, composited over your own background); `\` opens
-  every header: To, Cc, Reply-To, Date, Message-ID.
+  every header: the account it arrived at, To, Cc, Reply-To, Date, Message-ID.
 - **A colour, not a palette.** zmail asks the terminal what it paints behind the text
   and derives the rest in OKLCH, so "a shade lighter" is arithmetic and contrast can be
   computed rather than hoped for.
@@ -151,8 +154,10 @@ The card behind `?` is the whole map, per screen. The short version:
 | `c` / `r` | compose / reply |
 | `u` / `s` | read or unread / star |
 | `d` / `#` | archive / move to Trash |
+| `m` | move to another folder |
 | `H` `i` `\` | HTML view, pictures, every header |
-| `Tab` `1`–`6` | mailbox |
+| `J` / `K` | next / previous folder |
+| `1`–`9` | the folder in that position, as the sidebar shows them |
 | `a` / `A` | next account / accounts overlay |
 | `Ctrl+R` | refresh from the server |
 | `Ctrl+C` | quit |

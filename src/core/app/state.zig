@@ -10,6 +10,7 @@ const assert = std.debug.assert;
 const limits = @import("../limits.zig");
 const Text = @import("../domain/text.zig").Text;
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
+const folder = @import("../domain/folder.zig");
 const Message = @import("../domain/message.zig").Message;
 const MessageId = @import("../domain/id.zig").MessageId;
 const Store = @import("../domain/store.zig").Store;
@@ -161,10 +162,30 @@ pub const Accounts = struct {
 };
 pub const Mode = enum { normal, search, help_search };
 
+/// Where mail can be: the domain's word for it, so the store and the update rules
+/// speak the same one.
+pub const MoveTarget = folder.MoveTarget;
+pub const folder_of = folder.of;
+pub const same_folder = folder.same;
+
+/// One row of the "move to" chooser.
+pub const MoveRow = struct {
+    target: MoveTarget,
+    title: []const u8,
+    /// The folder the message is already in: moving there is not moving.
+    current: bool = false,
+};
+
 pub const State = struct {
     view: View = .list,
     mode: Mode = .normal,
+    /// The canonical mailbox on screen. A named folder, when one is selected,
+    /// is what the list is actually showing; this stays where you were.
     mailbox: Mailbox = .inbox,
+    /// Every account's folders, as `LIST` reported them: the sidebar's list.
+    folders: folder.Table = .{},
+    /// The named folder on screen, when the list is one.
+    named: ?folder.Ref = null,
 
     /// Applied filter. Empty means "everything in this mailbox".
     query: Text(limits.filter_max) = .{},
@@ -182,6 +203,9 @@ pub const State = struct {
 
     opened: MessageId = .unknown,
     opened_account: AccountId = .unknown,
+    /// The folder the message on screen came from: a UID is unique in its folder
+    /// and nowhere else, so the store can hold two messages with the same number.
+    opened_folder: MoveTarget = .{ .mailbox = .inbox },
     reader_scroll: u32 = 0,
     reader_rows: u16 = 1,
     body_rows: u32 = 0,
@@ -206,6 +230,11 @@ pub const State = struct {
     accounts: Accounts = .{},
     account_filter: ?AccountId = null,
     compose: Compose = .{},
+
+    /// Choosing where the selected message goes: the chooser is open, and this
+    /// is the row under its cursor.
+    moving: bool = false,
+    move_cursor: u8 = 0,
 
     /// True while the first network load runs: the frame becomes a splash.
     booting: bool = false,
@@ -233,14 +262,106 @@ pub const State = struct {
         return self.refreshing or self.loading;
     }
 
+    /// Shows one of the account's other folders. `mailbox` is left where it was:
+    /// leaving the folder returns to it.
+    pub fn select_named(self: *State, store: *const Store, ref: folder.Ref) void {
+        // A named folder is one account's: the scope follows it, or the rows
+        // below the rule would be somebody else's folders.
+        self.account_filter = ref.account;
+        self.named = ref;
+        self.query.clear();
+        self.draft.clear();
+        self.mode = .normal;
+        self.view = .list;
+        self.cursor = 0;
+        self.offset = 0;
+        self.reader_scroll = 0;
+        self.opened = .unknown;
+        self.rebuild(store);
+    }
+
+    /// The folder on screen, canonical or named.
+    /// The folders the sidebar shows for the scope on screen, in its order: the
+    /// account's own list when the server gave one, the six the app knows when
+    /// it did not.
+    pub fn folder_rows(self: *const State, rows: []MoveRow) usize {
+        var count: usize = 0;
+        if (self.account_filter) |account| {
+            if (!self.folders.is_empty(account)) {
+                var slot: u8 = 0;
+                while (slot < self.folders.count(account) and count < rows.len) : (slot += 1) {
+                    count += self.write_row(account, slot, rows, count);
+                }
+                return count;
+            }
+        }
+        for (Mailbox.all) |mailbox| {
+            if (count == rows.len) break;
+            rows[count] = .{ .target = .{ .mailbox = mailbox }, .title = mailbox.title() };
+            count += 1;
+        }
+        return count;
+    }
+
+    /// Writes one row of an account's list, unless there is no room.
+    fn write_row(self: *const State, account: AccountId, slot: u8, rows: []MoveRow, at: usize) usize {
+        if (at == rows.len) return 0;
+        const entry = self.folders.at(account, slot).?;
+        const target: MoveTarget = if (entry.canonical) |mailbox|
+            .{ .mailbox = mailbox }
+        else
+            .{ .named = .{ .account = account, .slot = slot } };
+        rows[at] = .{ .target = target, .title = entry.display() };
+        return 1;
+    }
+
+    /// The folders a message can be moved to, in the order the chooser shows
+    /// them: the account's own list when the server gave one, the six the app
+    /// knows when it did not. The folder the message is already in is not one of
+    /// them -- moving there is not moving -- and the chooser and the command that
+    /// applies it walk this same list, so the row under the cursor is the row that
+    /// is used.
+    pub fn move_rows(self: *const State, message: *const Message, rows: []MoveRow) usize {
+        const current = folder_of(message);
+        var count: usize = 0;
+
+        if (!self.folders.is_empty(message.account)) {
+            var slot: u8 = 0;
+            while (slot < self.folders.count(message.account) and count < rows.len) : (slot += 1) {
+                const entry = self.folders.at(message.account, slot).?;
+                const target: MoveTarget = if (entry.canonical) |mailbox|
+                    .{ .mailbox = mailbox }
+                else
+                    .{ .named = .{ .account = message.account, .slot = slot } };
+                if (same_folder(current, target)) continue;
+                rows[count] = .{ .target = target, .title = entry.name.slice() };
+                count += 1;
+            }
+            return count;
+        }
+        for (Mailbox.all) |mailbox| {
+            if (count == rows.len) break;
+            const target = MoveTarget{ .mailbox = mailbox };
+            if (same_folder(current, target)) continue;
+            rows[count] = .{ .target = target, .title = mailbox.title() };
+            count += 1;
+        }
+        return count;
+    }
+
     pub fn rebuild(self: *State, store: *const Store) void {
         self.visible_len = 0;
         var index: u32 = 0;
         while (index < store.len) : (index += 1) {
             const message = store.at_const(index);
-            if (message.mailbox != self.mailbox) continue;
-            if (self.account_filter) |filter| {
-                if (message.account != filter) continue;
+            if (self.named) |ref| {
+                // One account's named folder: its messages are its own.
+                if (message.account != ref.account or message.named != ref.slot) continue;
+            } else {
+                if (message.mailbox != self.mailbox or message.named != folder.none) continue;
+                if (self.account_filter) |filter| {
+                    if (message.account != filter) continue;
+                }
             }
             if (!message.matches(self.query.slice())) continue;
             assert(self.visible_len < limits.messages_max);
@@ -299,6 +420,23 @@ pub const State = struct {
     pub fn selected_const(self: *const State, store: *const Store) ?*const Message {
         const index = self.selected_index(store) orelse return null;
         return store.at_const(index);
+    }
+
+    /// The message the reader is showing, from the live store: the one in the
+    /// folder it was opened from. A refresh can drop it, and then the reader keeps
+    /// the snapshot it took -- but it never borrows another folder's message with
+    /// the same number, which is a different message that happens to count the same.
+    pub fn opened_message(self: *const State, store: *const Store) ?*const Message {
+        if (!self.opened_account.is_known()) return null;
+        var index: u32 = 0;
+        while (index < store.len) : (index += 1) {
+            const message = store.at_const(index);
+            if (message.account != self.opened_account) continue;
+            if (message.id != self.opened) continue;
+            if (!same_folder(folder_of(message), self.opened_folder)) continue;
+            return message;
+        }
+        return null;
     }
 
     pub fn max_reader_scroll(self: *const State) u32 {

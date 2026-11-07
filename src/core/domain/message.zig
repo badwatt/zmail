@@ -9,6 +9,7 @@ const Address = @import("address.zig").Address;
 const MessageId = @import("id.zig").MessageId;
 const AccountId = @import("id.zig").AccountId;
 const Mailbox = @import("mailbox.zig").Mailbox;
+const folder = @import("folder.zig");
 
 pub const Flags = packed struct(u8) {
     unread: bool = true,
@@ -45,6 +46,10 @@ pub const Message = struct {
     id: MessageId = .unknown,
     account: AccountId = .unknown,
     mailbox: Mailbox = .inbox,
+    /// Set when the message lives in a folder that is not one of the six: the
+    /// slot of that folder in its account's list. `folder.none` means the
+    /// mailbox above is the whole address.
+    named: u8 = folder.none,
     from: Address = .{},
     subject: Text(limits.subject_max) = .{},
     snippet: Text(limits.snippet_max) = .{},

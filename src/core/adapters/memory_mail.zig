@@ -8,6 +8,9 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const Mailbox = @import("../domain/mailbox.zig").Mailbox;
+const folder = @import("../domain/folder.zig");
+const Text = @import("../domain/text.zig").Text;
+const limits = @import("../limits.zig");
 const Message = @import("../domain/message.zig").Message;
 const Flags = @import("../domain/message.zig").Flags;
 const MessageId = @import("../domain/id.zig").MessageId;
@@ -18,8 +21,41 @@ const civil_from_unix = @import("../domain/time.zig").civil_from_unix;
 pub const MemoryMail = struct {
     messages: [capacity]Message = undefined,
     len: u32 = 0,
+    /// The folders this account has, as a real server would list them. Empty
+    /// means the six the app knows.
+    folders: [folders_max]Listed = undefined,
+    folder_count: u8 = 0,
 
     pub const capacity: u32 = 64;
+    pub const folders_max: u8 = 16;
+
+    pub const Listed = struct {
+        name: Text(limits.mailbox_name_max) = .{},
+        canonical: ?Mailbox = null,
+    };
+
+    /// Adds a folder to the fake server's list, returning its slot. The slot is
+    /// what a message in it carries as `named`.
+    pub fn add_folder(self: *MemoryMail, name: []const u8, canonical: ?Mailbox) !u8 {
+        if (self.slot_of(name)) |slot| {
+            if (canonical) |mailbox| self.folders[slot].canonical = mailbox;
+            return slot;
+        }
+        if (self.folder_count == folders_max) return error.Full;
+        self.folders[self.folder_count] = .{ .canonical = canonical };
+        self.folders[self.folder_count].name.set(name);
+        self.folder_count += 1;
+        return self.folder_count - 1;
+    }
+
+    /// The slot of a folder by its name, for the demo and the tests that put a
+    /// message in one.
+    pub fn slot_of(self: *MemoryMail, name: []const u8) ?u8 {
+        for (self.folders[0..self.folder_count], 0..) |listed, slot| {
+            if (std.mem.eql(u8, listed.name.slice(), name)) return @intCast(slot);
+        }
+        return null;
+    }
     pub const SeedError = error{Full};
 
     pub fn init() MemoryMail {
@@ -44,6 +80,7 @@ pub const MemoryMail = struct {
 
     pub fn mail(self: *MemoryMail) port.Mail {
         return .{ .context = self, .vtable = &.{
+            .folders = foldersThunk,
             .fetch = fetchThunk,
             .fetch_body = fetchBodyThunk,
             .fetch_raw = fetchRawThunk,
@@ -54,11 +91,61 @@ pub const MemoryMail = struct {
         } };
     }
 
-    fn fetchThunk(context: *anyopaque, mailbox: Mailbox, out: []Message) port.Error!u32 {
+    /// Whether a message is in the place a port call names.
+    fn in_place(self: *MemoryMail, message: *const Message, place: port.Place) bool {
+        if (place.mailbox) |mailbox| {
+            return message.mailbox == mailbox and message.named == folder.none;
+        }
+        const slot = self.slot_of(place.name) orelse return false;
+        return message.named == slot;
+    }
+
+    fn foldersThunk(context: *anyopaque, out: []port.Listed) port.Error!u32 {
+        const self: *MemoryMail = @ptrCast(@alignCast(context));
+        if (self.folder_count == 0) {
+            // Nothing scripted: the six the app knows, as a server would list them.
+            var written: u32 = 0;
+            for (Mailbox.all) |mailbox| {
+                if (written == out.len) break;
+                out[written] = .{ .name = mailbox.title(), .canonical = mailbox };
+                out[written].unread = self.unread_in(.{ .mailbox = mailbox });
+                written += 1;
+            }
+            return written;
+        }
+        const count = @min(@as(u32, self.folder_count), @as(u32, @intCast(out.len)));
+        var index: u32 = 0;
+        while (index < count) : (index += 1) {
+            const listed = &self.folders[index];
+            const place: port.Place = if (listed.canonical) |mailbox|
+                .{ .mailbox = mailbox }
+            else
+                .named(listed.name.slice());
+            out[index] = .{
+                .name = listed.name.slice(),
+                .canonical = listed.canonical,
+                .unread = self.unread_in(place),
+            };
+        }
+        return count;
+    }
+
+    /// How many unread messages this fake server holds in one folder: what a
+    /// real one answers to `STATUS`.
+    fn unread_in(self: *MemoryMail, place: port.Place) u32 {
+        var count: u32 = 0;
+        for (self.messages[0..self.len]) |*message| {
+            if (!self.in_place(message, place)) continue;
+            if (message.is_unread()) count += 1;
+        }
+        return count;
+    }
+
+    fn fetchThunk(context: *anyopaque, place: port.Place, out: []Message) port.Error!u32 {
         const self: *MemoryMail = @ptrCast(@alignCast(context));
         var written: u32 = 0;
         for (self.messages[0..self.len]) |message| {
-            if (message.mailbox != mailbox) continue;
+            if (!self.in_place(&message, place)) continue;
             if (written == out.len) break;
             out[written] = message;
             written += 1;
@@ -66,34 +153,34 @@ pub const MemoryMail = struct {
         return written;
     }
 
-    fn fetchBodyThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) port.Error![]const u8 {
+    fn fetchBodyThunk(context: *anyopaque, place: port.Place, id: MessageId, out: []u8) port.Error![]const u8 {
         const self: *MemoryMail = @ptrCast(@alignCast(context));
         const message = self.find(id) orelse return error.NotFound;
-        if (message.mailbox != mailbox) return error.NotFound;
+        if (!self.in_place(message, place)) return error.NotFound;
         return render_body(message, out);
     }
 
     /// The memory adapter stores whole messages, so the raw form is the same
     /// bytes the text form is rendered from.
-    fn fetchRawThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId, out: []u8) port.Error![]const u8 {
+    fn fetchRawThunk(context: *anyopaque, place: port.Place, id: MessageId, out: []u8) port.Error![]const u8 {
         const self: *MemoryMail = @ptrCast(@alignCast(context));
         const message = self.find(id) orelse return error.NotFound;
-        if (message.mailbox != mailbox) return error.NotFound;
+        if (!self.in_place(message, place)) return error.NotFound;
         const text = render_body(message, out);
         return text;
     }
 
-    fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: Flags) port.Error!void {
+    fn setFlagsThunk(context: *anyopaque, _: port.Place, id: MessageId, flags: Flags) port.Error!void {
         const self: *MemoryMail = @ptrCast(@alignCast(context));
         const message = self.find(id) orelse return error.NotFound;
         message.flags = flags;
     }
 
-    fn deleteThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId) port.Error!void {
+    fn deleteThunk(context: *anyopaque, place: port.Place, id: MessageId) port.Error!void {
         const self: *MemoryMail = @ptrCast(@alignCast(context));
         var index: u32 = 0;
         while (index < self.len) : (index += 1) {
-            if (self.messages[index].id == id and self.messages[index].mailbox == mailbox) {
+            if (self.messages[index].id == id and self.in_place(&self.messages[index], place)) {
                 self.len -= 1;
                 var cursor = index;
                 while (cursor < self.len) : (cursor += 1) {
@@ -106,12 +193,12 @@ pub const MemoryMail = struct {
         return error.NotFound;
     }
 
-    fn emptyThunk(context: *anyopaque, mailbox: Mailbox) port.Error!void {
+    fn emptyThunk(context: *anyopaque, place: port.Place) port.Error!void {
         const self: *MemoryMail = @ptrCast(@alignCast(context));
         var read: u32 = 0;
         var write: u32 = 0;
         while (read < self.len) : (read += 1) {
-            if (self.messages[read].mailbox != mailbox) {
+            if (!self.in_place(&self.messages[read], place)) {
                 self.messages[write] = self.messages[read];
                 write += 1;
             }
@@ -119,10 +206,13 @@ pub const MemoryMail = struct {
         self.len = write;
     }
 
-    fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) port.Error!void {
+    fn moveThunk(context: *anyopaque, _: port.Place, id: MessageId, to: port.Place) port.Error!void {
         const self: *MemoryMail = @ptrCast(@alignCast(context));
         const message = self.find(id) orelse return error.NotFound;
-        message.mailbox = to;
+        // A move is always to one of the six: the actions that move mail do not
+        // know the account's other folders.
+        message.mailbox = to.mailbox orelse return error.Rejected;
+        message.named = folder.none;
     }
 
     pub fn find(self: *MemoryMail, id: MessageId) ?*Message {
@@ -356,18 +446,18 @@ test "MemoryMail: delete removes one message, empty clears the mailbox" {
 
 test "MemoryMail: set_flags mutates the server copy" {
     var mail = try seeded();
-    try mail.mail().set_flags(MessageId.from_int(1), .{ .unread = false });
+    try mail.mail().set_flags(port.Place.inbox, MessageId.from_int(1), .{ .unread = false });
     try testing.expect(!mail.messages[0].is_unread());
 }
 
 test "MemoryMail: set_flags reports an unknown id" {
     var mail = try seeded();
-    try testing.expectError(error.NotFound, mail.mail().set_flags(MessageId.from_int(99), .{}));
+    try testing.expectError(error.NotFound, mail.mail().set_flags(port.Place.inbox, MessageId.from_int(99), .{}));
 }
 
 test "MemoryMail: move_message changes the mailbox" {
     var mail = try seeded();
-    try mail.mail().move_message(MessageId.from_int(1), .archive);
+    try mail.mail().move_message(port.Place.inbox, MessageId.from_int(1), port.Place.archive);
     try testing.expectEqual(Mailbox.archive, mail.messages[0].mailbox);
 
     var out: [8]Message = undefined;
@@ -376,7 +466,7 @@ test "MemoryMail: move_message changes the mailbox" {
 
 test "MemoryMail: move_message reports an unknown id" {
     var mail = try seeded();
-    try testing.expectError(error.NotFound, mail.mail().move_message(MessageId.from_int(99), .archive));
+    try testing.expectError(error.NotFound, mail.mail().move_message(port.Place.inbox, MessageId.from_int(99), port.Place.archive));
 }
 
 test "render_body uses a rotating template so the demo is not repetitive" {

@@ -87,10 +87,6 @@ pub const Setup = struct {
         self.problem.clear();
     }
 
-    pub fn start_at_review(self: *Setup) void {
-        self.step = .review;
-    }
-
     pub fn deinit(self: *Setup) void {
         self.password.deinit();
     }

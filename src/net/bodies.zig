@@ -18,6 +18,7 @@ const Mailbox = core.mailbox.Mailbox;
 const limits = core.limits;
 
 const KeyFile = @import("keyfile.zig").KeyFile;
+const folder_name = @import("folder_name.zig");
 const sealed_max: usize = limits.body_max + sealed.overhead;
 
 pub const Label = @import("cache_file.zig").Label;
@@ -57,20 +58,17 @@ pub const FileBodies = struct {
         return null;
     }
 
-    fn file_path(self: *const FileBodies, account: AccountId, mailbox: Mailbox, id: MessageId, buffer: []u8) ?[]const u8 {
+    fn file_path(self: *const FileBodies, account: AccountId, folder: []const u8, id: MessageId, buffer: []u8) ?[]const u8 {
         const label = self.label_for(account) orelse return null;
-        return std.fmt.bufPrint(buffer, "{s}/{s}/bodies/{s}/{d}.bin", .{
-            self.base_dir,
-            label,
-            mailbox_file_name(mailbox),
-            id.to_int(),
-        }) catch null;
+        var name_buffer: [96]u8 = undefined;
+        const name = folder_name.file_name(folder, &name_buffer);
+        return std.fmt.bufPrint(buffer, "{s}/{s}/bodies/{s}/{d}.bin", .{ self.base_dir, label, name, id.to_int() }) catch null;
     }
 
     fn loadThunk(
         context: *anyopaque,
         account: AccountId,
-        mailbox: Mailbox,
+        folder: []const u8,
         id: MessageId,
         out: []u8,
     ) port.Error!?[]const u8 {
@@ -78,7 +76,7 @@ pub const FileBodies = struct {
         const key = self.keys.get() orelse return error.Unavailable;
 
         var path_buffer: [512]u8 = undefined;
-        const path = self.file_path(account, mailbox, id, &path_buffer) orelse return null;
+        const path = self.file_path(account, folder, id, &path_buffer) orelse return null;
 
         var file = std.Io.Dir.cwd().openFile(self.io, path, .{}) catch |err| switch (err) {
             error.FileNotFound => return null,
@@ -101,7 +99,7 @@ pub const FileBodies = struct {
     fn saveThunk(
         context: *anyopaque,
         account: AccountId,
-        mailbox: Mailbox,
+        folder: []const u8,
         id: MessageId,
         body: []const u8,
     ) port.Error!void {
@@ -119,14 +117,14 @@ pub const FileBodies = struct {
             return;
 
         var path_buffer: [512]u8 = undefined;
-        const path = self.file_path(account, mailbox, id, &path_buffer) orelse return;
+        const path = self.file_path(account, folder, id, &path_buffer) orelse return;
 
         const label = self.label_for(account) orelse return;
         var dir_buffer: [512]u8 = undefined;
         const dir = std.fmt.bufPrint(&dir_buffer, "{s}/{s}/bodies/{s}", .{
             self.base_dir,
             label,
-            mailbox_file_name(mailbox),
+            folder,
         }) catch return;
         _ = std.Io.Dir.cwd().createDirPathStatus(self.io, dir, directory_mode) catch
             return error.Unavailable;
@@ -140,14 +138,3 @@ pub const FileBodies = struct {
 
 const file_mode = @import("keyfile.zig").file_mode;
 const directory_mode = @import("keyfile.zig").directory_mode;
-
-fn mailbox_file_name(mailbox: Mailbox) []const u8 {
-    return switch (mailbox) {
-        .inbox => "inbox",
-        .sent => "sent",
-        .drafts => "drafts",
-        .archive => "archive",
-        .trash => "trash",
-        .junk => "junk",
-    };
-}

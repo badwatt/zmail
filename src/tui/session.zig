@@ -26,10 +26,55 @@ const net = @import("net");
 const wrap = @import("wrap.zig");
 
 const Mailbox = core.mailbox.Mailbox;
+const MoveTarget = core.state.MoveTarget;
 const Message = core.message.Message;
 const MessageId = core.id.MessageId;
 const Screen = screen_mod.Screen;
 const System = system_mod.System;
+
+/// Where each place was in its folder list, for as long as this run lasts.
+///
+/// A place is an account or the unified list, named by its label (and by nothing
+/// at all for the unified one). Nothing here reaches the disk: the first screen of
+/// every run is the same, and a restart opens on the first folder.
+pub const Places = struct {
+    pub const entries_max = core.state.accounts_max + 1;
+
+    const Entry = struct {
+        label: core.text.Text(core.limits.label_max) = .{},
+        folder: core.text.Text(core.folder.name_max) = .{},
+    };
+
+    entries: [entries_max]Entry = @splat(.{}),
+    len: u8 = 0,
+
+    pub fn find(self: *const Places, label: []const u8) ?*const Entry {
+        for (self.entries[0..self.len]) |*entry| {
+            if (std.mem.eql(u8, entry.label.slice(), label)) return entry;
+        }
+        return null;
+    }
+
+    pub fn save(self: *Places, label: []const u8, folder: []const u8) void {
+        for (self.entries[0..self.len]) |*entry| {
+            if (!std.mem.eql(u8, entry.label.slice(), label)) continue;
+            entry.folder.set(folder);
+            return;
+        }
+        if (self.len == entries_max) return;
+        self.entries[self.len] = .{};
+        self.entries[self.len].label.set(label);
+        self.entries[self.len].folder.set(folder);
+        self.len += 1;
+    }
+
+    pub fn load(self: *const Places, label: []const u8, out: *core.text.Text(core.folder.name_max)) bool {
+        const entry = self.find(label) orelse return false;
+        if (entry.folder.is_empty()) return false;
+        out.set(entry.folder.slice());
+        return true;
+    }
+};
 
 /// Where "now" comes from. Injected so relative dates are deterministic in
 /// tests and correct in the real client.
@@ -46,11 +91,13 @@ const Gap = struct { at: u32, extra: u16 };
 /// the page instead of leaving the previous message under the new subject.
 const ShownMessage = struct {
     account: core.id.AccountId,
-    mailbox: Mailbox,
+    /// The folder, not just the mailbox: a UID means something only in the folder
+    /// it came from, and one of the account's own folders is a folder too.
+    folder: core.state.MoveTarget,
     id: MessageId,
 
-    fn matches(self: ShownMessage, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) bool {
-        return self.account == account and self.mailbox == mailbox and self.id == id;
+    fn matches(self: ShownMessage, account: core.id.AccountId, folder: core.state.MoveTarget, id: MessageId) bool {
+        return self.account == account and self.id == id and core.state.same_folder(self.folder, folder);
     }
 };
 
@@ -317,7 +364,9 @@ pub const Session = struct {
     body_in_flight: bool = false,
     /// The message the reader is waiting for, so a body that arrives after the user
     /// left is cached and not painted over whatever is on screen.
-    body_wanted: ?core.id.MessageId = null,
+    /// Which message the reader is waiting for, named the way a body must be:
+    /// a UID is a folder's, and two folders can both have a 1522.
+    body_wanted: ?ShownMessage = null,
     /// When the footer spinner may stop: a bar that appears and vanishes inside one
     /// frame reads as a glitch, so the body keeps it up for the minimum.
     body_loading_until_ms: i64 = 0,
@@ -328,6 +377,10 @@ pub const Session = struct {
     /// Whether the reader is showing the pictures. Off until asked: a receipt full of
     /// tracking pixels is not downloaded because a key was pressed to open it.
     show_images: bool = false,
+    /// The folder sidebar: off until the program that owns the terminal asks
+    /// for it, so a fixture drawing 100x24 is still drawing a list. The layout
+    /// grants it only when the terminal has columns to spare.
+    sidebar: bool = false,
     image_job: refresh_mod.ImageJob = .{},
     image_in_flight: bool = false,
     /// The marker the worker is fetching for ("r0"): the address is not the name the
@@ -338,11 +391,27 @@ pub const Session = struct {
     pending_effects: [pending_effects_max]core.effect.Effect = undefined,
     pending_len: u8 = 0,
     refresh_scratch: []Message = undefined,
+    /// What each source is asked for, named the way that account's server names
+    /// it. A field, not a local: the worker reads it after the call returns.
+    refresh_places: [refresh_mod.max_accounts]core.mail_port.Place = @splat(.inbox),
+    /// A refresh was asked for while one was out. It is not dropped: the job that
+    /// is out is followed by another the moment it lands.
+    refresh_again: bool = false,
+    /// Where each place was in its folder list: a run's own memory, kept while the
+    /// app is open and forgotten when it ends. A restart opens on the first folder,
+    /// which is what makes the first screen the same every morning.
+    places: Places = .{},
+    /// Where a folder list read from disk lands before it goes into the table.
+    cached_folders: [core.folder.per_account_max]core.cache_port.Folder = @splat(.{}),
+    /// Where the worker writes the folders each account listed.
+    folder_scratch: [core.state.accounts_max * core.folder.per_account_max]core.mail_port.Listed = undefined,
     refresh_sources: [core.state.accounts_max]refresh_mod.Source = undefined,
     /// Which of the session's sources each job slot came from, and how many.
     refresh_index: [core.state.accounts_max]u8 = undefined,
     refresh_count: u8 = 0,
-    refresh_mailbox: Mailbox = .inbox,
+    refresh_target: Target = .{ .mailbox = .inbox },
+    /// The caches' name for the folder being refreshed, fixed when it was asked for.
+    refresh_key: core.text.Text(core.folder.name_max) = .{},
     /// The live account list: a copy of what the launcher built, plus anything
     /// added from the TUI (and minus anything removed).
     sources: [core.state.accounts_max]MailSource = undefined,
@@ -395,7 +464,7 @@ pub const Session = struct {
         self.screen.resize(self.size.columns, self.size.rows);
         // Cache only: the first frame must not wait for a socket. Anything the
         // cache cannot serve is fetched by `boot`, after that frame is painted.
-        self.load_cached(self.state.mailbox, true);
+        self.load_cached(self.screen_target(), true);
         // The first screen is work to a terminal: the bar goes up with the frame
         // and comes down when boot() has something to show.
         self.sync_progress();
@@ -468,13 +537,17 @@ pub const Session = struct {
 
     /// Fills the store from the on-disk cache and remembers whether the network
     /// is still needed.
-    fn load_cached(self: *Session, mailbox: Mailbox, detect_boot: bool) void {
+    fn load_cached(self: *Session, want: Target, detect_boot: bool) void {
         for (self.live_sources(), 0..) |source, index| {
-            const mask = mask_bit(@intCast(index), @backingInt(mailbox));
+            const slot: u8 = switch (want) {
+                .mailbox => |mailbox| @backingInt(mailbox),
+                .named => |ref| ref.slot,
+            };
+            const mask = mask_bit(@intCast(index), slot);
             if (self.deps.cache) |cache| {
-                const cached = cache.load(source.id, mailbox, self.scratch) catch 0;
+                const cached = cache.load(source.id, self.folder_key(want), self.scratch) catch 0;
                 if (cached > 0) {
-                    core.sync.replace_mailbox(&self.store, source.id, mailbox, self.scratch[0..cached]);
+                    self.apply_target(want, source.id, self.scratch[0..cached]);
                     self.loaded_mask |= mask;
                     continue;
                 }
@@ -495,6 +568,10 @@ pub const Session = struct {
     /// Runs once, right after the first frame: opens the connections the cache
     /// could not replace. The splash is on screen while this blocks.
     pub fn boot(self: *Session) void {
+        // The sidebar before the network, always: a warm cache means no boot at
+        // all, and the folder list kept on disk is exactly what should be on
+        // screen while nothing has been opened yet.
+        self.load_cached_folders();
         if (!self.needs_boot) return;
         self.needs_boot = false;
         // Nothing to connect to (a broken config, no accounts): the welcome screen
@@ -507,6 +584,7 @@ pub const Session = struct {
         // reuse the open connection, so those can run in the background.
         if (!self.deps.splash) {
             self.reload(self.state.mailbox);
+            self.list_missing_folders();
             return;
         }
 
@@ -568,6 +646,9 @@ pub const Session = struct {
         self.state.booting = false;
         self.finish_reload(self.state.mailbox);
         self.sync_progress();
+        // The mail is here; the folders may not be. Ask for the ones the disk did
+        // not have, now, instead of waiting for the first key to move.
+        self.list_missing_folders();
     }
 
     pub fn deinit(self: *Session) void {
@@ -638,7 +719,6 @@ pub const Session = struct {
     /// Runs until the user quits. `run.zig` wraps this with raw mode and the
     /// alternate screen.
     pub fn loop(self: *Session) void {
-        const needs_network = self.needs_boot;
         if (self.deps.splash) {
             // Every start has its first screen, and it breathes while the connection
             // is made: `splash_on` puts it up, `boot` decides what to fetch, and
@@ -655,30 +735,39 @@ pub const Session = struct {
             self.render();
         }
 
-        // Starting from cache means no connection is open. Opening a message
-        // would then pay TCP + TLS + LOGIN before the first byte of mail, so
-        // warm it in the background (this is the worker thread: no freeze)
-        // while the user reads what is already on screen.
-        if (!needs_network and self.source_count > 0) self.start_refresh();
-
+        // And then nothing else: with a cache, the first frame opens no socket.
+        // The connection is made when something is asked of the server -- a
+        // refresh, a body that is not on disk -- and made here, on the thread that
+        // owns it, with the footer saying so.
         while (self.step()) {}
     }
 
+    /// Refreshes the folder on screen: the mail for every account in scope, and
+    /// the folders those accounts have. It runs on the worker, so `Ctrl+R` and a
+    /// folder switch are the same call -- and neither of them blocks the frame.
     fn start_refresh(self: *Session) void {
-        if (self.refreshing) return;
-
-        // A connection nobody has opened yet must be opened here, on the thread
-        // that owns the transport. The worker cannot: it would create the TLS
-        // stream from another thread and both wait forever.
-        for (self.live_sources()) |source| {
-            if (!self.in_scope(source.id)) continue;
-            if (source.mail.connected()) continue;
-            self.reload(self.state.mailbox);
+        // A refresh is already out: remember that another one was asked for, and it
+        // will be the job after this one. Dropping it left the folder you switched to
+        // showing nothing until something else asked again -- and nothing else does.
+        if (self.refreshing) {
+            self.refresh_again = true;
             return;
         }
 
-        // The worker takes exactly the accounts in scope: refreshing never wakes
-        // an account the reader is not looking at.
+        // Paint what the cache has first: switching mailboxes stays instant.
+        self.load_cached(self.screen_target(), false);
+        // The disk first: a folder list is small, and the account you were in an
+        // hour ago should not make you wait for a round trip to see its folders.
+        self.load_cached_folders();
+        _ = self.launch_refresh(false);
+    }
+
+    /// Starts the worker over the accounts in scope, on the folder on screen. A
+    /// refresh asks for the folders as well as the mail, which is what makes going
+    /// to a folder work the first time: the name the sidebar holds may be older than
+    /// the folder itself, and a fetch through an old name lands on an empty list. It
+    /// is one round trip plus a handful, on the worker, and the frame never waits.
+    fn launch_refresh(self: *Session, list_only: bool) bool {
         var count: u8 = 0;
         for (self.live_sources(), 0..) |source, index| {
             if (!self.in_scope(source.id)) continue;
@@ -686,17 +775,23 @@ pub const Session = struct {
             self.refresh_index[count] = @intCast(index);
             count += 1;
         }
-        if (count == 0) return;
+        if (count == 0) return false;
         self.refresh_count = count;
-
-        // Paint what the cache has first: switching mailboxes stays instant.
-        self.load_cached(self.state.mailbox, false);
-
-        self.refresh_mailbox = self.state.mailbox;
-        self.refresh_job.start(self.refresh_sources[0..count], self.refresh_mailbox, self.refresh_scratch);
+        self.refresh_target = self.screen_target();
+        self.refresh_key = core.text.Text(core.folder.name_max).init(self.folder_key(self.refresh_target));
+        const places = self.places_for(self.refresh_target, &self.refresh_places) orelse return false;
+        self.refresh_job.start(
+            self.refresh_sources[0..count],
+            places,
+            self.refresh_scratch,
+            &self.folder_scratch,
+            list_only,
+            true,
+        );
         self.refreshing = true;
         self.state.refreshing = true;
         self.repaint();
+        return true;
     }
 
     fn poll_refresh(self: *Session) void {
@@ -712,17 +807,43 @@ pub const Session = struct {
         while (slot < self.refresh_count) : (slot += 1) {
             const index = self.refresh_index[slot];
             const source = self.live_sources()[index];
+
+            // The folders are the list's own business, and they are what the sidebar
+            // keeps: a listing that carries no mail still saves them, which is what
+            // makes the next start instant.
+            const listed_count = self.refresh_job.folder_counts[slot];
+            if (listed_count > 0) {
+                const listed = self.folder_scratch[self.refresh_job.folder_offsets[slot]..][0..listed_count];
+                if (self.deps.cache) |cache| {
+                    var records: [core.folder.per_account_max]core.cache_port.Folder = undefined;
+                    const bounded = @min(listed.len, records.len);
+                    for (listed[0..bounded], 0..) |folder, position| {
+                        records[position] = .{
+                            .name = folder.name,
+                            .title = folder.title,
+                            .canonical = folder.canonical,
+                            .unread = folder.unread,
+                        };
+                    }
+                    cache.save_folders(source.id, records[0..bounded]) catch {};
+                }
+                self.adopt_folders(source.id, self.refresh_job.folder_offsets[slot], listed_count);
+            }
+
             // A failed account keeps whatever the cache already showed.
             if (!self.refresh_job.ok[slot]) continue;
 
             const offset = self.refresh_job.offsets[slot];
             const count = self.refresh_job.counts[slot];
             const fetched = self.refresh_scratch[offset..][0..count];
-
-            core.sync.replace_mailbox(&self.store, source.id, self.refresh_mailbox, fetched);
-            self.loaded_mask |= mask_bit(@intCast(index), @backingInt(self.refresh_mailbox));
+            self.apply_target(self.refresh_target, source.id, fetched);
+            const place_slot: u8 = switch (self.refresh_target) {
+                .mailbox => |mailbox| @backingInt(mailbox),
+                .named => |ref| ref.slot,
+            };
+            self.loaded_mask |= mask_bit(@intCast(index), place_slot);
             if (self.deps.cache) |cache| {
-                cache.save(source.id, self.refresh_mailbox, fetched) catch {};
+                cache.save(source.id, self.refresh_key.slice(), fetched) catch {};
             }
         }
 
@@ -730,16 +851,115 @@ pub const Session = struct {
         self.state.booting = false;
         self.refreshing = false;
         self.state.refreshing = false;
+        // The folder on screen moved while this one was out, or a refresh was asked
+        // for and had nowhere to go: the screen always gets the folder it shows.
+        const stale = self.refresh_again or !core.state.same_folder(self.refresh_target, self.screen_target());
+        self.refresh_again = false;
         self.state.rebuild(&self.store);
         self.repaint();
 
         if (failures > 0) {
-            self.state.set_alert("Could not refresh {s}", .{self.refresh_mailbox.title()});
+            const name = self.folder_key(self.refresh_target);
+            self.state.set_alert("Could not refresh {s}", .{name});
         }
 
         // A body asked for while the worker was busy gets its turn now; the reader
         // keeps showing its placeholder until it lands.
+        if (stale) self.start_refresh();
         self.poll_body();
+    }
+
+    /// Takes the folder list a server gave us. The six the app knows are always
+    /// there, even on a server that lists nothing: the list is the sidebar's, and
+    /// an empty sidebar would look like a broken account.
+    fn adopt_folders(self: *Session, account: core.id.AccountId, offset: u32, count: u32) void {
+        self.adopt(account, self.folder_scratch[offset..][0..count]);
+    }
+
+    /// Fills the sidebar's table for one account. The same code path for a list
+    /// the server just sent and one the disk remembered.
+    fn adopt(self: *Session, account: core.id.AccountId, listed: []const core.mail_port.Listed) void {
+        if (listed.len == 0) return;
+
+        // A slot is a position in this list, and the list is about to be replaced:
+        // remember the name of the folder on screen to find it again.
+        var open_name: core.text.Text(core.folder.name_max) = .{};
+        var old_slot: u8 = 0;
+        if (self.state.named) |ref| {
+            if (ref.account == account) {
+                old_slot = ref.slot;
+                if (self.state.folders.at(account, ref.slot)) |entry| open_name.set(entry.name.slice());
+            }
+        }
+
+        self.state.folders.reset(account);
+        for (listed) |folder| {
+            _ = self.state.folders.add_counted(account, folder.name, folder.title, folder.canonical, folder.unread);
+        }
+
+        if (open_name.is_empty()) return;
+        // The folder on screen moved, kept its place, or is gone.
+        const old_ref = core.folder.Ref{ .account = account, .slot = old_slot };
+        var slot: u8 = 0;
+        while (slot < self.state.folders.count(account)) : (slot += 1) {
+            const entry = self.state.folders.at(account, slot).?;
+            if (!std.mem.eql(u8, entry.name.slice(), open_name.slice())) continue;
+            core.sync.reslot(&self.store, account, old_slot, slot);
+            self.state.named = .{ .account = account, .slot = slot };
+            // What is still in the air was asked for by the old slot, and the
+            // answer has to land in the new one.
+            const new_ref = core.folder.Ref{ .account = account, .slot = slot };
+            if (self.refresh_target == .named and self.refresh_target.named.eql(old_ref)) {
+                self.refresh_target = .{ .named = new_ref };
+            }
+            self.state.rebuild(&self.store);
+            return;
+        }
+        // Not in the list any more: the list goes back to the mailbox it was on.
+        self.state.named = null;
+        self.state.rebuild(&self.store);
+    }
+
+    /// Starts a listing when some account's folders are still unknown: the
+    /// sidebar is part of the first screen, and a key press should not be what
+    /// makes it appear. Only the lists are asked for -- the mail on screen came
+    /// from the cache, and a folder listing is not a reason to fetch it again.
+    fn list_missing_folders(self: *Session) void {
+        if (self.refreshing) return;
+        // Before asking the server, ask the disk: what the last run kept is the
+        // answer, and a listing is only for what it did not have.
+        self.load_cached_folders();
+        var missing = false;
+        for (self.live_sources()) |source| {
+            if (!self.state.folders.is_empty(source.id)) continue;
+            missing = true;
+        }
+        // The disk had them all: nothing to do, and the sidebar already says so.
+        if (!missing) return;
+        _ = self.launch_refresh(true);
+    }
+
+    /// Fills the sidebar from the folder list kept on disk, for the accounts in
+    /// scope that have none in memory. A miss is normal: the server will answer.
+    fn load_cached_folders(self: *Session) void {
+        const cache = self.deps.cache orelse return;
+        for (self.live_sources()) |source| {
+            if (!self.in_scope(source.id)) continue;
+            if (!self.state.folders.is_empty(source.id)) continue;
+            const count = cache.load_folders(source.id, &self.cached_folders) catch 0;
+            if (count == 0) continue;
+            var listed: [core.folder.per_account_max]core.mail_port.Listed = undefined;
+            const bounded = @min(count, listed.len);
+            for (self.cached_folders[0..bounded], 0..) |folder, index| {
+                listed[index] = .{
+                    .name = folder.name,
+                    .title = folder.title,
+                    .canonical = folder.canonical,
+                    .unread = folder.unread,
+                };
+            }
+            self.adopt(source.id, listed[0..bounded]);
+        }
     }
 
     /// Waits for an in-flight refresh, then applies its results. Used when a
@@ -758,6 +978,16 @@ pub const Session = struct {
         self.wait_refresh();
     }
 
+    /// Starts a refresh the way a key would, without going through the key map.
+    pub fn start_refresh_for_test(self: *Session) void {
+        self.start_refresh();
+    }
+
+    /// The refresh Ctrl+R asks for. The same call a folder switch makes.
+    pub fn start_refresh_listing_for_test(self: *Session) void {
+        self.start_refresh();
+    }
+
     /// Drains effects that were waiting for the connection, the way the loop does.
     pub fn settle_pending_for_test(self: *Session) void {
         var guard: u8 = 0;
@@ -765,6 +995,12 @@ pub const Session = struct {
             self.poll_pending();
             self.settle_refresh_for_test();
         }
+    }
+
+    /// Starts the body that is waiting, without waiting for it: what the loop does
+    /// on the tick after the key.
+    pub fn start_body_for_test(self: *Session) void {
+        self.poll_body();
     }
 
     /// Lets a body fetch in the air land, the way the loop would: start it, wait for
@@ -859,11 +1095,23 @@ pub const Session = struct {
             else => return false,
         }
 
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar_shown(),
+        );
         if (lay.too_small) return false;
 
+        // The sidebar owns the left columns: a click there is a choice of scope
+        // or folder, never a row of the list behind it.
+        if (lay.sidebar and mouse.x < lay.sidebar_width + 2) return self.click_sidebar(mouse);
+
         if (self.state.view == .list) {
-            if (mouse.y == lay.header_y) {
+            // The tab bar is the header row -- but only when there is one. With
+            // the sidebar the list starts at row 0, and that row is the first
+            // message, not a row of tabs.
+            if (lay.show_header and mouse.y == lay.header_y) {
                 if (lay.mailbox_at(mouse.x)) |mailbox| {
                     return self.apply(.{ .select_mailbox = mailbox });
                 }
@@ -879,6 +1127,161 @@ pub const Session = struct {
         if (mouse.ctrl) return self.click_link(lay, mouse);
         if (self.start_selection(lay, mouse)) return true;
         return false;
+    }
+
+    /// Whether the folder column is part of the frame. Reading a message is a
+    /// page, not a place to choose a folder from: the sidebar goes away and the
+    /// body gets its columns. Help opened over the reader follows it.
+    fn sidebar_shown(self: *Session) bool {
+        if (!self.sidebar) return false;
+        return switch (self.state.view) {
+            .reader => false,
+            .help => self.state.help_return != .reader,
+            else => true,
+        };
+    }
+
+    /// The folder a load, a refresh or a body is about: the same union the
+    /// effects carry, so there is one way to say "where".
+    const Target = MoveTarget;
+
+    /// The folder on screen, as a target.
+    fn screen_target(self: *Session) Target {
+        if (self.state.named) |ref| return .{ .named = ref };
+        return .{ .mailbox = self.state.mailbox };
+    }
+
+    /// The port's name for a folder, with the account's saved list to say what the
+    /// server calls it: "Sent" is "[Gmail]/Sent Mail" on one server and "Sent" on
+    /// the next, and the sidebar already knows which.
+    ///
+    /// Null when the folder is one of an account's own and its slot is gone: a slot
+    /// is a position in a list the server can re-send, and moving mail into Inbox
+    /// because the numbering shifted is losing mail, not being helpful.
+    fn place_for(self: *Session, account: ?core.id.AccountId, want: Target) ?core.mail_port.Place {
+        return switch (want) {
+            .mailbox => |mailbox| .{
+                .mailbox = mailbox,
+                .name = if (account) |id| self.state.folders.name_of(id, mailbox) orelse "" else "",
+            },
+            .named => |ref| if (self.state.folders.at(ref.account, ref.slot)) |entry|
+                .named(entry.name.slice())
+            else
+                null,
+        };
+    }
+
+    /// The folder each source in scope is asked for, named the way that account's
+    /// server names it. Null when one of them cannot be named at all.
+    fn places_for(self: *Session, want: Target, places: []core.mail_port.Place) ?[]const core.mail_port.Place {
+        for (self.refresh_sources[0..self.refresh_count], 0..) |source, index| {
+            places[index] = self.place_for(source.id, want) orelse return null;
+        }
+        return places[0..self.refresh_count];
+    }
+
+    fn place_of(self: *Session, want: Target) ?core.mail_port.Place {
+        return self.place_for(null, want);
+    }
+
+    /// The cache key of a folder. Never a mailbox's title for a named folder whose
+    /// slot is gone: that would file one folder's mail under another's, and the
+    /// next visit would read somebody else's messages out of the cache.
+    fn folder_key(self: *Session, want: Target) []const u8 {
+        return switch (want) {
+            .mailbox => |mailbox| mailbox.title(),
+            .named => |ref| if (self.state.folders.at(ref.account, ref.slot)) |entry|
+                entry.name.slice()
+            else
+                "",
+        };
+    }
+
+    /// Puts what came back for `target` where the list will find it.
+    fn apply_target(self: *Session, want: Target, account: core.id.AccountId, slice: []const Message) void {
+        switch (want) {
+            .mailbox => |mailbox| core.sync.replace_mailbox(&self.store, account, mailbox, slice),
+            .named => |ref| core.sync.replace_named(&self.store, account, ref.slot, slice),
+        }
+    }
+
+    /// How wide the account column has to be. One account on screen needs no
+    /// column: every row would repeat the label of the folder it sits under.
+    fn tag_width(self: *Session) u8 {
+        if (self.state.account_filter != null) return 0;
+        return self.state.accounts.max_label();
+    }
+
+    /// A click in the folder sidebar: the scope the row belongs to, and the
+    /// mailbox when the row is a folder.
+    fn click_sidebar(self: *Session, mouse: input.Mouse) bool {
+        const entry = render_mod.sidebar_hit(
+            &self.state.accounts,
+            &self.state.folders,
+            self.state.account_filter,
+            mouse.y,
+        ) orelse return false;
+        switch (entry) {
+            .all_accounts => {
+                self.select_scope(null);
+                return true;
+            },
+            .account => |id| {
+                self.select_scope(id);
+                return true;
+            },
+            .folder => |folder| {
+                self.select_scope(folder.account);
+                if (folder.mailbox) |mailbox| return self.apply(.{ .select_mailbox = mailbox });
+                const slot = folder.slot orelse return false;
+                const account = folder.account orelse return false;
+                return self.open_named(.{ .account = account, .slot = slot });
+            },
+        }
+    }
+
+    /// Opens one of the account's own folders: the list becomes its messages,
+    /// the cache answers now and the server answers on a later tick.
+    fn open_named(self: *Session, ref: core.folder.Ref) bool {
+        const entry = self.state.folders.at(ref.account, ref.slot) orelse return false;
+        // A folder that is really one of the six is a mailbox, and the caller
+        // routes it there: this is the other kind or nothing.
+        std.debug.assert(entry.canonical == null);
+        self.state.select_named(&self.store, ref);
+        self.load_cached(.{ .named = ref }, false);
+        self.remember_folder(self.state.account_filter);
+        self.start_refresh();
+        self.repaint();
+        return true;
+    }
+
+    /// The scope is the filter the list is built from. Changing it alone still
+    /// changes the list, so it rebuilds even when the mailbox stays put.
+    fn select_scope(self: *Session, account: ?core.id.AccountId) void {
+        const before = self.state.account_filter;
+        if (std.meta.eql(before, account)) return;
+        self.state.account_filter = account;
+        self.state.cursor = 0;
+        self.state.offset = 0;
+        self.settle_scope_change(before);
+        self.state.rebuild(&self.store);
+        self.needs_render = true;
+        // A scope change reads the disk and nothing else: the folders of the
+        // account just chosen are the ones the last run kept, and a key that only
+        // moves through the mail does not open a socket. `Ctrl+R` is how a stale
+        // list becomes a fresh one.
+        self.load_cached_folders();
+        self.repaint();
+    }
+
+    /// Two things happen when the scope changes, and neither can wait: the account
+    /// being left keeps the folder it was reading, and the one being opened goes
+    /// back to its own -- or to its first folder, the first time it is opened.
+    fn settle_scope_change(self: *Session, before: ?core.id.AccountId) void {
+        // The list of every account is a place of its own, and it keeps its own
+        // folder: `before` is `null` for it, which is its key.
+        self.remember_folder(before);
+        self.restore_folder();
     }
 
     /// The whole message as another program would show it: the browser for the
@@ -1083,7 +1486,9 @@ pub const Session = struct {
     fn cell_offset(self: *Session, lay: layout_mod.Layout, mouse: input.Mouse) ?u32 {
         if (self.state.view != .reader or !self.body_loaded) return null;
         if (mouse.y < lay.reader_body_y or mouse.y >= lay.reader_body_y + lay.reader_rows) return null;
-        if (mouse.x < 1) return null;
+        // The body starts one column into the content area, and the sidebar is
+        // not part of the text: both are the layout's to say.
+        if (mouse.x < lay.shift + 1) return null;
 
         const row = mouse.y - lay.reader_body_y;
         const index = self.state.reader_scroll + row;
@@ -1094,7 +1499,7 @@ pub const Session = struct {
         const line_start: u32 = @intCast(@intFromPtr(line.ptr) - @intFromPtr(text.ptr));
         // Clicking past the end of a line is clicking nothing, not clicking the
         // text that happens to follow it in the buffer.
-        const column = mouse.x - 1;
+        const column = mouse.x - lay.shift - 1;
         // Each link starts with a mark of its own, and the frame moved everything after
         // it one column right. Walk back the same way, and a click on the mark itself
         // is a click on the link.
@@ -1118,7 +1523,12 @@ pub const Session = struct {
     /// Ctrl held and the pointer over a link: it lights up, so the click is not
     /// a leap of faith.
     fn hover_link(self: *Session, mouse: input.Mouse) bool {
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar_shown(),
+        );
         // Ctrl is the question "what would this do?": without it the pointer
         // changes nothing, so reading is never disturbed.
         var found: ?core.links.Link = null;
@@ -1196,7 +1606,7 @@ pub const Session = struct {
         if (row >= lay.reader_rows) return null;
         return .{
             .line = self.state.reader_scroll + row,
-            .column = mouse.x -| 1,
+            .column = mouse.x -| lay.shift -| 1,
         };
     }
 
@@ -1208,7 +1618,12 @@ pub const Session = struct {
 
     fn extend_selection(self: *Session, mouse: input.Mouse) bool {
         var active = self.selection orelse return false;
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar_shown(),
+        );
         const cell = self.body_cell(lay, mouse) orelse return false;
         active.dragTo(cell);
         self.selection = active;
@@ -1221,7 +1636,12 @@ pub const Session = struct {
         var active = self.selection orelse return false;
         self.selection = null;
 
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar_shown(),
+        );
         if (self.body_cell(lay, mouse)) |cell| active.dragTo(cell);
 
         if (!active.isDrag()) {
@@ -1242,6 +1662,7 @@ pub const Session = struct {
     }
 
     fn click_row(self: *Session, lay: layout_mod.Layout, y: u16) bool {
+        std.debug.assert(y >= lay.body_y);
         const row = y - lay.body_y;
         const index = self.state.offset + row;
         if (index >= self.state.visible_len) return false;
@@ -1258,6 +1679,8 @@ pub const Session = struct {
     }
 
     fn apply(self: *Session, command: core.command.Command) bool {
+        const scope_before = self.state.account_filter;
+        const folder_before = self.screen_target();
         const effects = core.update.apply(&self.state, &self.store, command);
         // Leaving the reader abandons whatever body was on its way: the bytes are
         // worth caching when they land, and worth showing to nobody.
@@ -1270,8 +1693,18 @@ pub const Session = struct {
         // A scope is a preference, however it was changed: the picker or the
         // `a` key both end up here, and the next start opens where this one is.
         switch (command) {
-            .accounts_select, .cycle_account => self.remember_scope(),
-            else => {},
+            .accounts_select, .cycle_account => {
+                self.remember_scope();
+                if (!std.meta.eql(self.state.account_filter, scope_before)) {
+                    self.settle_scope_change(scope_before);
+                }
+            },
+            else => {
+                // A folder is a place in one account's list, and each keeps its own.
+                if (!core.state.same_folder(folder_before, self.screen_target())) {
+                    self.remember_folder(self.state.account_filter);
+                }
+            },
         }
         return true;
     }
@@ -1321,6 +1754,54 @@ pub const Session = struct {
         else
             "";
         scope.save(label) catch {};
+    }
+
+    /// The name a place is kept under: an account's label, or nothing at all for
+    /// the one list that is every account at once.
+    fn place_label(self: *Session, account: ?core.id.AccountId) []const u8 {
+        const id = account orelse return "";
+        return self.state.accounts.label_for(id);
+    }
+
+    /// Where a scope was in its folder list. The key is the one the cache uses: the
+    /// six by their title, a folder of an account's own by its name.
+    fn remember_folder(self: *Session, account: ?core.id.AccountId) void {
+        const label = self.place_label(account);
+        if (account != null and label.len == 0) return;
+        const target = self.screen_target();
+        // A folder of the account's own belongs to one account, and the unified
+        // list has none of them: one of the six is the only thing it can show.
+        switch (target) {
+            .named => |ref| if (account == null or ref.account != account.?) return,
+            .mailbox => {},
+        }
+        self.places.save(label, self.folder_key(target));
+    }
+
+    /// Puts the reader back where this scope was, or on its first folder the first
+    /// time: a scope that has never been opened has no place to keep.
+    fn restore_folder(self: *Session) void {
+        const account = self.state.account_filter;
+        const label = self.place_label(account);
+        var saved: core.text.Text(core.folder.name_max) = .{};
+        const remembered = (account == null or label.len > 0) and self.places.load(label, &saved);
+        if (remembered) {
+            for (core.mailbox.Mailbox.all) |mailbox| {
+                if (!std.ascii.eqlIgnoreCase(mailbox.title(), saved.slice())) continue;
+                _ = self.apply(.{ .select_mailbox = mailbox });
+                return;
+            }
+            // A folder of an account's own needs an account: the unified list has
+            // none of them, so there is nothing to look up there.
+            if (account) |id| {
+                if (self.state.folders.slot_named(id, saved.slice())) |slot| {
+                    _ = self.open_named(.{ .account = id, .slot = slot });
+                    return;
+                }
+            }
+        }
+        // First time, or a folder that is gone: the first folder of the account.
+        _ = self.apply(.{ .select_mailbox = .inbox });
     }
 
     /// The tab's progress bar, if the terminal has one.
@@ -1422,19 +1903,19 @@ pub const Session = struct {
                 // asking is all this does. `poll_body` starts the worker and the loop
                 // stays free -- Esc works while the bytes are in the air.
                 .fetch_body => |args| {
-                    self.begin_body(args.account, args.mailbox, args.id);
+                    self.begin_body(args.account, args.folder, args.id);
                     // The screen changes now, before the cache is read and before a
                     // socket is touched: a big message takes long enough to read and
                     // parse that the old page would still be up, and the reader must
                     // never show one message under another's subject.
                     self.show_body_loading();
-                    self.request_body(args.account, args.mailbox, args.id);
+                    self.request_body(args.account, args.folder, args.id);
                 },
                 // Everything else needs the one connection a refresh may be using.
                 // It waits by getting in line, not by stopping the loop: a key must
                 // answer while the accounts are being fetched.
                 else => {
-                    if (self.refreshing) {
+                    if (self.connection_busy()) {
                         self.defer_effect(effect);
                         continue;
                     }
@@ -1444,15 +1925,35 @@ pub const Session = struct {
         }
     }
 
+    /// Whether a worker is using the connection right now. The account's port is one
+    /// socket: a `STORE` on it from this thread while a refresh reads it is a read on
+    /// a file descriptor somebody else is closing, which is a panic, not a race you
+    /// can retry.
+    fn connection_busy(self: *const Session) bool {
+        return self.refreshing or self.body_in_flight or self.image_in_flight;
+    }
+
+    /// Waits for every worker to be done, for the one corner where an effect has
+    /// nowhere to be kept. The loop stops there, and only there.
+    fn wait_connection(self: *Session) void {
+        while (true) {
+            self.poll_refresh();
+            self.poll_body();
+            self.poll_images();
+            if (!self.connection_busy()) return;
+            std.atomic.spinLoopHint();
+        }
+    }
+
     /// Runs one effect that needs the connection. Blocking, and only ever called when
     /// nothing else holds it.
     fn run_effect(self: *Session, effect: core.effect.Effect) void {
         const timer = self.begin_loading();
         switch (effect) {
-            .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags),
-            .move_message => |args| self.move_message(args.account, args.id, args.to),
-            .delete_message => |args| self.delete_message(args.account, args.mailbox, args.id),
-            .empty_mailbox => |args| self.empty_mailbox(args.account, args.mailbox),
+            .sync_flags => |args| self.sync_flags(args.account, args.id, args.flags, args.folder),
+            .move_message => |args| self.move_message(args.account, args.id, args.from, args.to),
+            .delete_message => |args| self.delete_message(args.account, args.id, args.folder),
+            .empty_mailbox => |args| self.empty_mailbox(args.account, args.folder),
             .remove_account => |args| self.remove_account(args.account),
             .edit_account => |args| self.open_settings(args.account),
             .rename_account => |args| self.open_rename(args.account),
@@ -1460,7 +1961,7 @@ pub const Session = struct {
             .refresh => self.start_refresh(),
             .send => |outgoing| self.send(&outgoing),
             .edit_body => |request| self.edit_body(request.initial),
-            .fetch_body => |args| self.request_body(args.account, args.mailbox, args.id),
+            .fetch_body => |args| self.request_body(args.account, args.folder, args.id),
         }
         self.end_loading(timer);
     }
@@ -1470,7 +1971,7 @@ pub const Session = struct {
         if (self.pending_len == self.pending_effects.len) {
             // Full: there is nowhere to put it, and dropping a move or a delete would
             // be worse than waiting for one. The loop stops only in this corner.
-            self.wait_refresh();
+            self.wait_connection();
             self.run_effect(effect);
             return;
         }
@@ -1481,7 +1982,7 @@ pub const Session = struct {
 
     /// Starts the next thing that was waiting for the connection.
     fn poll_pending(self: *Session) void {
-        if (self.pending_len == 0 or self.refreshing) return;
+        if (self.pending_len == 0 or self.connection_busy()) return;
         const effect = self.pending_effects[0];
         var index: u8 = 1;
         while (index < self.pending_len) : (index += 1) {
@@ -1517,15 +2018,11 @@ pub const Session = struct {
         return true;
     }
 
-    /// A body was asked for. If it is not the message already on screen, the
-    /// page is blanked before the network is touched: the reader must never show
-    /// one message's words under another message's subject, not even for the
-    /// second the fetch takes.
-    fn begin_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
-        if (self.shown_message) |shown| {
-            if (shown.matches(account, mailbox, id)) return;
-        }
-
+    /// Everything the reader knows about the message it was showing: the bytes,
+    /// both views, the links, the headers and the pictures that came with it. One
+    /// list, because three places start a message over and they must forget the
+    /// same things -- a field left behind is a body under somebody else's subject.
+    fn forget_body(self: *Session) void {
         self.raw_len = 0;
         self.body_len = 0;
         self.shown_len = 0;
@@ -1542,6 +2039,17 @@ pub const Session = struct {
         self.wrapped = .{};
     }
 
+    /// A body was asked for. If it is not the message already on screen, the
+    /// page is blanked before the network is touched: the reader must never show
+    /// one message's words under another message's subject, not even for the
+    /// second the fetch takes.
+    fn begin_body(self: *Session, account: core.id.AccountId, folder: Target, id: MessageId) void {
+        if (self.shown_message) |shown| {
+            if (shown.matches(account, folder, id)) return;
+        }
+        self.forget_body();
+    }
+
     /// The reader is on screen with its placeholder, the footer turns and the
     /// terminal's bar goes up. Painted here, before the work.
     fn show_body_loading(self: *Session) void {
@@ -1552,20 +2060,33 @@ pub const Session = struct {
     }
 
     /// Asks for a body: the cache answers now, the network answers on a later tick.
-    fn request_body(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
+    fn request_body(self: *Session, account: core.id.AccountId, folder: Target, id: MessageId) void {
         if (self.deps.bodies) |bodies| {
-            if (bodies.load(account, mailbox, id, &self.raw) catch null) |cached| {
-                self.set_raw(account, mailbox, id, cached);
+            if (bodies.load(account, self.folder_key(folder), id, &self.raw) catch null) |cached| {
+                self.set_raw(account, folder, id, cached);
                 return;
             }
         }
         const mail = self.source_for(account) orelse {
-            self.body_failed(mailbox, id);
+            self.body_failed(account, folder, id);
             self.state.set_alert("That account is not connected", .{});
             return;
         };
-        self.body_request = .{ .account = account, .mailbox = mailbox, .id = id, .mail = mail };
-        self.body_wanted = id;
+        // Named before the request is written: an `orelse return` inside the struct
+        // literal leaves a half-written optional behind, and the tag says some.
+        const place = self.place_for(account, folder) orelse {
+            self.body_failed(account, folder, id);
+            return;
+        };
+        self.body_request = .{
+            .account = account,
+            .folder = folder,
+            .key = core.text.Text(core.folder.name_max).init(self.folder_key(folder)),
+            .place = place,
+            .id = id,
+            .mail = mail,
+        };
+        self.body_wanted = .{ .account = account, .folder = folder, .id = id };
         self.repaint();
     }
 
@@ -1593,22 +2114,27 @@ pub const Session = struct {
         self.body_job.join();
         self.body_in_flight = false;
         const request = self.body_job.request;
-        const wanted = self.body_wanted == request.id;
+        const wanted = if (self.body_wanted) |pending|
+            pending.matches(request.account, request.folder, request.id)
+        else
+            false;
         self.body_wanted = null;
 
         if (!self.body_job.ok) {
-            self.body_failed(request.mailbox, request.id);
+            self.body_failed(request.account, request.folder, request.id);
             self.state.set_alert("Could not load this message", .{});
             self.repaint();
             return;
         }
 
         const raw = self.body_job.bytes();
-        if (self.deps.bodies) |bodies| bodies.save(request.account, request.mailbox, request.id, raw) catch {};
+        // The name, not the slot: a slot is a position in the server's list, and
+        // that list can be re-listed while the bytes are in the air.
+        if (self.deps.bodies) |bodies| bodies.save(request.account, request.key.slice(), request.id, raw) catch {};
         // The reader moved on while this was in the air: the bytes are kept for next
         // time and not painted under whatever is on screen now.
         if (!wanted) return;
-        self.set_raw(request.account, request.mailbox, request.id, raw);
+        self.set_raw(request.account, request.folder, request.id, raw);
     }
 
     /// The bytes are in: the spinner has done its job.
@@ -1619,26 +2145,24 @@ pub const Session = struct {
         self.repaint();
     }
 
-    /// Nothing arrived: the reader says so rather than showing an empty page forever.
-    fn body_failed(self: *Session, mailbox: Mailbox, id: MessageId) void {
-        _ = mailbox;
+    /// Nothing arrived: the reader says so rather than showing an empty page
+    /// forever. Another folder's message with the same number is another message,
+    /// and its failure is not this one's to report.
+    fn body_failed(self: *Session, account: core.id.AccountId, folder: Target, id: MessageId) void {
         if (self.state.opened != id) return;
-        self.raw_len = 0;
-        self.body_len = 0;
-        self.shown_len = 0;
-        self.image_slot_count = 0;
-        self.html_len = 0;
+        if (self.state.opened_account != account) return;
+        if (!core.state.same_folder(self.state.opened_folder, folder)) return;
+        self.forget_body();
         self.body_loaded = true;
-        self.wrapped = .{};
         self.repaint();
     }
 
     /// Renders both views from one message: the text one (what the reader shows
     /// by default) and, when there is an HTML part, the reading view made from
     /// it. `H` switches between them without touching the network.
-    fn set_raw(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId, raw: []const u8) void {
-        self.shown_message = .{ .account = account, .mailbox = mailbox, .id = id };
-        self.html_view = false;
+    fn set_raw(self: *Session, account: core.id.AccountId, folder: Target, id: MessageId, raw: []const u8) void {
+        self.forget_body();
+        self.shown_message = .{ .account = account, .folder = folder, .id = id };
         const length = @min(raw.len, self.raw.len);
         if (raw.ptr != &self.raw) @memcpy(self.raw[0..length], raw[0..length]);
         self.raw_len = @intCast(length);
@@ -1654,10 +2178,6 @@ pub const Session = struct {
 
         self.text_link_count = core.links.scan(self.shown[0..self.shown_len], &self.text_links);
 
-        // Pictures belong to the message that carried them: "r0" in another mail
-        // is another picture, and keeping the slot hands back the previous bytes.
-        self.image_slot_count = 0;
-        self.image_painted = 0;
         if (self.hovered != null) {
             self.deps.system.write(core.osc.Pointer.default.sequence()) catch {};
         }
@@ -1665,15 +2185,9 @@ pub const Session = struct {
         self.hover_url.clear();
 
         self.details = core.headers.parse(self.raw[0..self.raw_len]);
-        self.html_len = 0;
-        self.html_ready = false;
-        self.html_link_count = 0;
-        self.html_kind_count = 0;
-        self.html_anchor_count = 0;
         self.render_html_view();
         self.prefer_html();
         self.body_loaded = true;
-        self.wrapped = .{};
         self.repaint();
     }
 
@@ -1734,26 +2248,31 @@ pub const Session = struct {
         return self.text_links[0..self.text_link_count];
     }
 
-    fn delete_message(self: *Session, account: core.id.AccountId, mailbox: Mailbox, id: MessageId) void {
+    fn delete_message(self: *Session, account: core.id.AccountId, id: MessageId, folder: Target) void {
         const mail = self.source_for(account) orelse {
             self.state.set_alert("That account is not connected", .{});
             return;
         };
-        mail.delete_message(mailbox, id) catch {
+        const place = self.place_of(folder) orelse {
+            self.state.set_alert("That folder is gone", .{});
+            return;
+        };
+        mail.delete_message(place, id) catch {
             self.state.set_alert("Could not delete on the server", .{});
             return;
         };
         self.state.set_status("Deleted for good", .{});
     }
 
-    fn empty_mailbox(self: *Session, account: ?core.id.AccountId, mailbox: Mailbox) void {
+    fn empty_mailbox(self: *Session, account: ?core.id.AccountId, folder: Target) void {
         var done: u32 = 0;
         for (self.live_sources()) |source| {
             if (account) |filter| {
                 if (source.id != filter) continue;
             }
-            source.mail.empty_mailbox(mailbox) catch {
-                self.state.set_alert("Could not empty {s} on the server", .{mailbox.title()});
+            const place = self.place_of(folder) orelse continue;
+            source.mail.empty_mailbox(place) catch {
+                self.state.set_alert("Could not empty {s} on the server", .{self.folder_key(folder)});
                 return;
             };
             done += 1;
@@ -2142,20 +2661,31 @@ pub const Session = struct {
         self.attach_new_account(new_id, saved_label);
     }
 
-    fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags) void {
+    fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags, folder: Target) void {
         const mail = self.source_for(account) orelse return;
-        mail.set_flags(id, flags) catch {
+        const place = self.place_of(folder) orelse return;
+        mail.set_flags(place, id, flags) catch {
             self.state.set_alert("Could not update the server", .{});
         };
     }
 
-    fn move_message(self: *Session, account: core.id.AccountId, id: MessageId, to: Mailbox) void {
+    fn move_message(self: *Session, account: core.id.AccountId, id: MessageId, from: MoveTarget, to: MoveTarget) void {
         const mail = self.source_for(account) orelse return;
-        mail.move_message(id, to) catch {
+        const source = self.place_of(from) orelse {
+            self.state.set_alert("That folder is gone", .{});
+            return;
+        };
+        const destination = self.place_of(to) orelse {
+            self.state.set_alert("That folder is gone", .{});
+            return;
+        };
+        mail.move_message(source, id, destination) catch {
             self.state.set_alert("Could not move the message", .{});
         };
     }
 
+    /// The port's name for a move target: a canonical mailbox, or the server's
+    /// name of one of the account's own folders.
     fn mask_bit(account_index: u8, mailbox_index: u8) u32 {
         return @as(u32, 1) << @intCast(@as(u16, account_index) * 6 + mailbox_index);
     }
@@ -2195,7 +2725,8 @@ pub const Session = struct {
         }
         defer self.splash_painter.finish();
 
-        const count = source.mail.fetch(mailbox, self.scratch) catch |err| {
+        const place = self.place_of(.{ .mailbox = mailbox }).?;
+        const count = source.mail.fetch(place, self.scratch) catch |err| {
             self.reload_failed = true;
             if (err == error.Rejected) self.reload_login_failed = true;
             return;
@@ -2204,7 +2735,7 @@ pub const Session = struct {
         self.loaded_mask |= mask_bit(index, @backingInt(mailbox));
         self.reload_loaded = true;
         if (self.deps.cache) |cache| {
-            cache.save(source.id, mailbox, self.scratch[0..count]) catch {};
+            cache.save(source.id, self.folder_key(.{ .mailbox = mailbox }), self.scratch[0..count]) catch {};
         }
     }
 
@@ -2253,7 +2784,12 @@ pub const Session = struct {
             self.screen.pristine = true;
         }
 
-        const lay = layout_mod.Layout.compute(self.size.columns, self.size.rows, self.state.accounts.max_label());
+        const lay = layout_mod.Layout.compute_with(
+            self.size.columns,
+            self.size.rows,
+            self.tag_width(),
+            self.sidebar_shown(),
+        );
         // One text for the whole frame: what the wrap saw, what the lines point into,
         // and what the picture search reads -- the same bytes, or the offsets lie.
         const body = if (self.body_loaded) self.gapped_text() else "";
@@ -2279,6 +2815,7 @@ pub const Session = struct {
             .kinds = self.html_kinds[0..self.html_kind_count],
             .selection = self.selection,
             .reduced_motion = self.deps.reduced_motion,
+            .sidebar = self.sidebar_shown(),
             .elapsed_ms = os.monotonic_ms() - self.splash_started_ms,
             .now_unix = self.now_unix,
             .columns = self.size.columns,
@@ -2468,7 +3005,7 @@ pub const Session = struct {
                 self.deps.draw_image_context,
                 png,
                 media.image_id(self.state.opened_account, self.state.opened, key),
-                column,
+                lay.shift + column,
                 lay.reader_body_y + row,
                 @min(width, lay.columns -| column),
                 height,
@@ -2515,6 +3052,8 @@ const FakeMail = struct {
     /// How many times the session asked this account for mail: the way to see
     /// that an account out of scope is never opened.
     fetch_calls: u32 = 0,
+    /// Set by the `open` thunk of the tests that pretend to open lazily.
+    opened: bool = false,
     /// What the server answered, when it answers at all.
     fetch_failure: ?core.mail_port.Error = null,
     fail_body: bool = false,
@@ -2538,6 +3077,7 @@ const FakeMail = struct {
 
     fn mail(self: *FakeMail) core.mail_port.Mail {
         return .{ .context = self, .vtable = &.{
+            .folders = foldersThunk,
             .fetch = fetchThunk,
             .fetch_body = fetchRawThunk,
             .fetch_raw = fetchRawThunk,
@@ -2548,48 +3088,54 @@ const FakeMail = struct {
         } };
     }
 
-    fn fetchThunk(context: *anyopaque, mailbox: Mailbox, out: []Message) core.mail_port.Error!u32 {
+    fn foldersThunk(context: *anyopaque, out: []core.mail_port.Listed) core.mail_port.Error!u32 {
+        const self: *FakeMail = @ptrCast(@alignCast(context));
+        if (self.gate) |gate| gate.wait();
+        return self.inner.mail().folders(out);
+    }
+
+    fn fetchThunk(context: *anyopaque, place: core.mail_port.Place, out: []Message) core.mail_port.Error!u32 {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         if (self.gate) |gate| gate.wait();
         self.fetch_calls += 1;
         if (self.fetch_failure) |failure| return failure;
-        return self.inner.mail().fetch(mailbox, out);
+        return self.inner.mail().fetch(place, out);
     }
 
     fn fetchRawThunk(
         context: *anyopaque,
-        mailbox: Mailbox,
+        place: core.mail_port.Place,
         id: MessageId,
         out: []u8,
     ) core.mail_port.Error![]const u8 {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         if (self.gate) |gate| gate.wait();
         if (self.fail_body) return error.Rejected;
-        return self.inner.mail().fetch_raw(mailbox, id, out);
+        return self.inner.mail().fetch_raw(place, id, out);
     }
 
-    fn setFlagsThunk(context: *anyopaque, id: MessageId, flags: core.message.Flags) core.mail_port.Error!void {
+    fn setFlagsThunk(context: *anyopaque, place: core.mail_port.Place, id: MessageId, flags: core.message.Flags) core.mail_port.Error!void {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         if (self.fail_flags) return error.Unavailable;
-        return self.inner.mail().set_flags(id, flags);
+        return self.inner.mail().set_flags(place, id, flags);
     }
 
-    fn deleteThunk(context: *anyopaque, mailbox: Mailbox, id: MessageId) core.mail_port.Error!void {
+    fn deleteThunk(context: *anyopaque, place: core.mail_port.Place, id: MessageId) core.mail_port.Error!void {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         if (self.fail_flags) return error.Unavailable;
-        return self.inner.mail().delete_message(mailbox, id);
+        return self.inner.mail().delete_message(place, id);
     }
 
-    fn emptyThunk(context: *anyopaque, mailbox: Mailbox) core.mail_port.Error!void {
+    fn emptyThunk(context: *anyopaque, place: core.mail_port.Place) core.mail_port.Error!void {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         if (self.fail_flags) return error.Unavailable;
-        return self.inner.mail().empty_mailbox(mailbox);
+        return self.inner.mail().empty_mailbox(place);
     }
 
-    fn moveThunk(context: *anyopaque, id: MessageId, to: Mailbox) core.mail_port.Error!void {
+    fn moveThunk(context: *anyopaque, place: core.mail_port.Place, id: MessageId, to: core.mail_port.Place) core.mail_port.Error!void {
         const self: *FakeMail = @ptrCast(@alignCast(context));
         if (self.fail_move) return error.Rejected;
-        return self.inner.mail().move_message(id, to);
+        return self.inner.mail().move_message(place, id, to);
     }
 };
 
@@ -2649,6 +3195,12 @@ const Rig = struct {
     }
 
     fn start(self: *Rig) !void {
+        try self.start_with(.{ .loading_ms = 0 });
+    }
+
+    /// Starts with what a second run of the app would already have: a saved
+    /// scope, a preference, a cache.
+    fn start_with(self: *Rig, knobs: Knobs) !void {
         try self.seed();
         self.sources[0] = .{
             .id = core.id.AccountId.from_int(1),
@@ -2656,7 +3208,9 @@ const Rig = struct {
             .from = core.address.Address.init("me@zmail.local") catch .{},
             .mail = self.fake_mail.mail(),
         };
-        try self.arm(.{ .accounts = &self.sources, .loading_ms = 0 });
+        var merged = knobs;
+        merged.accounts = &self.sources;
+        try self.arm(merged);
         // Tests exercise the steady state: the cache is empty, so boot fetches.
         // The first screen breathes while it does, one account per tick, so the rig
         // runs the ticks the real loop would until the inbox is here.
@@ -2690,7 +3244,7 @@ const Rig = struct {
 
     /// Puts `raw` in the reader, without going through the network.
     fn open_reader(self: *Rig, raw: []const u8) !void {
-        self.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
+        self.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), raw);
         self.session.state.view = .reader;
         self.session.state.opened_account = core.id.AccountId.from_int(1);
         self.session.state.opened = MessageId.from_int(1);
@@ -3165,8 +3719,8 @@ test "switching to a loaded mailbox does not refetch it" {
 
     // Inbox is loaded at startup; switching to Sent and back must not fetch
     // Inbox again.
-    rig.send("\t");
-    rig.send("\x1b[Z");
+    rig.send("J");
+    rig.send("K");
     try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
     try testing.expectEqual(@as(u32, 2), rig.session.store.len);
 }
@@ -3223,7 +3777,7 @@ test "switching to an unloaded mailbox reads the cache, not the network" {
     try testing.expectEqualStrings("cached", rig.session.store.at(0).subject.slice());
 
     // Switching paints the cached copy first (instant), then refreshes.
-    rig.send_without_settle("]");
+    rig.send_without_settle("J");
     try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
     try testing.expectEqual(@as(u32, 2), cache.loads);
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
@@ -3292,8 +3846,8 @@ test "an effect for an unknown account alerts instead of crashing" {
     _ = core.update.apply(&rig.session.state, &rig.session.store, .{ .move = .down });
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(9),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
     } }});
     try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
 }
@@ -3342,7 +3896,7 @@ test "a cached body still shows the frame before it reads the disk" {
     _ = rig.session.step();
 
     var bodies: core.bodies_port.Memory = .{};
-    try bodies.cache().save(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "cached prose");
+    try bodies.cache().save(core.id.AccountId.from_int(1), "inbox", MessageId.from_int(1), "cached prose");
     bodies.saves = 0;
     rig.session.deps.bodies = bodies.cache();
     rig.fake_system.output_len = 0;
@@ -3365,14 +3919,14 @@ test "a cached body opens without touching the network" {
     _ = rig.session.step();
 
     var bodies: core.bodies_port.Memory = .{};
-    try bodies.cache().save(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "cached prose");
+    try bodies.cache().save(core.id.AccountId.from_int(1), "inbox", MessageId.from_int(1), "cached prose");
     bodies.saves = 0;
     rig.session.deps.bodies = bodies.cache();
 
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
     } }});
     try testing.expectEqualStrings("cached prose", rig.session.body[0..rig.session.body_len]);
     try testing.expectEqual(@as(u32, 1), bodies.loads);
@@ -3390,8 +3944,8 @@ test "a fetched body is saved for next time" {
 
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
     } }});
     rig.session.settle_body_for_test();
     try testing.expectEqual(@as(u32, 1), bodies.saves);
@@ -3402,8 +3956,8 @@ test "a fetched body is saved for next time" {
     rig.session.body_loaded = false;
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
     } }});
     try testing.expectEqual(@as(u32, 2), bodies.loads);
 }
@@ -3531,6 +4085,8 @@ test "a cold boot that cannot connect says so, and shows an empty list" {
     rig.session.boot();
 
     rig.session.settle_boot_for_test();
+    // The listing the boot asked for is its own round trip, and it fails too.
+    rig.session.settle_refresh_for_test();
     try testing.expectEqualStrings("Could not load Inbox", rig.session.state.status.slice());
     try testing.expectEqual(@as(u32, 0), rig.session.store.len);
 
@@ -3548,22 +4104,22 @@ test "delete and empty reach the account's server" {
 
     rig.session.run_effects_for_test(&.{.{ .delete_message = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
     } }});
     try testing.expect(rig.fake_mail.inner.find(MessageId.from_int(1)) == null);
     try testing.expectEqualStrings("Deleted for good", rig.session.state.status.slice());
 
     rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
+        .folder = .{ .mailbox = .inbox },
     } }});
     try testing.expectEqualStrings("Trash emptied", rig.session.state.status.slice());
 
     // All accounts (null filter) is the same path with no filter.
     rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
         .account = null,
-        .mailbox = .sent,
+        .folder = .{ .mailbox = .sent },
     } }});
     try testing.expectEqual(@as(u32, 1), rig.session.deps.accounts.len);
 }
@@ -3636,6 +4192,7 @@ test "the form shows the servers the source reported" {
     defer rig.deinit();
     rig.session.boot();
     rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
 
     rig.session.run_effects_for_test(&.{.{ .edit_account = .{ .account = core.id.AccountId.from_int(1) } }});
     const form = &rig.session.settings.?;
@@ -4053,6 +4610,7 @@ test "removing an account rewrites the config and drops its mail" {
     defer rig.deinit();
     rig.session.boot();
     rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
     rig.session.render();
 
     // No port: refuse and say so.
@@ -4100,29 +4658,29 @@ test "delete and empty report server errors and unknown accounts" {
 
     rig.session.run_effects_for_test(&.{.{ .delete_message = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
     } }});
     try testing.expectEqualStrings("Could not delete on the server", rig.session.state.status.slice());
 
     rig.fake_mail.fail_flags = false;
     rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
         .account = core.id.AccountId.from_int(9),
-        .mailbox = .trash,
+        .folder = .{ .mailbox = .trash },
     } }});
     try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
 
     rig.session.run_effects_for_test(&.{.{ .delete_message = .{
         .account = core.id.AccountId.from_int(9),
-        .mailbox = .trash,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .trash },
     } }});
     try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
 
     rig.fake_mail.fail_flags = true;
     rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .trash,
+        .folder = .{ .mailbox = .trash },
     } }});
     try testing.expectEqualStrings("Could not empty Trash on the server", rig.session.state.status.slice());
     rig.fake_mail.fail_flags = false;
@@ -4130,7 +4688,7 @@ test "delete and empty report server errors and unknown accounts" {
     rig.session.source_count = 0; // no accounts connected
     rig.session.run_effects_for_test(&.{.{ .empty_mailbox = .{
         .account = null,
-        .mailbox = .trash,
+        .folder = .{ .mailbox = .trash },
     } }});
     try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
 }
@@ -4174,6 +4732,7 @@ test "an effect paints the spinner, even when it is instant" {
         .account = core.id.AccountId.from_int(1),
         .id = MessageId.from_int(1),
         .flags = .{ .unread = false },
+        .folder = .{ .mailbox = .inbox },
     } }});
 
     // A spinner frame was written before the work, and the flag is cleared.
@@ -4236,6 +4795,7 @@ test "the line of waiting effects is bounded" {
             .account = core.id.AccountId.from_int(1),
             .id = MessageId.from_int(1),
             .flags = .{ .unread = false },
+            .folder = .{ .mailbox = .inbox },
         } });
     }
     try testing.expectEqual(pending_effects_max, rig.session.pending_len);
@@ -4247,6 +4807,7 @@ test "the line of waiting effects is bounded" {
         .account = core.id.AccountId.from_int(1),
         .id = MessageId.from_int(1),
         .flags = .{ .unread = false },
+        .folder = .{ .mailbox = .inbox },
     } });
     try testing.expect(!rig.session.refreshing);
 
@@ -4254,8 +4815,8 @@ test "the line of waiting effects is bounded" {
     // when their turn comes.
     rig.session.defer_effect(.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
     } });
     rig.session.defer_effect(.{ .refresh = .{ .account = null, .mailbox = .inbox } });
 
@@ -4366,8 +4927,8 @@ test "opening another message blanks the page instead of keeping the last one" {
 
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(2),
+        .folder = .{ .mailbox = .inbox },
     } }});
 
     try testing.expectEqual(@as(u32, 0), rig.session.shown_len);
@@ -4410,8 +4971,8 @@ test "asking again for the message already on screen keeps it: no flash" {
     _ = rig.session.step();
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
     } }});
 
     try testing.expect(rig.session.body_loaded);
@@ -4432,8 +4993,8 @@ test "a body asked for during a refresh is delivered when it finishes" {
 
     rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
         .account = core.id.AccountId.from_int(1),
-        .mailbox = .inbox,
         .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
     } }});
 
     // Queued, not refused and not blocking: the reader is on screen with its
@@ -4514,7 +5075,7 @@ test "switching mailbox loads it from the server" {
     const sent = Message{ .id = MessageId.from_int(3), .account = core.id.AccountId.from_int(1), .mailbox = .sent, .timestamp_unix = 1_699_999_700 };
     try rig.fake_mail.inner.seed(&sent);
 
-    rig.send("\t");
+    rig.send("J");
     try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
 }
@@ -4788,7 +5349,7 @@ test "mail with an HTML part opens as HTML, and H goes back to the text" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), raw);
 
     // What a mail client shows: the HTML part, laid out.
     try testing.expect(rig.session.html_view);
@@ -4816,7 +5377,7 @@ test "mail with no HTML part stays on its text" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\n\njust words");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), "Content-Type: text/plain\n\njust words");
 
     try testing.expect(!rig.session.html_view);
     try testing.expectEqualStrings("just words", rig.session.reader_text());
@@ -4830,7 +5391,7 @@ test "H on a text-only message says there is no HTML" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\n\njust words");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), "Content-Type: text/plain\n\njust words");
 
     rig.send("H");
     try testing.expectEqualStrings("This message has no HTML version", rig.session.state.status.slice());
@@ -4857,7 +5418,7 @@ test "a message with an HTML part renders both views from one fetch" {
     defer rig.deinit();
     _ = rig.session.step();
     rig.session.state.view = .reader;
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), raw);
 
     // Both views come from the same fetch, and HTML is the one shown first.
     try testing.expectEqualStrings(
@@ -4879,7 +5440,7 @@ test "a link split by the wrap is still one link, and clicks anywhere on it" {
     try rig.start_with_links(&sink);
 
     const body = "see https://example.com/a/really/long/path here";
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), body);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), body);
     rig.session.state.view = .reader;
     rig.session.state.opened = MessageId.from_int(1);
     // A narrow width is what breaks the address across lines.
@@ -5031,7 +5592,7 @@ test "a message whose sender wrapped the address shows one whole link" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), raw);
     rig.session.needs_render = true;
     _ = rig.session.step();
 
@@ -5190,7 +5751,7 @@ test "an image that came with the message is painted where its marker landed" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), raw);
 
     // The marker is in the laid-out text, so the reader has somewhere to paint.
     try testing.expect(std.mem.indexOf(u8, rig.session.html_text[0..rig.session.html_len], "[IMG:logo@x]") != null);
@@ -5218,7 +5779,7 @@ test "an image with an address is not fetched, so it is not painted" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/x.png\" alt=\"Foto\"></p>");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/x.png\" alt=\"Foto\"></p>");
 
     // A socket inside a frame is a reader that stops answering keys, which is what a
     // receipt full of tracking pixels was: the marker stays in the text and `o` opens
@@ -5242,7 +5803,7 @@ test "clicking a reference number opens the address it points at" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\n\nRead [1]the docs\n\nReferences:\n\n[1] https://example.com/a\n");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), "Content-Type: text/plain\n\nRead [1]the docs\n\nReferences:\n\n[1] https://example.com/a\n");
     rig.session.needs_render = true;
     _ = rig.session.step();
 
@@ -5293,14 +5854,14 @@ test "a marker with the same name in another message is another picture" {
     // Two parts, both called "logo", with different bytes.
     rig.session.show_images = true;
     const first = "From: a@b\r\nContent-Type: text/plain\r\n\r\nhi";
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), first);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), first);
     try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
 
     // The cache remembers what the message carried…
     _ = rig.session.image_png("logo");
     try testing.expectEqual(@as(u8, 1), rig.session.image_slot_count);
     // …and forgets it as soon as another message is opened.
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), first);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), first);
     try testing.expectEqual(@as(u8, 0), rig.session.image_slot_count);
 }
 
@@ -5489,7 +6050,7 @@ test "a text body with HTML spacing entities is readable" {
     defer rig.deinit();
     _ = rig.session.step();
 
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/plain\r\n\r\n&emsp;&#8203;Hola&nbsp;mundo");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), "Content-Type: text/plain\r\n\r\n&emsp;&#8203;Hola&nbsp;mundo");
     // "&emsp;" is a space, "&#8203;" is nothing, "&nbsp;" is a space.
     try testing.expectEqualStrings(" Hola mundo", rig.session.reader_text());
 }
@@ -5583,7 +6144,7 @@ test "a big html mail with many links and pictures renders without arithmetic su
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), writer.buffered());
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), writer.buffered());
 
     rig.session.needs_render = true;
     _ = rig.session.step();
@@ -5732,7 +6293,7 @@ test "pictures are off until asked for, and then they arrive off the loop" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/logo.png\" alt=\"Logo\"></p>");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/logo.png\" alt=\"Logo\"></p>");
 
     // Off: the frame draws, the marker stays, and nobody is asked for anything.
     rig.session.needs_render = true;
@@ -5788,7 +6349,7 @@ test "a picture that is not a PNG is downloaded once and named as such" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/x.gif\"></p>");
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), "Content-Type: text/html\n\n<p><img src=\"https://example.com/x.gif\"></p>");
 
     rig.fake_system.push_input("i");
     _ = rig.session.step();
@@ -5864,7 +6425,7 @@ test "the page sent to the browser carries the pictures the message came with" {
     rig.session.state.view = .reader;
     rig.session.state.opened_account = core.id.AccountId.from_int(1);
     rig.session.state.opened = MessageId.from_int(1);
-    rig.session.set_raw(core.id.AccountId.from_int(1), .inbox, MessageId.from_int(1), raw);
+    rig.session.set_raw(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1), raw);
 
     try testing.expect(rig.session.open_external_message());
     try testing.expectEqual(@as(u8, 1), sink.calls);
@@ -6068,33 +6629,48 @@ test "a click on text that is not a link opens nothing" {
     try testing.expect(rig.session.target_at(2, &out) == null);
 }
 
-fn neverConnected(_: *anyopaque) bool {
-    return false;
+/// The same port, after `open` has been called: this is what the lazy adapter
+/// does, and what tells the session the wait is over.
+fn opensOnDemand(context: *anyopaque) bool {
+    const self: *FakeMail = @ptrCast(@alignCast(context));
+    return self.opened;
 }
 
-test "a refresh that would have to open the connection does it here, not in a worker" {
-    var rig: Rig = .{};
-    try rig.start();
-    defer rig.deinit();
-    _ = rig.session.step();
-    // Whatever boot started.
-    rig.session.settle_refresh_for_test();
+fn openOnDemand(context: *anyopaque) void {
+    const self: *FakeMail = @ptrCast(@alignCast(context));
+    self.opened = true;
+}
 
-    // The port says the connection was never opened. A worker that opened it
-    // would build the TLS stream on a thread that does not own the transport, and
-    // the process dies there.
-    var vtable = rig.fake_mail.mail().vtable.*;
-    vtable.connected = neverConnected;
-    rig.session.sources[0].mail = .{ .context = &rig.fake_mail, .vtable = &vtable };
+test "a refresh that has to open the connection does it on the worker, and the loop stays free" {
+    var rig: Rig = .{};
+    try rig.seed();
+    const account = core.id.AccountId.from_int(1);
+    var opener = LazyOpener{ .target = &rig.fake_mail };
+    rig.sources[0] = .{ .id = account, .label = "azama", .mail = opener.mail() };
+    try rig.arm(.{ .accounts = &rig.sources, .loading_ms = 0 });
+    defer rig.deinit();
+    // Out of scope at boot: never opened, which is the case that used to block.
+    rig.session.state.account_filter = core.id.AccountId.from_int(2);
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+    rig.session.state.account_filter = null;
+    try testing.expect(!opener.lazy.connected());
 
     const before = rig.fake_mail.fetch_calls;
-    rig.session.start_refresh();
+    rig.session.start_refresh_listing_for_test();
 
-    // The fetch happened on this thread: nothing is running, and the messages are
-    // here.
-    try testing.expect(!rig.session.refreshing);
+    // The call returned with the worker still going: nothing waited for the
+    // handshake on this thread.
+    try testing.expect(rig.session.refreshing);
+    rig.session.settle_refresh_for_test();
+
+    // And the worker opened it, on the way to the fetch it was asked for.
+    try testing.expect(opener.lazy.connected());
     try testing.expectEqual(before + 1, rig.fake_mail.fetch_calls);
     try testing.expect(rig.session.state.row_count() > 0);
+    opener.lazy.close();
 }
 
 test "the terminal's bar goes up while loading, stays, and comes down after" {
@@ -6233,7 +6809,7 @@ test "during the splash the only key that does anything is the one that leaves" 
     try testing.expectEqual(@as(u32, 0), rig.session.state.cursor);
     rig.send("c");
     try testing.expect(rig.session.state.compose.active == false);
-    rig.send("\t");
+    rig.send("J");
     try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
     rig.send("\x1b[<0;5;5M");
     try testing.expect(rig.session.state.booting);
@@ -6413,4 +6989,1033 @@ test "the backslash shows every header, and again puts them away" {
     rig.fake_system.push_input("\\");
     _ = rig.session.step();
     try testing.expect(!rig.session.show_details);
+}
+
+test "a click in the sidebar opens that folder, and the scopes say whose folders they are" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.sidebar = true;
+    var memory: core.scope_port.Memory = .{};
+    rig.session.deps.scope = memory.scope();
+
+    // Rows: 0 all accounts, 1 the account, 2 the rule, 3 its inbox, 4 sent.
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 4, .kind = .press, .button = .left });
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    // The folders are those of the scope on screen, so choosing one does not
+    // change the scope: the unified list is still unified.
+    try testing.expect(rig.session.state.account_filter == null);
+
+    // The account row narrows the scope and opens that account's place: the first
+    // time, its first folder.
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+    try testing.expect(rig.session.state.account_filter != null);
+
+    // And each account keeps its own: choose Sent here, leave, come back.
+    var rows: [render_mod.max_sidebar_rows]render_mod.SidebarRow = undefined;
+    const row_count = render_mod.sidebar_rows(&rig.session.state.accounts, &rig.session.state.folders, rig.session.state.account_filter, &rows);
+    var sent_y: u16 = 0;
+    for (rows[0..row_count]) |row| {
+        switch (row.entry) {
+            .folder => |folder| if (folder.mailbox == .sent) {
+                sent_y = row.y;
+            },
+            else => {},
+        }
+    }
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = sent_y, .kind = .press, .button = .left });
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    const account = rig.session.state.account_filter;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 0, .kind = .press, .button = .left });
+    try testing.expect(rig.session.state.account_filter == null);
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    try testing.expect(std.meta.eql(account, rig.session.state.account_filter));
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    // One account on screen needs no column saying which account every row is from.
+    try testing.expectEqual(@as(u8, 0), rig.session.tag_width());
+
+    // The scope row goes back to every account, and the column comes back with it.
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 0, .kind = .press, .button = .left });
+    try testing.expect(rig.session.state.account_filter == null);
+    try testing.expectEqual(rig.session.state.accounts.max_label(), rig.session.tag_width());
+    // The rule between the scopes and the folders is not a thing to click, and
+    // neither is the empty space under them.
+    try testing.expect(!rig.session.handle_mouse(.{ .x = 4, .y = 2, .kind = .press, .button = .left }));
+    try testing.expect(!rig.session.handle_mouse(.{ .x = 4, .y = 22, .kind = .press, .button = .left }));
+}
+
+test "reading a message gives the body the whole width, and the sidebar comes back" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.sidebar = true;
+    try testing.expect(rig.session.sidebar_shown());
+
+    try rig.open_reader("<p>hello</p>");
+    try testing.expectEqual(core.state.View.reader, rig.session.state.view);
+    try testing.expect(!rig.session.sidebar_shown());
+
+    // Help opened over the reader follows the reader; over the list, the list.
+    rig.session.state.view = .help;
+    rig.session.state.help_return = .reader;
+    try testing.expect(!rig.session.sidebar_shown());
+    rig.session.state.help_return = .list;
+    try testing.expect(rig.session.sidebar_shown());
+
+    // A program that switched the column off is not overruled by a view change.
+    rig.session.sidebar = false;
+    rig.session.state.view = .list;
+    try testing.expect(!rig.session.sidebar_shown());
+}
+
+test "with the sidebar on, the first row is a message, not a row of tabs" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+    try testing.expectEqual(@as(u32, 2), rig.session.state.visible_len);
+
+    // Move off the first row, so a click on it is a click and not a confirmation.
+    try testing.expect(rig.session.handle_mouse(.{ .x = 30, .y = 1, .kind = .press, .button = .left }));
+    try testing.expectEqual(@as(u32, 1), rig.session.state.cursor);
+
+    // Row 0 is the first message: the click reaches the list, not the header the
+    // sidebar took away.
+    try testing.expect(rig.session.handle_mouse(.{ .x = 30, .y = 0, .kind = .press, .button = .left }));
+    try testing.expectEqual(@as(u32, 0), rig.session.state.cursor);
+    try testing.expectEqual(core.state.View.list, rig.session.state.view);
+}
+
+test "the folders the account lists are the ones its sidebar shows" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    // The server has two folders the six do not cover.
+    _ = try rig.fake_mail.inner.add_folder("Clients", null);
+    _ = try rig.fake_mail.inner.add_folder("Invoices", null);
+    rig.session.state.folders.reset(core.id.AccountId.from_int(1));
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // Choosing the account reads the disk (nothing, here) and asks nothing of the
+    // server; `Ctrl+R` is what asks, and what the sidebar then shows.
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    rig.session.start_refresh_listing_for_test();
+    rig.session.settle_refresh_for_test();
+    // The server listed two folders, so those two are what the sidebar shows: the
+    // six are what an account has when nobody has said otherwise.
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(core.id.AccountId.from_int(1)));
+
+    // Rows: 0 all, 1 the account, 2 the rule, 3 Clients, 4 Invoices.
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 3, .kind = .press, .button = .left });
+    const named = rig.session.state.named orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(named.account, named.slot).?.name.slice());
+    // Its list is its own: no message of the canonical inbox belongs to it.
+    try testing.expectEqual(@as(u32, 0), rig.session.state.visible_len);
+}
+
+test "a folder the six do not cover keeps its own mail, and a canonical one jumps to its mailbox" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    // The server lists Sent and one folder of its own.
+    _ = try rig.fake_mail.inner.add_folder("Sent", .sent);
+    const slot = try rig.fake_mail.inner.add_folder("Clients", null);
+    rig.session.state.folders.reset(account);
+    _ = rig.session.state.folders.add(account, "Sent", .sent);
+    _ = rig.session.state.folders.add(account, "Clients", null);
+    // The folder has one message on disk: the cache is what answers first.
+    var cache: core.cache_port.Memory = .{ .load_count = 1 };
+    rig.session.deps.cache = cache.cache();
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // The scope comes first: the folders below the rule are that account's.
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    rig.session.settle_refresh_for_test();
+    try testing.expectEqual(account, rig.session.state.account_filter.?);
+
+    // The folder that is really Sent is the mailbox, not a second list.
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 3, .kind = .press, .button = .left });
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    try testing.expect(rig.session.state.named == null);
+
+    // The one the six do not cover is a list of its own: its cache key is the
+    // server's name, and what the cache had is filed under its slot.
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 4, .kind = .press, .button = .left });
+    const named = rig.session.state.named orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(slot, named.slot);
+    try testing.expectEqualStrings("Clients", rig.session.folder_key(.{ .named = named }));
+    try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
+    try testing.expectEqual(slot, rig.session.store.at(rig.session.state.visible[0]).named);
+
+    // A refresh of that folder that fails says which folder it was.
+    rig.session.settle_refresh_for_test();
+    rig.fake_mail.fetch_failure = error.Rejected;
+    rig.session.start_refresh_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Clients") != null);
+}
+
+test "a folder whose slot is gone has no name, and nothing is moved into Inbox" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // A slot is a position in the server's list, and that list can be re-sent: a
+    // stale one names nothing. Answering "Inbox" would move somebody's mail there.
+    try testing.expectEqual(
+        @as(?core.mail_port.Place, null),
+        rig.session.place_for(null, .{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 20 } }),
+    );
+    try testing.expectEqual(core.mail_port.Place.sent, rig.session.place_for(null, .{ .mailbox = .sent }).?);
+}
+
+test "the folders load in the order J walks them, and the sidebar says when they are coming" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    // A server whose list is not the order of the six: Archive first, then Inbox.
+    _ = try rig.fake_mail.inner.add_folder("Archive", .archive);
+    _ = try rig.fake_mail.inner.add_folder("INBOX", .inbox);
+    _ = try rig.fake_mail.inner.add_folder("Clients", null);
+    rig.session.state.folders.reset(account);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // Choosing the account has to ask, and says so while it waits.
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    // While the listing is in flight the sidebar still draws what it knows: it
+    // is a navigator, and an empty one is worse than a stale one.
+    var rows: [32]core.state.MoveRow = undefined;
+    try testing.expect(rig.session.state.folder_rows(&rows) > 0);
+
+    // `Ctrl+R`: the key that asks the server, and the one the sidebar follows.
+    rig.session.start_refresh_listing_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expectEqual(@as(u8, 3), rig.session.state.folders.count(account));
+
+    // The list says Archive, INBOX, Clients, and the screen is on Inbox: J goes to
+    // the row drawn under it, which is Clients.
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+    rig.send("J");
+    const named = rig.session.state.named orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(named.account, named.slot).?.display());
+
+    // K goes back the way it came.
+    rig.send("K");
+    try testing.expect(rig.session.state.named == null);
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+}
+
+test "a named folder that disappears from the list goes back to a mailbox" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    _ = try rig.fake_mail.inner.add_folder("Clients", null);
+    rig.session.state.folders.reset(account);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // Open it: the scope follows the folder, as it must.
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    rig.session.start_refresh_listing_for_test();
+    rig.session.settle_refresh_for_test();
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 3, .kind = .press, .button = .left });
+    rig.session.settle_refresh_for_test();
+    try testing.expect(rig.session.state.named != null);
+
+    // The server stops listing it: the next refresh -- the one Ctrl+R asks for,
+    // which is the one that re-lists -- has nowhere to leave the list.
+    rig.fake_mail.inner.folder_count = 0;
+    rig.session.start_refresh_listing_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expect(rig.session.state.named == null);
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+}
+
+test "the folder list comes from disk before it comes from the network" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    var cache: core.cache_port.Memory = .{};
+    try cache.cache().save_folders(account, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox, .unread = 4 },
+        .{ .name = "Clients", .title = "Clients", .unread = 2 },
+    });
+    rig.session.deps.cache = cache.cache();
+    rig.session.state.folders.reset(account);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // A scope change asks the disk first: the folders are there before the worker
+    // has even started, and the sidebar never shows the placeholder.
+    rig.session.state.account_filter = core.id.AccountId.from_int(2);
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, 1).?.display());
+    try testing.expectEqual(@as(u32, 2), rig.session.state.folders.at(account, 1).?.unread);
+}
+
+test "a message in one of the account's own folders is read from that folder" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    // The server has a folder of its own, with one message in it.
+    _ = try rig.fake_mail.inner.add_folder("Clients", null);
+    var message = Message{
+        .id = MessageId.from_int(7),
+        .account = account,
+        .named = 0,
+        .timestamp_unix = 1_699_999_000,
+    };
+    try rig.fake_mail.inner.seed(&message);
+    rig.session.state.folders.reset(account);
+    _ = rig.session.state.folders.add(account, "Clients", null);
+    var bodies: core.bodies_port.Memory = .{};
+    rig.session.deps.bodies = bodies.cache();
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // Scope, then the folder: the list is its mail.
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    rig.session.settle_refresh_for_test();
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 3, .kind = .press, .button = .left });
+    rig.session.settle_refresh_for_test();
+    try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
+
+    // Opening it reads the body *of that folder*: the UID means nothing in Inbox,
+    // and asking there is how a message in Destacados came back empty.
+    rig.send("\r");
+    rig.session.settle_body_for_test();
+    try testing.expect(rig.session.body_len > 0);
+    try testing.expectEqualStrings("Clients", bodies.last_folder.slice());
+    try testing.expectEqualStrings("Clients", rig.session.folder_key(rig.session.screen_target()));
+}
+
+test "opening another message gives the pointer back" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+    // The pointer was over a link of the message that was open; the next message
+    // has no such link, so the shape it asked for is not its to keep.
+    rig.session.hovered = .{ .start = 0, .end = 4 };
+    rig.send("\r");
+    rig.session.settle_body_for_test();
+    try testing.expect(rig.session.hovered == null);
+}
+
+test "the folders are there at startup, without a key to ask for them" {
+    var rig: Rig = .{};
+    // A cache that already knows the folders, the way the second run does.
+    var cache: core.cache_port.Memory = .{ .load_count = 1 };
+    const account = core.id.AccountId.from_int(1);
+    try cache.cache().save_folders(account, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox, .unread = 1 },
+        .{ .name = "Clients", .title = "Clients" },
+    });
+    for (0..2) |index| _ = index;
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = account,
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    rig.session.needs_boot = true;
+
+    rig.session.boot();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+
+    // No scope change, no key: the sidebar's table is already the account's.
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, 1).?.display());
+}
+
+test "the first listing is the only one: the next start reads it from disk" {
+    var cache: core.cache_port.Memory = .{};
+    const account = core.id.AccountId.from_int(1);
+
+    // First run: nothing on disk, so the boot asks once and keeps the answer.
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        rig.sources[0] = .{ .id = account, .label = "account", .mail = rig.fake_mail.mail() };
+        try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.needs_boot = true;
+        rig.session.boot();
+        rig.session.settle_boot_for_test();
+        rig.session.settle_refresh_for_test();
+        try testing.expectEqual(@as(u32, 1), cache.folder_saves);
+        try testing.expect(cache.folder_count > 0);
+    }
+
+    // Second run: the same disk. No listing, no wait -- the folders are there
+    // before the first connection is even made.
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        rig.sources[0] = .{ .id = account, .label = "account", .mail = rig.fake_mail.mail() };
+        try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.needs_boot = true;
+        rig.session.boot();
+        // Before any network work at all: the table is already the account's.
+        try testing.expectEqual(cache.folder_count, rig.session.state.folders.count(account));
+        rig.session.settle_boot_for_test();
+        // And nothing was listed again.
+        try testing.expectEqual(@as(u32, 1), cache.folder_saves);
+    }
+}
+
+test "a lazy account is listed and read without the app ever freezing" {
+    var rig: Rig = .{};
+    rig.fake_system.size_value = .{ .columns = 120, .rows = 30 };
+    try rig.seed();
+    const account = core.id.AccountId.from_int(1);
+
+    var opener = LazyOpener{ .target = &rig.fake_mail };
+    rig.sources[0] = .{ .id = account, .label = "azama", .mail = opener.mail() };
+    try rig.arm(.{ .accounts = &rig.sources, .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    rig.session.state.account_filter = core.id.AccountId.from_int(2);
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+    rig.session.state.folders.reset(account);
+    try testing.expect(!opener.lazy.connected());
+
+    // Ctrl+R: the worker opens the connection, lists, and paints while it does.
+    rig.session.state.account_filter = null;
+    rig.session.start_refresh_listing_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expect(opener.lazy.connected());
+    try testing.expectEqual(@as(u8, 6), rig.session.state.folders.count(account));
+    opener.lazy.close();
+}
+
+/// A mail port that is not connected until its first call, like the real one.
+const LazyOpener = struct {
+    target: *FakeMail,
+    lazy: core.lazy_mail = undefined,
+    opened: core.mail_port.Mail = undefined,
+
+    fn open(context: *anyopaque) core.mail_port.Error!core.mail_port.Mail {
+        const self: *LazyOpener = @ptrCast(@alignCast(context));
+        self.opened = self.target.mail();
+        return self.opened;
+    }
+
+    fn close(_: *anyopaque) void {}
+
+    fn mail(self: *LazyOpener) core.mail_port.Mail {
+        self.lazy = .{ .context = self, .open_fn = open, .close_fn = close };
+        return self.lazy.mail();
+    }
+};
+
+test "a refresh re-lists the folders, so a folder it did not know still opens" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // The server grew a folder after the sidebar's list was written.
+    for (core.mailbox.Mailbox.all) |mailbox| _ = try rig.fake_mail.inner.add_folder(mailbox.title(), mailbox);
+    _ = try rig.fake_mail.inner.add_folder("Clients", null);
+    rig.session.start_refresh_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expectEqual(@as(u8, 7), rig.session.state.folders.count(account));
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, 6).?.display());
+}
+
+test "a re-list that moves the folder on screen keeps its mail under it" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    const account = core.id.AccountId.from_int(1);
+    const fake = &rig.fake_mail.inner;
+    _ = try fake.add_folder("Clients", null);
+    _ = try fake.add_folder("Invoices", null);
+    var message = Message{
+        .id = MessageId.from_int(5),
+        .account = account,
+        .named = 1,
+        .timestamp_unix = 1_699_999_000,
+    };
+    try fake.seed(&message);
+    rig.session.state.folders.reset(account);
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    _ = rig.session.step();
+
+    // Open Invoices, which is slot 1 in that list.
+    _ = rig.session.state.folders.add(account, "Clients", null);
+    _ = rig.session.state.folders.add(account, "Invoices", null);
+    rig.session.state.select_named(&rig.session.store, .{ .account = account, .slot = 1 });
+    // A body that was asked for and has not landed yet: its answer is filed by
+    // slot, and the slot is about to move.
+    rig.session.body_request = .{
+        .account = account,
+        .folder = .{ .named = .{ .account = account, .slot = 1 } },
+        .place = .{ .mailbox = .inbox },
+        .id = MessageId.from_int(5),
+        .mail = rig.fake_mail.mail(),
+    };
+    rig.session.settle_refresh_for_test();
+
+    // The server now lists a folder *before* the two it had: every slot below it
+    // moves, and the mail already here has to move with them.
+    fake.folders[2] = .{};
+    fake.folders[2].name.set("Invoices");
+    fake.folders[1] = fake.folders[0];
+    fake.folders[0] = .{};
+    fake.folders[0].name.set("New");
+    fake.folder_count = 3;
+    // The fake server moves its own mail with the folder, as a server would.
+    fake.find(MessageId.from_int(5)).?.named = 2;
+
+    rig.session.start_refresh_listing_for_test();
+    rig.session.settle_refresh_for_test();
+
+    const named = rig.session.state.named orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u8, 2), named.slot);
+    try testing.expectEqualStrings("Invoices", rig.session.state.folders.at(account, 2).?.display());
+    // The message came along: the list under the folder is still its list.
+    try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
+    try testing.expectEqual(@as(u8, 2), rig.session.store.at(rig.session.state.visible[0]).named);
+    // The refresh that asked for the folder keeps the name it asked by, whatever
+    // happened to the slot under it.
+    try testing.expectEqualStrings("Invoices", rig.session.refresh_key.slice());
+}
+
+test "a warm start reads the folders from disk: no listing, no wait" {
+    var cache: core.cache_port.Memory = .{ .load_count = 1 };
+    const account = core.id.AccountId.from_int(1);
+    try cache.cache().save_folders(account, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox },
+        .{ .name = "Clients", .title = "Clients" },
+    });
+
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.sources[0] = .{ .id = account, .label = "account", .mail = rig.fake_mail.mail() };
+    try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.sidebar = true;
+
+    // The mail was cached: nothing boots, and the first refresh is the warm-up
+    // that opens the connection. The folders are still on disk, and reading them
+    // is not a network question.
+    rig.session.needs_boot = false;
+    rig.session.boot();
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+
+    // The first refresh asks the server as well -- that is what makes a folder
+    // work the first time -- and keeps what it hears.
+    rig.session.start_refresh_for_test();
+    rig.session.settle_refresh_for_test();
+    try testing.expect(cache.folder_saves >= 1);
+    try testing.expect(rig.session.state.folders.count(account) > 0);
+}
+
+test "an account whose folders are on disk shows them the moment it is opened" {
+    var cache: core.cache_port.Memory = .{ .load_count = 1 };
+    const account = core.id.AccountId.from_int(1);
+    try cache.cache().save_folders(account, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox },
+        .{ .name = "Clients", .title = "Clients" },
+    });
+
+    var rig: Rig = .{};
+    rig.fake_system.size_value = .{ .columns = 120, .rows = 30 };
+    try rig.seed();
+    // A connection that is not open yet: switching to it blocks for a handshake,
+    // which is exactly when the sidebar used to say "listing folders" forever.
+    var opener = LazyOpener{ .target = &rig.fake_mail };
+    rig.sources[0] = .{ .id = account, .label = "azama", .mail = opener.mail() };
+    try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    rig.session.needs_render = true;
+    rig.session.state.account_filter = core.id.AccountId.from_int(2);
+    rig.session.needs_boot = true;
+    rig.session.boot();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+    rig.session.state.folders.reset(account);
+
+    // Choose it: the handshake happens, and the disk answers the sidebar.
+    rig.session.state.account_filter = null;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    try testing.expectEqual(@as(u8, 2), rig.session.state.folders.count(account));
+    // And the folder rows are back on screen, not the "listing folders" line:
+    // the next tick paints what the sidebar knows.
+    rig.fake_system.output_len = 0;
+    _ = rig.session.step();
+    const frame_text = rig.fake_system.output_text();
+    try testing.expect(std.mem.indexOf(u8, frame_text, "Clients") != null);
+    try testing.expect(std.mem.indexOf(u8, frame_text, "listing folders") == null);
+    rig.session.settle_refresh_for_test();
+}
+
+test "Esc closes the move chooser, because in the list it is a layer and not a no-op" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+    _ = rig.session.step();
+
+    rig.send("m");
+    try testing.expect(rig.session.state.moving);
+    const before = rig.session.store.at(0).mailbox;
+
+    rig.send("\x1b");
+    // A lone ESC is ambiguous until the next read times out: that is one more tick.
+    _ = rig.session.step();
+    try testing.expect(!rig.session.state.moving);
+    // Nothing moved, and the list is where it was.
+    try testing.expectEqual(before, rig.session.store.at(0).mailbox);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "cancelled") != null);
+}
+
+test "the folders survive a restart through the file cache" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try std.fmt.bufPrint(&path_buffer, "{s}{c}{s}", .{
+        std.testing.TmpDir.parent_dir_path, std.fs.path.sep, tmp.sub_path,
+    });
+    var labels = [_]net.cache_file.Label{.{ .id = core.id.AccountId.from_int(1), .label = "azama" }};
+    const account = core.id.AccountId.from_int(1);
+
+    // First run: the server lists, and the answer has to end up on disk.
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        // A server that lists the six and one folder of its own.
+        for (core.mailbox.Mailbox.all) |mailbox| _ = try rig.fake_mail.inner.add_folder(mailbox.title(), mailbox);
+        _ = try rig.fake_mail.inner.add_folder("Clients", null);
+        var cache = net.cache_file.FileCache.init(std.testing.allocator, std.testing.io, base, &labels);
+        rig.sources[0] = .{ .id = account, .label = "azama", .mail = rig.fake_mail.mail() };
+        try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.sidebar = true;
+        rig.session.needs_boot = true;
+        rig.session.boot();
+        rig.session.settle_boot_for_test();
+        rig.session.settle_refresh_for_test();
+        try testing.expect(rig.session.state.folders.count(account) > 0);
+    }
+
+    // The file is there, and the second run is instant: no listing at all.
+    var file_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&file_buffer, "{s}/azama/folders.bin", .{base});
+    var file = try std.Io.Dir.cwd().openFile(std.testing.io, file_path, .{});
+    file.close(std.testing.io);
+
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        var cache = net.cache_file.FileCache.init(std.testing.allocator, std.testing.io, base, &labels);
+        rig.sources[0] = .{ .id = account, .label = "azama", .mail = rig.fake_mail.mail() };
+        try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.sidebar = true;
+        rig.session.needs_boot = true;
+        rig.session.boot();
+        // Before any network work: the sidebar is the account's own.
+        try testing.expectEqual(@as(u8, 7), rig.session.state.folders.count(account));
+    }
+}
+
+test "switching accounts saves the folders it had to ask for" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const base = try std.fmt.bufPrint(&path_buffer, "{s}{c}{s}", .{
+        std.testing.TmpDir.parent_dir_path, std.fs.path.sep, tmp.sub_path,
+    });
+    var labels = [_]net.cache_file.Label{
+        .{ .id = core.id.AccountId.from_int(1), .label = "gmail" },
+        .{ .id = core.id.AccountId.from_int(2), .label = "azama" },
+    };
+    const gmail = core.id.AccountId.from_int(1);
+    const azama = core.id.AccountId.from_int(2);
+
+    {
+        var rig: Rig = .{};
+        try rig.seed();
+        for (core.mailbox.Mailbox.all) |mailbox| _ = try rig.fake_mail.inner.add_folder(mailbox.title(), mailbox);
+        _ = try rig.fake_mail.inner.add_folder("Destacados", null);
+        var opener = LazyOpener{ .target = &rig.fake_mail };
+        var sources = [_]MailSource{
+            .{ .id = gmail, .label = "gmail", .mail = opener.mail() },
+            .{ .id = azama, .label = "azama", .mail = rig.fake_mail.mail() },
+        };
+        var cache = net.cache_file.FileCache.init(std.testing.allocator, std.testing.io, base, &labels);
+        try rig.arm(.{ .accounts = &sources, .cache = cache.cache(), .loading_ms = 0 });
+        defer rig.deinit();
+        rig.session.sidebar = true;
+
+        // The scope starts on azama: gmail is never opened, so its folders are
+        // unknown the moment the user switches to it.
+        rig.session.state.account_filter = azama;
+        rig.session.needs_boot = false;
+        rig.session.boot();
+        try testing.expectEqual(@as(u8, 0), rig.session.state.folders.count(gmail));
+
+        // The switch: a handshake, then the list -- and the list has to be kept.
+        rig.session.state.account_filter = null;
+        _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+        rig.session.settle_boot_for_test();
+        rig.session.settle_refresh_for_test();
+        try testing.expectEqual(gmail, rig.session.state.account_filter.?);
+        try testing.expect(rig.session.state.folders.count(gmail) > 0);
+    }
+
+    // On disk, under the account's own label.
+    var file_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const file_path = try std.fmt.bufPrint(&file_buffer, "{s}/gmail/folders.bin", .{base});
+    var file = try std.Io.Dir.cwd().openFile(std.testing.io, file_path, .{});
+    file.close(std.testing.io);
+}
+
+test "a connection that will not open fails the body, not the client" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.settle_refresh_for_test();
+
+    // A port that says it is not connected and cannot become connected: the
+    // server is unreachable, or the login is refused.
+    var body_failure_vtable = rig.fake_mail.mail().vtable.*;
+    body_failure_vtable.fetch_raw = stuckFailRaw;
+    rig.session.sources[0].mail = .{ .context = &rig.fake_mail, .vtable = &body_failure_vtable };
+
+    rig.session.body_request = .{
+        .account = core.id.AccountId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
+        .place = .{ .mailbox = .inbox },
+        .id = MessageId.from_int(1),
+        .mail = rig.session.sources[0].mail,
+    };
+    rig.session.settle_body_for_test();
+    try testing.expect(!rig.session.body_in_flight);
+    try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Could not load this message") != null);
+}
+
+fn stuckFailRaw(_: *anyopaque, _: core.mail_port.Place, _: MessageId, _: []u8) core.mail_port.Error![]const u8 {
+    return error.Unavailable;
+}
+
+test "a body that lands for another folder's message is not painted on this one" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    const account = core.id.AccountId.from_int(1);
+    // A UID means something only in the folder it came from: 1 in INBOX and 1 in
+    // "Clients" are two different messages, and the reader can move between them
+    // while the first one's body is still on the wire.
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = account,
+        .id = MessageId.from_int(1),
+        .folder = .{ .mailbox = .inbox },
+    } }});
+    rig.session.start_body_for_test();
+    try testing.expect(rig.session.body_in_flight);
+
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = account,
+        .id = MessageId.from_int(1),
+        .folder = .{ .named = .{ .account = account, .slot = 0 } },
+    } }});
+    rig.session.settle_body_for_test();
+
+    // INBOX's bytes are not the ones on screen: they are kept for the next time
+    // INBOX is opened, and the reader is not shown a message it did not ask for.
+    try testing.expect(rig.session.shown_message == null);
+    try testing.expectEqual(@as(u32, 0), rig.session.body_len);
+}
+
+test "a flag change waits for the body that is using the connection" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    const account = core.id.AccountId.from_int(1);
+    rig.session.pending_effects[0] = .{ .sync_flags = .{
+        .account = account,
+        .id = MessageId.from_int(1),
+        .flags = (core.message.Flags{}).mark_read(),
+        .folder = .{ .mailbox = .inbox },
+    } };
+    rig.session.pending_len = 1;
+
+    // A body is on the wire: the socket belongs to that worker, and a STORE on it
+    // from this thread is how a read lands on a closed file descriptor.
+    rig.session.body_in_flight = true;
+    rig.session.poll_pending();
+    try testing.expectEqual(@as(u8, 1), rig.session.pending_len);
+
+    // The body landed: the flag change goes through.
+    rig.session.body_in_flight = false;
+    rig.session.poll_pending();
+    try testing.expectEqual(@as(u8, 0), rig.session.pending_len);
+}
+
+test "an account keeps its place in its own folder list, while the app is open" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    const account = rig.session.state.accounts.items[0].id;
+
+    // The first time an account is opened it has no place to keep: its first
+    // folder, which is where a list begins.
+    _ = rig.session.apply(.cycle_account);
+    try testing.expect(std.meta.eql(account, rig.session.state.account_filter.?));
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+
+    // Where the reader leaves it, it stays -- for this run.
+    _ = rig.session.apply(.{ .select_mailbox = .sent });
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+
+    var kept: core.text.Text(core.folder.name_max) = .{};
+    try testing.expect(rig.session.places.load("account", &kept));
+    try testing.expectEqualStrings("Sent", kept.slice());
+
+    // Leave and come back: its own folder, not the one the unified list was on.
+    _ = rig.session.apply(.cycle_account);
+    try testing.expect(rig.session.state.account_filter == null);
+    _ = rig.session.apply(.cycle_account);
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+}
+
+test "a restart opens on the first folder, whatever the last run was reading" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    const account = rig.session.state.accounts.items[0].id;
+    _ = rig.session.apply(.cycle_account);
+    _ = rig.session.apply(.{ .select_mailbox = .sent });
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+
+    // A new run starts where a list starts. The scope is a preference and stays;
+    // the folder is a place, and a place is where you are, not where you were
+    // reading a week ago.
+    var second: Rig = .{};
+    try second.start();
+    defer second.deinit();
+    second.session.sidebar = true;
+    // `a` cycles the scope: with one account it goes from every account to it.
+    _ = second.session.apply(.cycle_account);
+    try testing.expect(std.meta.eql(account, second.session.state.account_filter.?));
+    try testing.expectEqual(Mailbox.inbox, second.session.state.mailbox);
+}
+
+test "all accounts keeps a folder of its own too" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.sidebar = true;
+
+    // The unified list starts on its first folder, like any other place.
+    _ = rig.session.apply(.cycle_account);
+    try testing.expect(rig.session.state.account_filter != null);
+    _ = rig.session.apply(.cycle_account);
+    try testing.expect(rig.session.state.account_filter == null);
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+
+    // Leave it on Sent, open an account and come back: Sent is where it was, and
+    // the account was on its own folder, not on this one.
+    _ = rig.session.apply(.{ .select_mailbox = .sent });
+    _ = rig.session.apply(.cycle_account);
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+    _ = rig.session.apply(.cycle_account);
+    try testing.expect(rig.session.state.account_filter == null);
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+}
+
+test "a folder of the account's own is remembered by its name" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    const slot = try rig.fake_mail.inner.add_folder("Clients", null);
+    try testing.expectEqual(@as(u8, 0), slot);
+    rig.session.start_refresh_for_test();
+    rig.session.settle_refresh_for_test();
+
+    // Open it, leave for all accounts, come back.
+    const account = rig.session.state.accounts.items[0].id;
+    _ = rig.session.open_named(.{ .account = account, .slot = 0 });
+    try testing.expect(rig.session.state.named != null);
+    _ = rig.session.apply(.cycle_account);
+    try testing.expect(rig.session.state.account_filter == null);
+    _ = rig.session.apply(.cycle_account);
+
+    // The name is what comes back: a slot is a position in the server's list, and
+    // that list can be re-listed between two visits.
+    const named = rig.session.state.named orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(named.account, named.slot).?.display());
+    var saved: core.text.Text(core.folder.name_max) = .{};
+    try testing.expect(rig.session.places.load("account", &saved));
+    try testing.expectEqualStrings("Clients", saved.slice());
+}
+
+test "the places are a run's own: none of them is written down" {
+    var places: Places = .{};
+    places.save("work", "Sent");
+    places.save("home", "Drafts");
+    places.save("", "Archive");
+
+    var out: core.text.Text(core.folder.name_max) = .{};
+    try testing.expect(places.load("work", &out));
+    try testing.expectEqualStrings("Sent", out.slice());
+    try testing.expect(places.load("", &out));
+    try testing.expectEqualStrings("Archive", out.slice());
+
+    // Saving again moves the same place instead of adding a second one.
+    places.save("work", "Junk");
+    try testing.expect(places.load("work", &out));
+    try testing.expectEqualStrings("Junk", out.slice());
+    try testing.expectEqual(@as(u8, 3), places.len);
+    try testing.expect(!places.load("other", &out));
+
+    // Full: an extra place is dropped rather than an assert in the loop.
+    var full: Places = .{};
+    var index: u8 = 0;
+    while (index < Places.entries_max) : (index += 1) {
+        var label: [4]u8 = undefined;
+        full.save(std.fmt.bufPrint(&label, "a{d}", .{index}) catch "", "Sent");
+    }
+    try testing.expectEqual(@as(u8, Places.entries_max), full.len);
+    full.save("one-too-many", "Sent");
+    try testing.expectEqual(@as(u8, Places.entries_max), full.len);
+    try testing.expect(!full.load("one-too-many", &out));
+}
+
+test "a folder whose slot is gone caches under no name, not another folder's" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // A stale slot: the list was re-listed and this one no longer exists.
+    const key = rig.session.folder_key(.{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 9 } });
+    try testing.expectEqualStrings("", key);
+    // A mailbox keeps its own name, which no server folder can shadow.
+    try testing.expectEqualStrings("Inbox", rig.session.folder_key(.{ .mailbox = .inbox }));
+}
+
+test "a body that fails for another folder's message leaves this one alone" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.session.body_loaded = true;
+    rig.session.body_len = 7;
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened_folder = .{ .mailbox = .inbox };
+
+    // The failure is for 1 in "Clients", and the reader is showing 1 in INBOX.
+    rig.session.body_failed(
+        core.id.AccountId.from_int(1),
+        .{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 0 } },
+        MessageId.from_int(1),
+    );
+    try testing.expectEqual(@as(u32, 7), rig.session.body_len);
+
+    // Its own failure clears the page, and says nothing rather than everything.
+    rig.session.body_failed(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1));
+    try testing.expectEqual(@as(u32, 0), rig.session.body_len);
+    try testing.expect(rig.session.body_loaded);
+}
+
+test "a folder that is gone refuses, and says so, instead of touching another" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    const account = core.id.AccountId.from_int(1);
+    const gone: MoveTarget = .{ .named = .{ .account = account, .slot = 20 } };
+    const id = MessageId.from_int(1);
+
+    try testing.expect(rig.session.body_request == null);
+    // The reader is on a message in that folder, so a failed body is its to report.
+    rig.session.state.opened = id;
+    rig.session.state.opened_account = account;
+    rig.session.state.opened_folder = gone;
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = account,
+        .id = id,
+        .folder = gone,
+    } }});
+    try testing.expect(rig.session.body_loaded);
+    try testing.expect(rig.session.body_request == null);
+
+    // Deleting, moving from it, moving into it: each refuses out loud.
+    rig.session.delete_message(account, id, gone);
+    try testing.expectEqualStrings("That folder is gone", rig.session.state.status.slice());
+
+    rig.session.state.status.clear();
+    rig.session.move_message(account, id, gone, .{ .mailbox = .archive });
+    try testing.expectEqualStrings("That folder is gone", rig.session.state.status.slice());
+
+    rig.session.state.status.clear();
+    rig.session.move_message(account, id, .{ .mailbox = .archive }, gone);
+    try testing.expectEqualStrings("That folder is gone", rig.session.state.status.slice());
+
+    // Emptying it skips that account and says nobody was there, rather than
+    // emptying Inbox because a number moved.
+    rig.session.state.status.clear();
+    rig.session.empty_mailbox(null, gone);
+    try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
 }
