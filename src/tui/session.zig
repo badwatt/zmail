@@ -3220,6 +3220,20 @@ const Rig = struct {
         self.session.settle_refresh_for_test();
     }
 
+    /// A rig on the heap, for the tests that start the app twice: `Session` owns
+    /// every buffer the reader can need -- a few megabytes -- and two of them on one
+    /// stack frame is a segfault where the stack is small, which is macOS.
+    fn boxed() !*Rig {
+        const rig = try testing.allocator.create(Rig);
+        rig.* = .{};
+        return rig;
+    }
+
+    fn unbox(rig: *Rig) void {
+        rig.deinit();
+        testing.allocator.destroy(rig);
+    }
+
     fn deinit(self: *Rig) void {
         self.session.deinit();
     }
@@ -3776,10 +3790,15 @@ test "switching to an unloaded mailbox reads the cache, not the network" {
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
     try testing.expectEqualStrings("cached", rig.session.store.at(0).subject.slice());
 
+    // Nothing boot started is still in the air: a refresh already out would defer
+    // this one, and the count would say one load instead of two.
+    rig.session.settle_refresh_for_test();
+    const loads_before = cache.loads;
+
     // Switching paints the cached copy first (instant), then refreshes.
     rig.send_without_settle("J");
     try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
-    try testing.expectEqual(@as(u32, 2), cache.loads);
+    try testing.expectEqual(loads_before + 1, cache.loads);
     try testing.expectEqual(@as(u32, 1), rig.session.state.visible_len);
     const row = rig.session.state.visible[0];
     try testing.expectEqualStrings("cached", rig.session.store.at(row).subject.slice());
@@ -7368,11 +7387,11 @@ test "the first listing is the only one: the next start reads it from disk" {
 
     // First run: nothing on disk, so the boot asks once and keeps the answer.
     {
-        var rig: Rig = .{};
+        const rig = try Rig.boxed();
+        defer Rig.unbox(rig);
         try rig.seed();
         rig.sources[0] = .{ .id = account, .label = "account", .mail = rig.fake_mail.mail() };
         try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
-        defer rig.deinit();
         rig.session.needs_boot = true;
         rig.session.boot();
         rig.session.settle_boot_for_test();
@@ -7384,11 +7403,11 @@ test "the first listing is the only one: the next start reads it from disk" {
     // Second run: the same disk. No listing, no wait -- the folders are there
     // before the first connection is even made.
     {
-        var rig: Rig = .{};
+        const rig = try Rig.boxed();
+        defer Rig.unbox(rig);
         try rig.seed();
         rig.sources[0] = .{ .id = account, .label = "account", .mail = rig.fake_mail.mail() };
         try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
-        defer rig.deinit();
         rig.session.needs_boot = true;
         rig.session.boot();
         // Before any network work at all: the table is already the account's.
@@ -7629,7 +7648,8 @@ test "the folders survive a restart through the file cache" {
 
     // First run: the server lists, and the answer has to end up on disk.
     {
-        var rig: Rig = .{};
+        const rig = try Rig.boxed();
+        defer Rig.unbox(rig);
         try rig.seed();
         // A server that lists the six and one folder of its own.
         for (core.mailbox.Mailbox.all) |mailbox| _ = try rig.fake_mail.inner.add_folder(mailbox.title(), mailbox);
@@ -7637,7 +7657,6 @@ test "the folders survive a restart through the file cache" {
         var cache = net.cache_file.FileCache.init(std.testing.allocator, std.testing.io, base, &labels);
         rig.sources[0] = .{ .id = account, .label = "azama", .mail = rig.fake_mail.mail() };
         try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
-        defer rig.deinit();
         rig.session.sidebar = true;
         rig.session.needs_boot = true;
         rig.session.boot();
@@ -7653,12 +7672,12 @@ test "the folders survive a restart through the file cache" {
     file.close(std.testing.io);
 
     {
-        var rig: Rig = .{};
+        const rig = try Rig.boxed();
+        defer Rig.unbox(rig);
         try rig.seed();
         var cache = net.cache_file.FileCache.init(std.testing.allocator, std.testing.io, base, &labels);
         rig.sources[0] = .{ .id = account, .label = "azama", .mail = rig.fake_mail.mail() };
         try rig.arm(.{ .accounts = &rig.sources, .cache = cache.cache(), .loading_ms = 0 });
-        defer rig.deinit();
         rig.session.sidebar = true;
         rig.session.needs_boot = true;
         rig.session.boot();
@@ -7835,9 +7854,9 @@ test "an account keeps its place in its own folder list, while the app is open" 
 }
 
 test "a restart opens on the first folder, whatever the last run was reading" {
-    var rig: Rig = .{};
+    const rig = try Rig.boxed();
+    defer Rig.unbox(rig);
     try rig.start();
-    defer rig.deinit();
     rig.session.sidebar = true;
     const account = rig.session.state.accounts.items[0].id;
     _ = rig.session.apply(.cycle_account);
@@ -7847,9 +7866,9 @@ test "a restart opens on the first folder, whatever the last run was reading" {
     // A new run starts where a list starts. The scope is a preference and stays;
     // the folder is a place, and a place is where you are, not where you were
     // reading a week ago.
-    var second: Rig = .{};
+    const second = try Rig.boxed();
+    defer Rig.unbox(second);
     try second.start();
-    defer second.deinit();
     second.session.sidebar = true;
     // `a` cycles the scope: with one account it goes from every account to it.
     _ = second.session.apply(.cycle_account);
