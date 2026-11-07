@@ -524,6 +524,9 @@ pub const Session = struct {
         // all, and the folder list kept on disk is exactly what should be on
         // screen while nothing has been opened yet.
         self.load_cached_folders();
+        // The folder the scope was reading, from disk: the first frame shows the
+        // mail of the place the last run left, not of wherever a default points.
+        self.restore_folder_quiet();
         if (!self.needs_boot) return;
         self.needs_boot = false;
         // Nothing to connect to (a broken config, no accounts): the welcome screen
@@ -1218,7 +1221,7 @@ pub const Session = struct {
         std.debug.assert(entry.canonical == null);
         self.state.select_named(&self.store, ref);
         self.load_cached(.{ .named = ref }, false);
-        self.remember_folder(ref.account);
+        self.remember_folder(self.state.account_filter);
         self.start_refresh();
         self.repaint();
         return true;
@@ -1247,7 +1250,9 @@ pub const Session = struct {
     /// being left keeps the folder it was reading, and the one being opened goes
     /// back to its own -- or to its first folder, the first time it is opened.
     fn settle_scope_change(self: *Session, before: ?core.id.AccountId) void {
-        if (before) |id| self.remember_folder(id);
+        // The list of every account is a place of its own, and it keeps its own
+        // folder: `before` is `null` for it, which is its key.
+        self.remember_folder(before);
         self.restore_folder();
     }
 
@@ -1669,7 +1674,7 @@ pub const Session = struct {
             else => {
                 // A folder is a place in one account's list, and each keeps its own.
                 if (!core.state.same_folder(folder_before, self.screen_target())) {
-                    if (self.state.account_filter) |id| self.remember_folder(id);
+                    self.remember_folder(self.state.account_filter);
                 }
             },
         }
@@ -1723,30 +1728,68 @@ pub const Session = struct {
         scope.save(label) catch {};
     }
 
-    /// Where one account was in its own folder list. The key is the one the cache
-    /// uses: the six by their title, a folder of the account's own by its name.
-    fn remember_folder(self: *Session, account: core.id.AccountId) void {
+    /// The name a place is kept under: an account's label, or nothing at all for
+    /// the one list that is every account at once.
+    fn place_label(self: *Session, account: ?core.id.AccountId) []const u8 {
+        const id = account orelse return "";
+        return self.state.accounts.label_for(id);
+    }
+
+    /// Where a scope was in its folder list. The key is the one the cache uses: the
+    /// six by their title, a folder of an account's own by its name.
+    fn remember_folder(self: *Session, account: ?core.id.AccountId) void {
         const scope = self.deps.scope orelse return;
-        const label = self.state.accounts.label_for(account);
-        if (label.len == 0) return;
+        const label = self.place_label(account);
+        if (account != null and label.len == 0) return;
         const target = self.screen_target();
-        // A folder of the account's own belongs to one account; one of the six
-        // belongs to all of them, and then it is the caller's account that names it.
-        if (target == .named and target.named.account != account) return;
+        // A folder of the account's own belongs to one account, and the unified
+        // list has none of them: one of the six is the only thing it can show.
+        switch (target) {
+            .named => |ref| if (account == null or ref.account != account.?) return,
+            .mailbox => {},
+        }
         scope.save_folder(label, self.folder_key(target)) catch {};
     }
 
-    /// Puts the reader back where this account was, or on its first folder the
-    /// first time: an account that has never been opened has no place to keep.
-    fn restore_folder(self: *Session) void {
-        const account = self.state.account_filter orelse {
-            // All accounts share one list, and it starts at its first folder.
-            _ = self.apply(.{ .select_mailbox = .inbox });
-            return;
-        };
-        const label = self.state.accounts.label_for(account);
+    /// The same, at boot, without asking for anything: boot does its own fetching,
+    /// and an effect here would start a second worker on the connection boot is
+    /// about to use.
+    fn restore_folder_quiet(self: *Session) void {
+        const account = self.state.account_filter;
+        const label = self.place_label(account);
         var saved: core.text.Text(core.folder.name_max) = .{};
-        const remembered = label.len > 0 and if (self.deps.scope) |scope|
+        const remembered = (account == null or label.len > 0) and if (self.deps.scope) |scope|
+            scope.load_folder(label, &saved)
+        else
+            false;
+        if (remembered) {
+            for (core.mailbox.Mailbox.all) |mailbox| {
+                if (!std.ascii.eqlIgnoreCase(mailbox.title(), saved.slice())) continue;
+                self.state.mailbox = mailbox;
+                self.state.named = null;
+                self.state.rebuild(&self.store);
+                return;
+            }
+            if (account) |id| {
+                if (self.state.folders.slot_named(id, saved.slice())) |slot| {
+                    self.state.select_named(&self.store, .{ .account = id, .slot = slot });
+                    return;
+                }
+            }
+        }
+        // First time, or a folder that is gone: the first folder of the scope.
+        self.state.mailbox = .inbox;
+        self.state.named = null;
+        self.state.rebuild(&self.store);
+    }
+
+    /// Puts the reader back where this scope was, or on its first folder the first
+    /// time: a scope that has never been opened has no place to keep.
+    fn restore_folder(self: *Session) void {
+        const account = self.state.account_filter;
+        const label = self.place_label(account);
+        var saved: core.text.Text(core.folder.name_max) = .{};
+        const remembered = (account == null or label.len > 0) and if (self.deps.scope) |scope|
             scope.load_folder(label, &saved)
         else
             false;
@@ -1756,9 +1799,13 @@ pub const Session = struct {
                 _ = self.apply(.{ .select_mailbox = mailbox });
                 return;
             }
-            if (self.state.folders.slot_named(account, saved.slice())) |slot| {
-                _ = self.open_named(.{ .account = account, .slot = slot });
-                return;
+            // A folder of an account's own needs an account: the unified list has
+            // none of them, so there is nothing to look up there.
+            if (account) |id| {
+                if (self.state.folders.slot_named(id, saved.slice())) |slot| {
+                    _ = self.open_named(.{ .account = id, .slot = slot });
+                    return;
+                }
             }
         }
         // First time, or a folder that is gone: the first folder of the account.
@@ -3150,6 +3197,12 @@ const Rig = struct {
     }
 
     fn start(self: *Rig) !void {
+        try self.start_with(.{ .loading_ms = 0 });
+    }
+
+    /// Starts with what a second run of the app would already have: a saved
+    /// scope, a preference, a cache.
+    fn start_with(self: *Rig, knobs: Knobs) !void {
         try self.seed();
         self.sources[0] = .{
             .id = core.id.AccountId.from_int(1),
@@ -3157,7 +3210,9 @@ const Rig = struct {
             .from = core.address.Address.init("me@zmail.local") catch .{},
             .mail = self.fake_mail.mail(),
         };
-        try self.arm(.{ .accounts = &self.sources, .loading_ms = 0 });
+        var merged = knobs;
+        merged.accounts = &self.sources;
+        try self.arm(merged);
         // Tests exercise the steady state: the cache is empty, so boot fetches.
         // The first screen breathes while it does, one account per tick, so the rig
         // runs the ticks the real loop would until the inbox is here.
@@ -7756,9 +7811,8 @@ test "an account keeps its place in its own folder list, across sessions" {
 
     {
         var rig: Rig = .{};
-        try rig.start();
+        try rig.start_with(.{ .loading_ms = 0, .scope = memory.scope() });
         defer rig.deinit();
-        rig.session.deps.scope = memory.scope();
         rig.session.sidebar = true;
         const account = rig.session.state.accounts.items[0].id;
 
@@ -7775,14 +7829,52 @@ test "an account keeps its place in its own folder list, across sessions" {
 
     {
         var rig: Rig = .{};
-        try rig.start();
+        try rig.start_with(.{ .loading_ms = 0, .scope = memory.scope() });
         defer rig.deinit();
-        rig.session.deps.scope = memory.scope();
         rig.session.sidebar = true;
 
-        // A new session opens the same account on the folder it was reading.
-        _ = rig.session.apply(.cycle_account);
+        // A new session opens the same account, on the folder it was reading: no
+        // key pressed, nothing asked for.
+        try testing.expect(rig.session.state.account_filter != null);
         try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    }
+}
+
+test "all accounts keeps a folder of its own too" {
+    var memory: core.scope_port.Memory = .{};
+
+    {
+        var rig: Rig = .{};
+        try rig.start_with(.{ .loading_ms = 0, .scope = memory.scope() });
+        defer rig.deinit();
+        rig.session.sidebar = true;
+
+        // The unified list starts on its first folder, like any other place.
+        _ = rig.session.apply(.cycle_account);
+        try testing.expect(rig.session.state.account_filter != null);
+        _ = rig.session.apply(.cycle_account);
+        try testing.expect(rig.session.state.account_filter == null);
+        try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+
+        // Leave it on Sent.
+        _ = rig.session.apply(.{ .select_mailbox = .sent });
+        try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    }
+
+    {
+        var rig: Rig = .{};
+        try rig.start_with(.{ .loading_ms = 0, .scope = memory.scope() });
+        defer rig.deinit();
+        rig.session.sidebar = true;
+        // It opens on Sent again -- the unified list's own place, not the account's.
+        try testing.expect(rig.session.state.account_filter == null);
+        try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+
+        // And the account is a place of its own: opening it gives its folder, not
+        // the one the unified list was on.
+        _ = rig.session.apply(.cycle_account);
+        try testing.expect(rig.session.state.account_filter != null);
+        try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
     }
 }
 
@@ -7807,4 +7899,45 @@ test "a folder of the account's own is remembered by its name" {
     var saved: core.text.Text(core.folder.name_max) = .{};
     try testing.expect(memory.scope().load_folder("account", &saved));
     try testing.expectEqualStrings("Clients", saved.slice());
+}
+
+test "a folder of the account's own comes back at boot, from the disk" {
+    var memory: core.scope_port.Memory = .{};
+    try memory.scope().save("account");
+    try memory.scope().save_folder("account", "Clients");
+
+    // The folders the last run kept: the table is what turns a name into a slot.
+    var cache: core.cache_port.Memory = .{ .load_count = 1 };
+    const account = core.id.AccountId.from_int(1);
+    try cache.cache().save_folders(account, &.{
+        .{ .name = "INBOX", .title = "INBOX", .canonical = .inbox },
+        .{ .name = "Clients", .title = "Clients" },
+    });
+
+    var rig: Rig = .{};
+    try rig.seed();
+    rig.sources[0] = .{
+        .id = account,
+        .label = "account",
+        .mail = rig.fake_mail.mail(),
+    };
+    try rig.arm(.{
+        .accounts = &rig.sources,
+        .cache = cache.cache(),
+        .scope = memory.scope(),
+        .loading_ms = 0,
+    });
+    defer rig.deinit();
+    rig.session.sidebar = true;
+    rig.session.needs_boot = true;
+
+    rig.session.boot();
+    rig.session.settle_boot_for_test();
+    rig.session.settle_refresh_for_test();
+
+    // Boot put the reader in the folder it was reading, without asking and without
+    // a key: a named folder, because that is what was saved.
+    const named = rig.session.state.named orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u8, 1), named.slot);
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(account, named.slot).?.display());
 }

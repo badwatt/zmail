@@ -405,11 +405,14 @@ const FileScope = struct {
         return true;
     }
 
-    /// One file per account, named after it: the folder it was reading. A label
+    /// One file per place, named after it: the folder it was reading. No label is
+    /// the list of every account at once, which gets a file of its own -- the prefix
+    /// keeps the two apart, since an account file always carries the dash. A label
     /// that cannot be a file name keeps no folder, and opens on the first one.
     fn folder_path(self: *FileScope, label: []const u8, buffer: []u8) []const u8 {
         const dir = cli.parent_dir(self.config_path);
-        if (dir.len == 0 or label.len == 0) return "";
+        if (dir.len == 0) return "";
+        if (label.len == 0) return std.fmt.bufPrint(buffer, "{s}/folder", .{dir}) catch "";
         if (std.mem.indexOfAny(u8, label, "/\\:") != null) return "";
         return std.fmt.bufPrint(buffer, "{s}/folder-{s}", .{ dir, label }) catch "";
     }
