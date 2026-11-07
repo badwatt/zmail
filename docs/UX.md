@@ -136,7 +136,7 @@ them.
 | `o` | the whole mail in a browser, pictures and all |
 | `H` | HTML view, or the plain text one. The HTML is read by zmail itself: no browser, no external program |
 | `i` | the pictures the message carries: the ones in it, and the ones it points at (fetched by `curl`, off the loop) |
-| `\` | every header: to, cc, reply-to, date, message-id |
+| `\` | every header: the account it arrived at, from, to, cc, reply-to, date, message-id |
 | `Ctrl+click` / `drag` | open the link under the pointer / select and copy |
 
 | Writing | |

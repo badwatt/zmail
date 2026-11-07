@@ -779,6 +779,7 @@ fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         .from = if (stored) |message| message.from else inputs.state.opened_from,
         .timestamp_unix = if (stored) |message| message.timestamp_unix else inputs.state.opened_time,
         .size_bytes = if (stored) |message| message.size_bytes else inputs.state.opened_size,
+        .account = if (stored) |message| message.account else inputs.state.opened_account,
     };
 
     if (header.subject.len == 0 and !inputs.state.opened.is_known()) {
@@ -808,7 +809,30 @@ const Header = struct {
     from: core.address.Address,
     timestamp_unix: i64,
     size_bytes: u32,
+    /// Which of the reader's mailboxes the message came to: the one thing a
+    /// message cannot say about itself, and the first thing a reader with two
+    /// accounts asks.
+    account: core.id.AccountId = .unknown,
 };
+
+/// The account a message arrived at, as one line: `work <me@work.example>`.
+fn account_line(inputs: Inputs, account: core.id.AccountId, buffer: []u8) []const u8 {
+    if (!account.is_known()) return "";
+    const address = inputs.state.accounts.address_for(account) orelse return "";
+    // An account that never got an address is not an address of "@".
+    if (address.local.is_empty() and address.domain.is_empty()) return "";
+    var address_buffer: [core.limits.address_max]u8 = undefined;
+    const spec = address.addr_spec(&address_buffer);
+    if (spec.len == 0) return "";
+    const label = inputs.state.accounts.label_for(account);
+    var writer = std.Io.Writer.fixed(buffer);
+    if (label.len > 0) {
+        writer.print("{s} <{s}>", .{ label, spec }) catch {};
+    } else {
+        writer.print("{s}", .{spec}) catch {};
+    }
+    return writer.buffered();
+}
 
 fn render_reader_meta(inputs: Inputs, lay: layout_mod.Layout, header: Header, out: *Screen) void {
     var date_buffer: [16]u8 = undefined;
@@ -831,8 +855,17 @@ fn render_reader_meta(inputs: Inputs, lay: layout_mod.Layout, header: Header, ou
     } else {
         writer.print("From {s}", .{address}) catch {};
     }
+    // To whom: the header when the message has one, and the mailbox it arrived at
+    // when it does not -- a notification addressed to you alone often does not, and
+    // "which of my accounts is this" is the question that remains.
+    var account_buffer: [core.limits.address_max + 32]u8 = undefined;
+    const own = account_line(inputs, header.account, &account_buffer);
     const to = inputs.details.to.slice();
-    if (to.len > 0) writer.print("  to {s}", .{to}) catch {};
+    if (to.len > 0) {
+        writer.print("  to {s}", .{to}) catch {};
+    } else if (own.len > 0) {
+        writer.print("  to {s}", .{own}) catch {};
+    }
     writer.print("  ·  {s}  ·  {s}", .{ date, size }) catch {};
     _ = out.put_text(1, lay.reader_meta_y, writer.buffered(), lay.columns - 2, inputs.theme.dim);
 }
@@ -1331,8 +1364,13 @@ fn render_details(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     out.card(rect, inputs.theme.text, inputs.theme.border);
     _ = out.put_text(rect.x + 2, rect.y, " Details ", card_width -| 4, inputs.theme.accent.with_bold());
 
+    var account_buffer: [core.limits.address_max + 32]u8 = undefined;
+    const account_id = if (stored) |message| message.account else inputs.state.opened_account;
+    const account = account_line(inputs, account_id, &account_buffer);
+
     var row: u16 = rect.y + 1;
     const rows = [_]struct { label: []const u8, value: []const u8 }{
+        .{ .label = "Account", .value = account },
         .{ .label = "From", .value = from_address },
         .{ .label = "To", .value = details.to.slice() },
         .{ .label = "Cc", .value = details.cc.slice() },
@@ -2388,7 +2426,8 @@ test "a sender with no display name is just the address, not twice" {
     }, &out);
 
     try testing.expect(screen_contains(&out, "From bob@example.com"));
-    try testing.expect(!screen_contains(&out, "<bob@example.com>"));
+    // The sender is not named twice: an address with no display name is the name.
+    try testing.expect(!screen_contains(&out, "From bob@example.com <bob@example.com>"));
 }
 
 test "the help card names every key that works" {
@@ -3165,4 +3204,77 @@ test "the reader's header is the message in the folder it was opened from" {
         try testing.expect(std.mem.indexOf(u8, out.row_text(line, &row_buffer), "tune my music") == null);
     }
     try testing.expect(found);
+}
+
+test "a message with no To header says which mailbox it arrived at" {
+    var store = try core.store.Store.init(testing.allocator, 2);
+    defer store.deinit(testing.allocator);
+
+    var message = core.message.Message{
+        .id = core.id.MessageId.from_int(1),
+        .account = core.id.AccountId.from_int(2),
+        .mailbox = .inbox,
+        .timestamp_unix = 1_700_000_000,
+        .from = try core.address.Address.init("GitHub <noreply@github.com>"),
+    };
+    message.subject.set("[GitHub] Actions minutes");
+    try store.insert(&message);
+
+    var state = State{};
+    state.accounts.add(core.id.AccountId.from_int(1), "work", try core.address.Address.init("me@work.example"), .{});
+    state.accounts.add(core.id.AccountId.from_int(2), "home", try core.address.Address.init("me@home.example"), .{});
+    state.view = .reader;
+    state.opened_account = message.account;
+    state.opened = message.id;
+    state.rebuild(&store);
+
+    var out: Screen = .{};
+    frame(.{
+        .state = &state,
+        .store = &store,
+        .theme = &Theme.dark(),
+        .body = "text",
+        .columns = 110,
+        .rows = 24,
+        .now_unix = 1_700_000_000,
+    }, &out);
+
+    // A notification addressed to you alone often has no To at all: the line says
+    // where it landed instead, which is the question a reader with two accounts has.
+    try testing.expect(screen_contains(&out, "to home <me@home.example>"));
+
+    // And with the card open, the account is a row of its own.
+    var details_copy = core.headers.Details{};
+    details_copy.to.set("me@home.example");
+    var card: Screen = .{};
+    frame(.{
+        .state = &state,
+        .store = &store,
+        .theme = &Theme.dark(),
+        .body = "text",
+        .details = &details_copy,
+        .show_details = true,
+        .columns = 110,
+        .rows = 24,
+        .now_unix = 1_700_000_000,
+    }, &card);
+    try testing.expect(screen_contains(&card, "Account"));
+    try testing.expect(screen_contains(&card, "home <me@home.example>"));
+}
+
+test "the account line says the label and the address it knows" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.accounts.add(core.id.AccountId.from_int(1), "work", try core.address.Address.init("me@work.example"), .{});
+    f.state.accounts.add(core.id.AccountId.from_int(2), "", try core.address.Address.init("me@home.example"), .{});
+    f.state.accounts.add(core.id.AccountId.from_int(3), "broken", .{}, .{});
+
+    var buffer: [core.limits.address_max + 32]u8 = undefined;
+    const inputs = Inputs{ .state = &f.state, .store = &f.store, .theme = &Theme.dark() };
+    try testing.expectEqualStrings("work <me@work.example>", account_line(inputs, core.id.AccountId.from_int(1), &buffer));
+    // No label: the address is the whole answer.
+    try testing.expectEqualStrings("me@home.example", account_line(inputs, core.id.AccountId.from_int(2), &buffer));
+    // No address and no such account: nothing rather than a guess.
+    try testing.expectEqualStrings("", account_line(inputs, core.id.AccountId.from_int(3), &buffer));
+    try testing.expectEqualStrings("", account_line(inputs, .unknown, &buffer));
 }

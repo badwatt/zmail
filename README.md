@@ -50,7 +50,7 @@ catches up.
   lists and links — no browser, no Electron, no external program.
 - **Pictures and details.** `i` shows the images a message carries or points at
   (fetched with `curl`, off the loop, composited over your own background); `\` opens
-  every header: To, Cc, Reply-To, Date, Message-ID.
+  every header: the account it arrived at, To, Cc, Reply-To, Date, Message-ID.
 - **A colour, not a palette.** zmail asks the terminal what it paints behind the text
   and derives the rest in OKLCH, so "a shade lighter" is arithmetic and contrast can be
   computed rather than hoped for.
