@@ -965,6 +965,22 @@ fn render_hover_popup(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void
 /// a speck of dust.
 pub const link_mark = "\u{1F517}";
 
+/// What marks a mailbox: an envelope.
+pub const mail_mark = "\u{1F4E7}";
+
+/// What marks a phone number: a handset. All three are two cells wide, which is
+/// what keeps the layout independent of what kind of link it is.
+pub const tel_mark = "\u{1F4DE}";
+
+/// The glyph in front of a link, by where it goes: a chain for a page, an envelope
+/// for `mailto:`, a handset for `tel:`. The text of the link is its address in the
+/// text view, which is where the question is asked.
+pub fn mark_for(address: []const u8) []const u8 {
+    if (std.ascii.startsWithIgnoreCase(address, "mailto:")) return mail_mark;
+    if (std.ascii.startsWithIgnoreCase(address, "tel:")) return tel_mark;
+    return link_mark;
+}
+
 /// How many columns the marks before `before` take on this line. The frame adds it when
 /// it draws, and the pointer subtracts it when it is clicked.
 pub fn mark_shift(inputs: Inputs, line_start: usize, line_end: usize, before: usize) u16 {
@@ -1002,11 +1018,13 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
             cursor = start;
         }
         if (end > cursor) {
-            // The mark in front of every link, on the line the link starts.
+            // The mark in front of every link, on the line the link starts: the glyph
+            // says where it goes, so a mailbox is not a page.
             const starts_here = link.start >= line_start;
             if (starts_here) {
                 const at = screen.text_columns(line[0 .. start - line_start]) + mark_shift(inputs, line_start, line_end, start);
-                _ = out.put_text(1 + at, y, link_mark, width -| at, inputs.theme.accent.with_bold());
+                const mark = mark_for(line[start - line_start .. end - line_start]);
+                _ = out.put_text(1 + at, y, mark, width -| at, inputs.theme.accent.with_bold());
             }
             draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, .link, starts_here);
             cursor = end;
@@ -3405,4 +3423,60 @@ test "the arrow stands in the column the text below starts in" {
     // The arrow is one cell but three bytes: the subject's byte offset is the cell
     // it starts in plus the two bytes the glyph adds.
     try testing.expectEqual(@as(usize, left) + ("←".len - 1), std.mem.indexOf(u8, above, subject).?);
+}
+
+test "the mark says what kind of link it is, and all of them are two cells" {
+    try testing.expectEqualStrings(link_mark, mark_for("https://example.com"));
+    try testing.expectEqualStrings(link_mark, mark_for("www.example.com"));
+    try testing.expectEqualStrings(mail_mark, mark_for("mailto:alvaro@example.com"));
+    // The scheme is case-insensitive: a sender may write `MAILTO:`.
+    try testing.expectEqualStrings(mail_mark, mark_for("MAILTO:alvaro@example.com"));
+    try testing.expectEqualStrings(tel_mark, mark_for("tel:+34985456789"));
+    try testing.expectEqualStrings(link_mark, mark_for(""));
+
+    // One width for all three: the frame places the text after the mark from a
+    // constant, and a narrower glyph would shift every line of the body.
+    const width: u16 = @intCast(screen.text_columns(link_mark));
+    try testing.expectEqual(width, screen.text_columns(mail_mark));
+    try testing.expectEqual(width, screen.text_columns(tel_mark));
+}
+
+test "a mailbox in the body wears an envelope, and a phone a handset" {
+    const body = "write to mailto:alvaro@example.com or call tel:+34985456789";
+    var wrapped: wrap.Wrapped = .{};
+    wrap.wrap(body, 60, &wrapped);
+
+    var links: [core.links.max_links]core.links.Link = undefined;
+    const count = core.links.scan(body, &links);
+
+    var canvas: Screen = .{};
+    canvas.resize(70, 4);
+    const state = State{};
+    const theme = Theme.dark();
+    var row: u16 = 0;
+    while (row < wrapped.len) : (row += 1) {
+        draw_line_with_links(.{
+            .state = &state,
+            .store = undefined,
+            .theme = &theme,
+            .body = body,
+            .links = links[0..count],
+        }, &canvas, wrapped.at(row, body), row, 66);
+    }
+
+    // The two marks are on the one wrapped line; a row is where they land.
+    var seen_mail = false;
+    var seen_tel = false;
+    var seen_chain = false;
+    var buffer: [256]u8 = undefined;
+    var line: u16 = 0;
+    while (line < canvas.rows) : (line += 1) {
+        const text = canvas.row_text(line, &buffer);
+        if (std.mem.indexOf(u8, text, mail_mark) != null) seen_mail = true;
+        if (std.mem.indexOf(u8, text, tel_mark) != null) seen_tel = true;
+        if (std.mem.indexOf(u8, text, link_mark) != null) seen_chain = true;
+    }
+    try testing.expect(seen_mail);
+    try testing.expect(seen_tel);
+    try testing.expect(!seen_chain);
 }

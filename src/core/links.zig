@@ -42,7 +42,9 @@ pub const Link = struct {
     }
 };
 
-const prefixes = [_][]const u8{ "https://", "http://", "www.", "mailto:" };
+/// Every way an address starts in the text of a message. `tel:` is a link like any
+/// other: a phone number a reader can click.
+const prefixes = [_][]const u8{ "https://", "http://", "www.", "mailto:", "tel:" };
 
 /// Records the links in `text`, in order. Returns how many were written; links
 /// beyond `out.len` are dropped rather than truncated.
@@ -459,4 +461,13 @@ test "a new address on the next line is a new link, not a continuation" {
     var buffer: [max_links]Link = undefined;
     const text = "https://a.example\nhttps://b.example";
     try testing.expectEqual(@as(usize, 2), scan(text, &buffer));
+}
+
+test "a phone number is a link, and so is a mailbox" {
+    const body = "call tel:+34985456789 or write mailto:alvaro@example.com";
+    var found: [8]Link = undefined;
+    const count = scan(body, &found);
+    try testing.expectEqual(@as(usize, 2), count);
+    try testing.expectEqualStrings("tel:+34985456789", found[0].text(body));
+    try testing.expectEqualStrings("mailto:alvaro@example.com", found[1].text(body));
 }

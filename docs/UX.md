@@ -412,6 +412,10 @@ while you drag, and on release the text goes to the clipboard and the primary
 selection through OSC 52, so no `xclip` or `wl-copy` is needed. A click without a
 drag does nothing, so a click meant for the text never launches a browser.
 
+A link wears the mark of what it is: a chain for a page, an envelope for a
+`mailto:`, a handset for a `tel:` — all three the same two cells, so the body is
+laid out the same whatever a message carries.
+
 Links are opened with Ctrl+click, in either view. In the HTML view the words of a
 link carry its address, so Ctrl+clicking "read more" goes where "read more" goes,
 and Ctrl+hovering it shows the address it points at. Nothing is written after the
