@@ -137,6 +137,7 @@ them.
 | `H` | HTML view, or the plain text one. The HTML is read by zmail itself: no browser, no external program |
 | `i` | the pictures the message carries: the ones in it, and the ones it points at (fetched by `curl`, off the loop) |
 | `\` | every header: the account it arrived at, from, to, cc, reply-to, date, message-id |
+| `←` (click) | back one layer, exactly where `Esc` goes |
 | `Ctrl+click` / `drag` | open the link under the pointer / select and copy |
 
 | Writing | |
@@ -160,6 +161,13 @@ cancels it. `↑`/`↓` still move the cursor while typing. Inside the help over
 
 `Esc` is never a quit key, and neither is `q`: it goes back one layer and at the
 top it does nothing. **`Ctrl+C` is the only way out**, from anywhere.
+
+The `←` in the top-left corner is that same step, for a mouse: a chip the width of
+three cells, a couple of columns clear of the title it shares a row with. It is drawn
+wherever there is a layer to return to — the reader, which owns the whole width, and
+the overlays that hide the sidebar — and the pointer turns into a hand over it, the
+same shape a link gets. The list is the bottom of the stack, so it draws nothing
+there, and a click on the corner does nothing either.
 
 **Quitting while something is loading.** The loop spends part of its life
 waiting: for a refresh, for a body, for the first connection of a cold start.

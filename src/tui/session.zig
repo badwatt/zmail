@@ -296,6 +296,9 @@ pub const Session = struct {
     image_slots: [image_slots_max]ImageSlot = @splat(.{}),
     /// The link under a ctrl-hovered pointer, if any.
     hovered: ?core.links.Link = null,
+    /// The pointer is over the corner: the button says so with the shape a button
+    /// gets, the same one a link has.
+    over_back: bool = false,
     /// Its address, shown in a popup while ctrl is held over it.
     hover_url: core.text.Text(core.limits.url_max) = .{},
     image_slot_count: u8 = 0,
@@ -1103,6 +1106,12 @@ pub const Session = struct {
         );
         if (lay.too_small) return false;
 
+        // The arrow in the corner does what Esc does: one click, one layer back.
+        if (mouse.x == render_mod.back_x and mouse.y == render_mod.back_y) {
+            if (!render_mod.shows_back(&self.state, self.sidebar_shown())) return false;
+            return self.apply(.dismiss);
+        }
+
         // The sidebar owns the left columns: a click there is a choice of scope
         // or folder, never a row of the list behind it.
         if (lay.sidebar and mouse.x < lay.sidebar_width + 2) return self.click_sidebar(mouse);
@@ -1522,6 +1531,15 @@ pub const Session = struct {
 
     /// Ctrl held and the pointer over a link: it lights up, so the click is not
     /// a leap of faith.
+    /// The pointer over the way back: a hand, the way every other program says
+    /// "this is something to press". Written once, when it changes.
+    fn hover_back(self: *Session, over: bool) bool {
+        if (over == self.over_back) return false;
+        self.over_back = over;
+        self.deps.system.write(core.osc.Pointer.sequence(if (over) .pointer else .default)) catch {};
+        return true;
+    }
+
     fn hover_link(self: *Session, mouse: input.Mouse) bool {
         const lay = layout_mod.Layout.compute_with(
             self.size.columns,
@@ -1529,6 +1547,20 @@ pub const Session = struct {
             self.tag_width(),
             self.sidebar_shown(),
         );
+        // The corner is a button before it is anything else: over it, the pointer
+        // is a hand even without Ctrl -- Ctrl is for links, and this is not a link.
+        const on_back = render_mod.shows_back(&self.state, self.sidebar_shown()) and
+            render_mod.in_back(mouse.x, mouse.y);
+        if (self.hover_back(on_back)) {
+            // Leaving a link to press the button: the link's popup goes with it.
+            if (on_back and self.hovered != null) {
+                self.hovered = null;
+                self.hover_url.clear();
+                self.repaint();
+            }
+            return true;
+        }
+        if (on_back) return false;
         // Ctrl is the question "what would this do?": without it the pointer
         // changes nothing, so reading is never disturbed.
         var found: ?core.links.Link = null;
@@ -1690,6 +1722,11 @@ pub const Session = struct {
         self.run_effects(effects.slice());
         self.quote_original(command);
         self.repaint();
+        // The button is gone with the view: the pointer is not still a hand over a
+        // corner that no longer does anything.
+        if (self.over_back and !render_mod.shows_back(&self.state, self.sidebar_shown())) {
+            _ = self.hover_back(false);
+        }
         // A scope is a preference, however it was changed: the picker or the
         // `a` key both end up here, and the next start opens where this one is.
         switch (command) {
@@ -8037,4 +8074,71 @@ test "a folder that is gone refuses, and says so, instead of touching another" {
     rig.session.state.status.clear();
     rig.session.empty_mailbox(null, gone);
     try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
+}
+
+test "the corner is the way back with a mouse, exactly like Esc" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    // No sidebar: the reader is the whole width, so the corner is free.
+    rig.session.sidebar = false;
+    try rig.open_reader("From: Alice <alice@example.com>\nSubject: hi\n\nbody");
+    try testing.expect(rig.session.state.view == .reader);
+
+    _ = rig.session.handle_mouse(.{ .x = render_mod.back_x, .y = render_mod.back_y, .kind = .press, .button = .left });
+    try testing.expect(rig.session.state.view == .list);
+
+    // The list has nowhere to go, and the click is not a key: nothing happens.
+    _ = rig.session.handle_mouse(.{ .x = render_mod.back_x, .y = render_mod.back_y, .kind = .press, .button = .left });
+    try testing.expect(rig.session.state.view == .list);
+    try testing.expect(!rig.session.state.quit);
+
+    // Help over the list is an overlay, and the corner is still the way out.
+    rig.fake_system.push_input("?");
+    _ = rig.session.step();
+    try testing.expect(rig.session.state.view == .help);
+    _ = rig.session.handle_mouse(.{ .x = render_mod.back_x, .y = render_mod.back_y, .kind = .press, .button = .left });
+    try testing.expect(rig.session.state.view == .list);
+}
+
+test "the pointer is a hand over the corner, and an arrow everywhere else" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    rig.session.sidebar = false;
+    try rig.open_reader("From: Alice <alice@example.com>\nSubject: hi\n\nbody");
+    rig.fake_system.output_len = 0;
+
+    // A link is lit, and the pointer is over the button: the link's popup goes with
+    // the hand, because the corner is not the mail.
+    rig.session.hovered = .{ .start = 0, .end = 3 };
+    rig.session.hover_url.set("https://example.com");
+    _ = rig.session.handle_mouse(.{ .x = render_mod.back_x + 1, .y = render_mod.back_y, .kind = .motion, .button = .none });
+    try testing.expect(rig.session.hovered == null);
+    try testing.expect(rig.session.hover_url.is_empty());
+
+    // Over the chip: the hand, written once.
+    rig.session.over_back = false;
+    _ = rig.session.handle_mouse(.{ .x = render_mod.back_x + 1, .y = render_mod.back_y, .kind = .motion, .button = .none });
+    try testing.expect(rig.session.over_back);
+    const written = rig.fake_system.output_text();
+    try testing.expect(std.mem.indexOf(u8, written, core.osc.Pointer.pointer.sequence()) != null);
+
+    // Again, without moving: nothing is written a second time.
+    rig.fake_system.output_len = 0;
+    _ = rig.session.handle_mouse(.{ .x = render_mod.back_x, .y = render_mod.back_y, .kind = .motion, .button = .none });
+    try testing.expectEqual(@as(usize, 0), rig.fake_system.output_text().len);
+
+    // Off it: back to the arrow, once.
+    _ = rig.session.handle_mouse(.{ .x = 40, .y = 10, .kind = .motion, .button = .none });
+    try testing.expect(!rig.session.over_back);
+    try testing.expect(std.mem.indexOf(u8, rig.fake_system.output_text(), core.osc.Pointer.default.sequence()) != null);
+
+    // Leaving the reader takes the button away, and the shape with it.
+    _ = rig.session.handle_mouse(.{ .x = render_mod.back_x + 1, .y = render_mod.back_y, .kind = .motion, .button = .none });
+    try testing.expect(rig.session.over_back);
+    _ = rig.session.apply(.dismiss);
+    try testing.expect(!rig.session.over_back);
 }

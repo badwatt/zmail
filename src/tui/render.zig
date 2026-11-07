@@ -226,7 +226,46 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
         },
     }
     if (inputs.state.moving) render_move(inputs, lay, out);
+    render_back(inputs, lay, out);
     render_footer(inputs, lay, out);
+}
+
+/// The way back: a chip in the corner, three cells wide -- a button rather than a
+/// glyph -- and the room after it that keeps it off the subject.
+pub const back_x: u16 = 1;
+pub const back_y: u16 = 0;
+pub const back_width: u16 = 3;
+/// Blank columns between the chip and the line it shares a row with.
+pub const back_gap: u16 = 2;
+
+/// Whether a cell is on the chip: one rectangle, so the pointer and the click
+/// cannot disagree about where the button is.
+pub fn in_back(x: u16, y: u16) bool {
+    if (y != back_y) return false;
+    return x >= back_x and x < back_x + back_width;
+}
+
+/// Where the subject starts: after the chip when there is one, at the margin when
+/// there is not.
+pub fn subject_x(state: *const State, sidebar: bool) u16 {
+    if (!shows_back(state, sidebar)) return 1;
+    return back_x + back_width + back_gap;
+}
+
+/// Whether this screen has somewhere to go back to, and a corner to say it in. The
+/// list is where the app begins; and when the sidebar is drawn, its first cell is
+/// already a thing to click -- two meanings for one cell is one too many.
+pub fn shows_back(state: *const State, sidebar: bool) bool {
+    if (state.view == .list) return false;
+    return !sidebar;
+}
+
+/// The way back with a mouse, in the corner the eye already knows: a chip with the
+/// same background a selected row has, so it reads as something to press.
+fn render_back(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
+    if (!shows_back(inputs.state, lay.sidebar)) return;
+    out.fill_rect(.{ .x = back_x, .y = back_y, .width = back_width, .height = 1 }, ' ', inputs.theme.selection);
+    out.put(back_x + back_width / 2, back_y, '←', inputs.theme.text.with_bold());
 }
 
 /// The first network load can take a second: say so, beautifully, instead of
@@ -683,7 +722,8 @@ fn render_compose(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 }
 
 fn render_compose_from(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
-    _ = out.put_text(1, 0, "From", 8, inputs.theme.dim);
+    const left = subject_x(inputs.state, lay.sidebar);
+    _ = out.put_text(left, 0, "From", 8, inputs.theme.dim);
     var buffer: [200]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const label = inputs.state.accounts.label_for(inputs.state.compose.account);
@@ -697,7 +737,7 @@ fn render_compose_from(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) voi
             address.domain.slice(),
         }) catch {};
     }
-    _ = out.put_text(10, 0, writer.buffered(), lay.columns -| 12, inputs.theme.dim);
+    _ = out.put_text(left + 9, 0, writer.buffered(), lay.columns -| (left + 11), inputs.theme.dim);
 }
 
 fn render_compose_field(
@@ -788,11 +828,12 @@ fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
         return;
     }
 
+    const left = subject_x(inputs.state, lay.sidebar);
     out.put_text_truncated(
-        1,
+        left,
         lay.reader_subject_y,
         header.subject,
-        lay.columns - 2,
+        lay.columns -| (left + 1),
         inputs.theme.text.with_bold(),
     );
     render_reader_meta(inputs, lay, header, out);
@@ -3277,4 +3318,45 @@ test "the account line says the label and the address it knows" {
     // No address and no such account: nothing rather than a guess.
     try testing.expectEqualStrings("", account_line(inputs, core.id.AccountId.from_int(3), &buffer));
     try testing.expectEqualStrings("", account_line(inputs, .unknown, &buffer));
+}
+
+test "the corner says there is a way back, and the list does not" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .reader;
+    f.state.opened = core.id.MessageId.from_int(1);
+
+    var corner: Screen = .{};
+    frame(.{
+        .state = &f.state,
+        .store = &f.store,
+        .theme = &Theme.dark(),
+        .body = "text",
+        .columns = 100,
+        .rows = 24,
+        .sidebar = false,
+        .now_unix = 1_700_000_000,
+    }, &corner);
+    var row_buffer: [64]u8 = undefined;
+    // With no sidebar the corner is nobody else's, and it says where back is: a chip
+    // with the arrow in it, a couple of columns before the subject.
+    const row = corner.row_text(back_y, &row_buffer);
+    try testing.expectEqual(@as(usize, back_x + back_width / 2), std.mem.indexOf(u8, row, "←").?);
+    // The chip is a button, and its cells are the ones the pointer and the click use.
+    try testing.expect(in_back(back_x, back_y));
+    try testing.expect(in_back(back_x + back_width - 1, back_y));
+    try testing.expect(!in_back(back_x + back_width, back_y));
+    try testing.expect(!in_back(back_x, back_y + 1));
+    try testing.expect(shows_back(&f.state, false));
+    try testing.expectEqual(back_x + back_width + back_gap, subject_x(&f.state, false));
+    // The subject itself starts after the gap, on the same row as the chip.
+    try testing.expectEqual(@as(u16, 1), subject_x(&f.state, true));
+
+    // The list is where the app begins: nothing to go back to, nothing drawn.
+    f.state.view = .list;
+    try testing.expect(!shows_back(&f.state, false));
+
+    // And with the sidebar on, its first cell is already a thing to click.
+    f.state.view = .reader;
+    try testing.expect(!shows_back(&f.state, true));
 }
