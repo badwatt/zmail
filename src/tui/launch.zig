@@ -161,7 +161,7 @@ fn run_demo(gpa: std.mem.Allocator, io: std.Io, system: SessionSystem) ?Failure 
     demo.outboxes[0] = .{ .id = core.id.AccountId.from_int(1), .outbox = demo.outbox[0].outbox() };
     demo.outboxes[1] = .{ .id = core.id.AccountId.from_int(2), .outbox = demo.outbox[1].outbox() };
 
-    return run_session(gpa, io, system, &demo.sources, &demo.outboxes, null, null, null, null, false, null);
+    return run_session(gpa, io, system, &demo.sources, &demo.outboxes, null, null, null, null, null, false, null);
 }
 
 fn run_session(
@@ -174,6 +174,7 @@ fn run_session(
     bodies: ?core.bodies_port.BodyCache,
     accounts_file: ?core.accounts_port.Accounts,
     scope: ?core.scope_port.Scope,
+    prefs: ?core.prefs_port.Preferences,
     splash: bool,
     notice: ?[]const u8,
 ) ?Failure {
@@ -193,6 +194,7 @@ fn run_session(
         .bodies = bodies,
         .accounts_file = accounts_file,
         .scope = scope,
+        .prefs = prefs,
         .notice = notice,
         .splash = splash,
         .system = system,
@@ -406,6 +408,43 @@ const FileScope = struct {
         const scope_path = self.file_path(&path_buffer);
         if (scope_path.len == 0) return error.Unavailable;
         write_file(self.io, scope_path, std.mem.trim(u8, label, " \t\r\n")) catch
+            return error.Unavailable;
+    }
+};
+
+/// What the reader chose with a key, in a one-line file next to the config:
+/// `images=on`. Not a secret -- a preference -- so it needs no sealing.
+const FilePrefs = struct {
+    io: std.Io,
+    config_path: []const u8,
+
+    fn prefs(self: *FilePrefs) core.prefs_port.Preferences {
+        return .{ .context = self, .vtable = &.{ .load_images = loadThunk, .save_images = saveThunk } };
+    }
+
+    fn file_path(self: *FilePrefs, buffer: []u8) []const u8 {
+        const dir = cli.parent_dir(self.config_path);
+        if (dir.len == 0) return "";
+        return std.fmt.bufPrint(buffer, "{s}/prefs", .{dir}) catch "";
+    }
+
+    fn loadThunk(context: *anyopaque) bool {
+        const self: *FilePrefs = @ptrCast(@alignCast(context));
+        var path_buffer: [512]u8 = undefined;
+        const path = self.file_path(&path_buffer);
+        if (path.len == 0) return false;
+
+        var buffer: [64]u8 = undefined;
+        const text = read_file(self.io, path, &buffer) catch return false;
+        return std.mem.indexOf(u8, text, "images=on") != null;
+    }
+
+    fn saveThunk(context: *anyopaque, on: bool) core.prefs_port.Error!void {
+        const self: *FilePrefs = @ptrCast(@alignCast(context));
+        var path_buffer: [512]u8 = undefined;
+        const path = self.file_path(&path_buffer);
+        if (path.len == 0) return error.Unavailable;
+        write_file(self.io, path, if (on) "images=on\n" else "images=off\n") catch
             return error.Unavailable;
     }
 };
@@ -878,7 +917,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
     // accounts and say what is wrong, so the file can be fixed in another
     // window and the client restarted.
     const file = core.config.parse(config_text) catch |err| {
-        return run_session(gpa, io, system, &.{}, &.{}, null, null, null, null, true, config_message(err));
+        return run_session(gpa, io, system, &.{}, &.{}, null, null, null, null, null, true, config_message(err));
     };
     if (file.len == 0) return .{ .message = "The config has no accounts" };
 
@@ -965,6 +1004,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
 
     var accounts_file = FileAccounts{ .io = io, .path = path, .system = system, .gpa = gpa };
     var preference = FileScope{ .io = io, .config_path = path };
+    var chosen = FilePrefs{ .io = io, .config_path = path };
     const account_port: ?core.accounts_port.Accounts = if (live.len > 0) accounts_file.accounts() else null;
 
     const outcome = run_session(
@@ -977,6 +1017,7 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         bodies,
         account_port,
         preference.scope(),
+        chosen.prefs(),
         true,
         missing_password,
     );

@@ -135,7 +135,7 @@ them.
 | `u` `s` `d` `#` | the list's actions, on the message you are reading |
 | `o` | the whole mail in a browser, pictures and all |
 | `H` | HTML view, or the plain text one. The HTML is read by zmail itself: no browser, no external program |
-| `i` | the pictures the message carries: the ones in it, and the ones it points at (fetched by `curl`, off the loop) |
+| `i` | the pictures the message carries: the ones in it, and the ones it points at (fetched by `curl`, off the loop). Works in the list too, and the choice is kept: `~/.config/zmail/prefs` says `images=on`, and the footer shows `🖼` while it is on |
 | `\` | every header: the account it arrived at, from, to, cc, reply-to, date, message-id |
 | `←` (click) | back one layer, exactly where `Esc` goes |
 | `Ctrl+click` / `drag` | open the link under the pointer / select and copy |

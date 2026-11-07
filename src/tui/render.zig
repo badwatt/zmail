@@ -58,6 +58,9 @@ pub const Inputs = struct {
     /// The folder sidebar is wanted. It is drawn only when the terminal can
     /// afford it; `Layout` decides.
     sidebar: bool = false,
+    /// Pictures are shown: a mode of the reader's, said in the footer so it is
+    /// never a guess.
+    show_images: bool = false,
     /// Milliseconds since the first screen went up. The splash's only clock: the loop
     /// and the painter thread both read it, so the mark cannot jump when one hands
     /// over to the other.
@@ -276,6 +279,11 @@ fn render_back(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 
 /// The first network load can take a second: say so, beautifully, instead of
 /// showing an empty list. Cached mail never reaches this path.
+/// The footer's picture glyph: the mode is on, and this says so without a word. Two
+/// cells -- a picture in a terminal is a wide thing -- and nothing at all when the
+/// pictures are off, because a mode nobody set does not need an announcement.
+pub const images_mark = "\u{1F5BC}\u{FE0F}";
+
 /// The footer's busy glyph: one cell, so it has to say "working" at a glance and
 /// not be a second animation competing with the breath.
 const spinner_frames = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
@@ -1259,15 +1267,25 @@ fn render_footer(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     // A refresh in progress turns the position into "⠹ 3/24": no new row, no
     // transient message, just the spinner next to where you are.
     var spinner_buffer: [32]u8 = undefined;
+    // The pictures are a mode, and a mode nobody can see is a mode nobody set: a
+    // picture beside the count says they are on, and says nothing when they are not.
+    const images = if (inputs.show_images and inputs.state.view != .compose) images_mark else "";
     var filter_buffer: [core.limits.filter_max + 24]u8 = undefined;
     const right = if (inputs.state.busy()) blk: {
         const glyph = spinner_frames[inputs.state.spinner % spinner_frames.len];
         break :blk std.fmt.bufPrint(&spinner_buffer, "{s} {s}", .{ glyph, position }) catch position;
-    } else if (filter_badge(inputs.state, &filter_buffer)) |badge| blk: {
-        // The list says it is filtered where a status message cannot cover it: a
-        // reader must never wonder why the message they are looking for is not here.
-        break :blk std.fmt.bufPrint(&spinner_buffer, "{s}  {s}", .{ badge, position }) catch position;
-    } else position;
+    } else blk: {
+        // Both badges live where a status message cannot cover them: a reader must
+        // never wonder why the message they are looking for is not here, or whether
+        // the picture they cannot see was ever asked for.
+        const badge = filter_badge(inputs.state, &filter_buffer) orelse "";
+        var parts: [96]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&parts);
+        if (badge.len > 0) writer.print("{s}  ", .{badge}) catch {};
+        if (images.len > 0) writer.print("{s}  ", .{images}) catch {};
+        writer.print("{s}", .{position}) catch {};
+        break :blk std.fmt.bufPrint(&spinner_buffer, "{s}", .{writer.buffered()}) catch position;
+    };
     const right_width = screen.text_columns(right);
     const limit = lay.columns -| (right_width + 3);
     put_right(out, lay.columns - 2, y, right, inputs.theme.dim);
@@ -3677,4 +3695,30 @@ test "a filtered list says so in the corner, next to the position" {
         if (std.mem.indexOf(u8, out.row_text(line, &buffer), "Invoice") != null) typed = true;
     }
     try testing.expect(typed);
+}
+
+test "the footer shows a picture only while pictures are being shown" {
+    var f = try fixture();
+    defer f.deinit();
+
+    var out: Screen = .{};
+    frame(f.inputs(100, 24), &out);
+    var buffer: [512]u8 = undefined;
+    const footer = out.rows - 1;
+    try testing.expect(std.mem.indexOf(u8, out.row_text(footer, &buffer), "\u{1F5BC}") == null);
+
+    // On: the glyph, once, and no words about it.
+    var on = f.inputs(100, 24);
+    on.show_images = true;
+    frame(on, &out);
+    // The cell buffer keeps the glyph and drops the variation selector -- it is zero
+    // cells wide -- so what a row says is the picture, then its second half.
+    try testing.expect(std.mem.indexOf(u8, out.row_text(footer, &buffer), "\u{1F5BC}") != null);
+    try testing.expect(std.mem.indexOf(u8, out.row_text(footer, &buffer), "images") == null);
+
+    // A draft has no pictures to show, and says nothing either way.
+    f.state.view = .compose;
+    f.state.compose.reset();
+    frame(on, &out);
+    try testing.expect(std.mem.indexOf(u8, out.row_text(footer, &buffer), "\u{1F5BC}") == null);
 }

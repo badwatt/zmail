@@ -160,6 +160,8 @@ pub const Deps = struct {
     accounts_file: ?core.accounts_port.Accounts = null,
     /// What the reader left selected: one account's label, or empty for all.
     scope: ?core.scope_port.Scope = null,
+    /// What the reader chose with a key and expects tomorrow: pictures, today.
+    prefs: ?core.prefs_port.Preferences = null,
     /// Something the user must know at start (a broken config, for instance).
     notice: ?[]const u8 = null,
     /// Paint the spinner while an effect runs, and keep it up this long (ms) so
@@ -456,6 +458,7 @@ pub const Session = struct {
         self.source_text = @splat(.{});
         for (deps.accounts) |source| self.add_source(source);
         self.restore_scope();
+        if (deps.prefs) |prefs| self.show_images = prefs.load_images();
         if (deps.notice) |notice| self.state.set_alert("{s}", .{notice});
         self.parser = .{};
         self.body_loaded = false;
@@ -1057,12 +1060,18 @@ pub const Session = struct {
         if (self.renaming) |*rename| return self.rename_key(rename, key);
         if (self.settings) |*form| return self.settings_key(form, key);
         if (key == .mouse) return self.handle_mouse(key.mouse);
-        // Views are not commands: the core has no opinion about them.
+        // Views are not commands: the core has no opinion about them. `i` is a
+        // preference of the reader, not of a message: it answers in the list too,
+        // where a message is opened next.
+        if (key == .char and self.state.mode == .normal) {
+            if (key.char == 'i' and (self.state.view == .list or self.state.view == .reader)) {
+                return self.toggle_images();
+            }
+        }
         if (key == .char and self.state.view == .reader) {
             switch (key.char) {
                 'H' => return self.toggle_html(),
                 'o' => return self.open_external_message(),
-                'i' => return self.toggle_images(),
                 '\\' => return self.toggle_details(),
                 else => {},
             }
@@ -1355,6 +1364,9 @@ pub const Session = struct {
         } else {
             self.state.set_status("Pictures hidden", .{});
         }
+        // A preference, not a mood: the next run starts with it. A failure here is
+        // not worth a word -- the pictures are on now either way.
+        if (self.deps.prefs) |prefs| prefs.save_images(self.show_images) catch {};
         self.repaint();
         return true;
     }
@@ -2855,6 +2867,7 @@ pub const Session = struct {
             .selection = self.selection,
             .reduced_motion = self.deps.reduced_motion,
             .sidebar = self.sidebar_shown(),
+            .show_images = self.show_images,
             .elapsed_ms = os.monotonic_ms() - self.splash_started_ms,
             .now_unix = self.now_unix,
             .columns = self.size.columns,
@@ -3213,6 +3226,7 @@ const Rig = struct {
         now: Now = fixed_now,
         splash: bool = true,
         scope: ?core.scope_port.Scope = null,
+        prefs: ?core.prefs_port.Preferences = null,
         accounts_file: ?core.accounts_port.Accounts = null,
         notice: ?[]const u8 = null,
     };
@@ -3228,6 +3242,7 @@ const Rig = struct {
             .splash = knobs.splash,
             .cache = knobs.cache,
             .scope = knobs.scope,
+            .prefs = knobs.prefs,
             .accounts_file = knobs.accounts_file,
             .notice = knobs.notice,
         });
@@ -8182,4 +8197,49 @@ test "an HTML mailbox reaches the screen with an envelope" {
     }
     try testing.expect(envelope);
     try testing.expect(!chain);
+}
+
+test "the pictures are a preference: `i` answers in the list and survives the run" {
+    var memory: core.prefs_port.Memory = .{};
+    var rig: Rig = .{};
+    try rig.start_with(.{ .loading_ms = 0, .prefs = memory.prefs() });
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // Off at the start, unless a run said otherwise.
+    try testing.expect(!rig.session.show_images);
+
+    // `i` in the list, with no message open, turns them on and keeps the choice.
+    rig.fake_system.push_input("i");
+    _ = rig.session.step();
+    try testing.expect(rig.session.show_images);
+    try testing.expect(memory.images);
+    try testing.expectEqual(@as(u32, 1), memory.saves);
+
+    // And again: off, and the file says so.
+    rig.fake_system.push_input("i");
+    _ = rig.session.step();
+    try testing.expect(!rig.session.show_images);
+    try testing.expect(!memory.images);
+
+    // A new run reads it, before a key is pressed.
+    memory.images = true;
+    const second = try Rig.boxed();
+    defer Rig.unbox(second);
+    try second.start_with(.{ .loading_ms = 0, .prefs = memory.prefs() });
+    try testing.expect(second.session.show_images);
+}
+
+test "`i` is a letter in the compose form, not a mode" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+    _ = rig.session.apply(.compose_new);
+    // The draft opens on the recipient: that is the field a letter goes into.
+    rig.fake_system.push_input("i");
+    _ = rig.session.step();
+
+    try testing.expect(!rig.session.show_images);
+    try testing.expectEqualStrings("i", rig.session.state.compose.to.slice());
 }

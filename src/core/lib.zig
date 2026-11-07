@@ -53,6 +53,7 @@ pub const cache = @import("cache.zig");
 pub const html = @import("html.zig");
 pub const png = @import("png.zig");
 pub const scope_port = @import("ports/scope.zig");
+pub const prefs_port = @import("ports/prefs.zig");
 pub const links = @import("links.zig");
 pub const mime = @import("mime.zig");
 pub const headers = @import("headers.zig");
@@ -85,6 +86,7 @@ test {
     _ = @import("ports/mail.zig");
     _ = @import("ports/outbox.zig");
     _ = @import("ports/cache.zig");
+    _ = @import("ports/prefs.zig");
     _ = @import("ports/bodies.zig");
     _ = @import("ports/accounts.zig");
     _ = @import("adapters/memory_mail.zig");
