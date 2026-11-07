@@ -977,14 +977,22 @@ pub const tel_mark = "\u{1F4DE}";
 
 /// The address a span goes to. An anchor's words carry theirs in `anchors`; a
 /// written-out address is its own text.
-fn address_of(inputs: Inputs, span: core.links.Link, line: []const u8, line_start: usize) []const u8 {
+fn address_of(inputs: Inputs, span: core.links.Link) []const u8 {
     for (inputs.anchors) |anchor| {
         if (anchor.span.start != span.start or anchor.span.end != span.end) continue;
         if (anchor.target.len > 0) return anchor.target;
     }
-    const start = @max(span.start, @as(u32, @intCast(line_start))) - @as(u32, @intCast(line_start));
-    const end = @min(span.end, @as(u32, @intCast(line_start + line.len))) - @as(u32, @intCast(line_start));
-    return line[@min(start, line.len)..@min(end, line.len)];
+    const end = @min(span.end, inputs.body.len);
+    if (span.start >= end) return "";
+    return inputs.body[span.start..end];
+}
+
+/// The columns a link's mark takes. A chain hugs the address -- it is part of the
+/// link the way a bullet is part of a line -- while an envelope or a handset is a
+/// symbol about the link, and one blank cell after it is what makes it read as one.
+pub fn mark_columns(mark: []const u8) u16 {
+    const glyph: u16 = @intCast(screen.text_columns(mark));
+    return if (std.mem.eql(u8, mark, link_mark)) glyph else glyph + 1;
 }
 
 /// The glyph in front of a link, by where it goes: a chain for a page, an envelope
@@ -999,12 +1007,11 @@ pub fn mark_for(address: []const u8) []const u8 {
 /// it draws, and the pointer subtracts it when it is clicked.
 pub fn mark_shift(inputs: Inputs, line_start: usize, line_end: usize, before: usize) u16 {
     var shift: u16 = 0;
-    const width: u16 = @intCast(screen.text_columns(link_mark));
     for (inputs.links) |link| {
         if (link.end <= line_start or link.start >= line_end) continue;
         // Only the line a link starts on carries its mark.
         if (link.start < line_start) continue;
-        if (link.start < before) shift += width;
+        if (link.start < before) shift += mark_columns(mark_for(address_of(inputs, link)));
     }
     return shift;
 }
@@ -1028,24 +1035,24 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
         const start = @max(link.start, line_start);
         const end = @min(link.end, line_end);
         if (start > cursor) {
-            draw_segment_kind(inputs, out, line, cursor - line_start, start - line_start, y, width, .text, false);
+            draw_segment_kind(inputs, out, line, cursor - line_start, start - line_start, y, width, .text, 0);
             cursor = start;
         }
         if (end > cursor) {
             // The mark in front of every link, on the line the link starts: the glyph
             // says where it goes, so a mailbox is not a page.
             const starts_here = link.start >= line_start;
+            const mark = mark_for(address_of(inputs, link));
             if (starts_here) {
                 const at = screen.text_columns(line[0 .. start - line_start]) + mark_shift(inputs, line_start, line_end, start);
-                const mark = mark_for(address_of(inputs, link, line, line_start));
                 _ = out.put_text(1 + at, y, mark, width -| at, inputs.theme.accent.with_bold());
             }
-            draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, .link, starts_here);
+            draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, .link, mark_columns(mark));
             cursor = end;
         }
     }
     if (cursor < line_end) {
-        draw_segment_kind(inputs, out, line, cursor - line_start, line.len, y, width, .text, false);
+        draw_segment_kind(inputs, out, line, cursor - line_start, line.len, y, width, .text, 0);
     }
     draw_hover(inputs, out, line, y, width);
 }
@@ -1096,7 +1103,8 @@ fn draw_hover(inputs: Inputs, out: *Screen, line: []const u8, y: u16, width: u16
     const end = @min(hovered.end, line_end) - line_start;
     if (end <= start) return;
     const marked = hovered.start >= line_start;
-    draw_segment_kind(inputs, out, line, start, end, y, width, .hovered, marked);
+    const mark: u16 = if (marked) mark_columns(mark_for(address_of(inputs, hovered))) else 0;
+    draw_segment_kind(inputs, out, line, start, end, y, width, .hovered, mark);
 }
 
 fn draw_segment_kind(
@@ -1108,8 +1116,8 @@ fn draw_segment_kind(
     y: u16,
     width: u16,
     kind: Segment,
-    /// Whether this segment's own mark is in front of it.
-    marked: bool,
+    /// How many columns this segment's own mark takes, if it has one.
+    marked: u16,
 ) void {
     if (end <= start) return;
     // Columns are counted from the line, which starts after the gutter, plus the marks
@@ -1119,7 +1127,7 @@ fn draw_segment_kind(
     var offset = screen.text_columns(line[0..start]);
     offset += mark_shift(inputs, line_start, line_end, line_start + start);
     // A segment that carries the link's own mark starts after it.
-    if (marked) offset += screen.text_columns(link_mark);
+    offset += marked;
     const segment = line[@min(start, line.len)..@min(end, line.len)];
     _ = out.put_text(1 + offset, y, segment, width -| offset, segment_style(inputs, kind));
 }
@@ -2378,8 +2386,8 @@ test "a link that wraps is drawn without gaps or doubled spaces" {
     const body = "https://unsubscribe.example.com/?token=abcdefghijklmnopqrstuvwxyz0123456789";
     var wrapped: wrap.Wrapped = .{};
     // As wide as the row, less the mark: the link's chain takes its columns first.
-    const mark_columns: u16 = @intCast(screen.text_columns(link_mark));
-    wrap.wrap(body, 20 - mark_columns, &wrapped);
+    const mark_width: u16 = mark_columns(link_mark);
+    wrap.wrap(body, 20 - mark_width, &wrapped);
     try testing.expect(wrapped.len > 2);
 
     var buffer: [core.links.max_links]core.links.Link = undefined;
@@ -2415,7 +2423,7 @@ test "a link that wraps is drawn without gaps or doubled spaces" {
     // The cells the chain continues into are the wide glyph's second half: the screen
     // keeps them as zero, and skips them when it writes the row.
     var pad: u16 = 0;
-    while (pad + 1 < mark_columns) : (pad += 1) writer.writeByte(0) catch unreachable;
+    while (pad + 1 < mark_width) : (pad += 1) writer.writeByte(0) catch unreachable;
     writer.writeAll(wrapped.at(0, body)) catch unreachable;
     try testing.expectEqualStrings(writer.buffered(), std.mem.trimStart(u8, first, " "));
     var second: [64]u8 = undefined;
@@ -3526,4 +3534,40 @@ test "an anchor's words wear the mark of where the anchor goes" {
     const row = canvas.row_text(0, &buffer);
     try testing.expect(std.mem.indexOf(u8, row, mail_mark) != null);
     try testing.expect(std.mem.indexOf(u8, row, link_mark) == null);
+}
+
+test "an envelope stands a cell clear of the address, a chain hugs it" {
+    const chain: u16 = mark_columns(link_mark);
+    try testing.expectEqual(chain, mark_columns(mark_for("https://example.com")));
+    // One blank cell after the symbol: it is about the link, not part of it.
+    try testing.expectEqual(chain + 1, mark_columns(mark_for("mailto:me@example.com")));
+    try testing.expectEqual(chain + 1, mark_columns(mark_for("tel:+34985456789")));
+
+    // And the body is drawn that way: the address starts one cell after the over.
+    const body = "write mailto:me@example.com";
+    var wrapped: wrap.Wrapped = .{};
+    wrap.wrap(body, 60, &wrapped);
+    var links: [core.links.max_links]core.links.Link = undefined;
+    const count = core.links.scan(body, &links);
+
+    var canvas: Screen = .{};
+    canvas.resize(70, 4);
+    const state = State{};
+    const theme = Theme.dark();
+    draw_line_with_links(.{
+        .state = &state,
+        .store = undefined,
+        .theme = &theme,
+        .body = body,
+        .links = links[0..count],
+    }, &canvas, wrapped.at(0, body), 0, 66);
+
+    var buffer: [160]u8 = undefined;
+    const row = canvas.row_text(0, &buffer);
+    const mark_at = std.mem.indexOf(u8, row, mail_mark).?;
+    const mark_end = mark_at + mail_mark.len;
+    // The wide glyph's second cell is the one the row skips, so what stands between
+    // the over and the address is exactly the one blank cell.
+    const address_at = std.mem.indexOf(u8, row, "mailto:me@example.com").?;
+    try testing.expectEqual(@as(u16, 1), screen.text_columns(row[mark_end..address_at]));
 }
