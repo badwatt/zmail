@@ -163,8 +163,9 @@ cancels it. `↑`/`↓` still move the cursor while typing. Inside the help over
 top it does nothing. **`Ctrl+C` is the only way out**, from anywhere.
 
 The `←` in the top-left corner is that same step, for a mouse: a button three cells
-wide — the arrow, and a cell of slack on either side so it is easy to hit — a couple
-of columns clear of the title it shares a row with. It is drawn
+wide — the arrow, and a cell of slack on either side so it is easy to hit — standing
+in the column the text under it begins in, and a couple of columns clear of the title
+it shares a row with. It is drawn
 wherever there is a layer to return to — the reader, which owns the whole width, and
 the overlays that hide the sidebar — and the pointer turns into a hand over it, the
 same shape a link gets. The list is the bottom of the stack, so it draws nothing

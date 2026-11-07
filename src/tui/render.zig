@@ -230,9 +230,9 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
     render_footer(inputs, lay, out);
 }
 
-/// The way back: a chip in the corner, three cells wide -- a button rather than a
-/// glyph -- and the room after it that keeps it off the subject.
-pub const back_x: u16 = 1;
+/// The way back: a button in the corner, three cells wide, whose glyph sits in the
+/// column the text below starts in -- left edge, first character, aligned.
+pub const back_x: u16 = 0;
 pub const back_y: u16 = 0;
 pub const back_width: u16 = 3;
 /// Blank columns between the chip and the line it shares a row with.
@@ -245,7 +245,7 @@ pub fn in_back(x: u16, y: u16) bool {
     return x >= back_x and x < back_x + back_width;
 }
 
-/// Where the subject starts: after the chip when there is one, at the margin when
+/// Where the subject starts: after the button when there is one, at the margin when
 /// there is not.
 pub fn subject_x(state: *const State, sidebar: bool) u16 {
     if (!shows_back(state, sidebar)) return 1;
@@ -3361,4 +3361,45 @@ test "the corner says there is a way back, and the list does not" {
     // And with the sidebar on, its first cell is already a thing to click.
     f.state.view = .reader;
     try testing.expect(!shows_back(&f.state, true));
+}
+
+test "the arrow stands in the column the text below starts in" {
+    var f = try fixture();
+    defer f.deinit();
+    f.state.view = .reader;
+    f.state.opened = core.id.MessageId.from_int(1);
+    f.state.opened_account = f.store.at(0).account;
+    f.state.opened_folder = .{ .mailbox = f.store.at(0).mailbox };
+
+    var out: Screen = .{};
+    frame(.{
+        .state = &f.state,
+        .store = &f.store,
+        .theme = &Theme.dark(),
+        .body = "text",
+        .columns = 100,
+        .rows = 24,
+        .sidebar = false,
+        .now_unix = 1_700_000_000,
+    }, &out);
+
+    var buffer: [512]u8 = undefined;
+    const above = out.row_text(back_y, &buffer);
+    const arrow = std.mem.indexOf(u8, above, "←").?;
+
+    var other: [512]u8 = undefined;
+    const below = out.row_text(back_y + 1, &other);
+    // The meta line under it starts at the margin, and so does the arrow: one left
+    // edge for the whole page, which is what the eye reads.
+    const margin = below.len - std.mem.trimStart(u8, below, " ").len;
+    try testing.expectEqual(margin, arrow);
+    try testing.expectEqual(@as(usize, 1), arrow);
+    // The subject keeps its distance: the button's width plus the gap, and the cell
+    // it starts in is a letter, not a blank.
+    const left = subject_x(&f.state, false);
+    try testing.expectEqual(back_x + back_width + back_gap, left);
+    const subject = f.state.opened_message(&f.store).?.subject.slice();
+    // The arrow is one cell but three bytes: the subject's byte offset is the cell
+    // it starts in plus the two bytes the glyph adds.
+    try testing.expectEqual(@as(usize, left) + ("←".len - 1), std.mem.indexOf(u8, above, subject).?);
 }
