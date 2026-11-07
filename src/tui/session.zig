@@ -1204,13 +1204,16 @@ pub const Session = struct {
 
     /// The key the caches keep a folder under: a canonical mailbox by its title,
     /// a named folder by the name the server gave it.
+    /// The cache key of a folder. Never a mailbox's title for a named folder whose
+    /// slot is gone: that would file one folder's mail under another's, and the
+    /// next visit would read somebody else's messages out of the cache.
     fn folder_key(self: *Session, want: Target) []const u8 {
         return switch (want) {
             .mailbox => |mailbox| mailbox.title(),
             .named => |ref| if (self.state.folders.at(ref.account, ref.slot)) |entry|
                 entry.name.slice()
             else
-                self.state.mailbox.title(),
+                "",
         };
     }
 
@@ -2078,7 +2081,7 @@ pub const Session = struct {
             }
         }
         const mail = self.source_for(account) orelse {
-            self.body_failed(folder, id);
+            self.body_failed(account, folder, id);
             self.state.set_alert("That account is not connected", .{});
             return;
         };
@@ -2125,7 +2128,7 @@ pub const Session = struct {
         self.body_wanted = null;
 
         if (!self.body_job.ok) {
-            self.body_failed(request.folder, request.id);
+            self.body_failed(request.account, request.folder, request.id);
             self.state.set_alert("Could not load this message", .{});
             self.repaint();
             return;
@@ -2149,10 +2152,13 @@ pub const Session = struct {
         self.repaint();
     }
 
-    /// Nothing arrived: the reader says so rather than showing an empty page forever.
-    fn body_failed(self: *Session, folder: Target, id: MessageId) void {
-        _ = folder;
+    /// Nothing arrived: the reader says so rather than showing an empty page
+    /// forever. Another folder's message with the same number is another message,
+    /// and its failure is not this one's to report.
+    fn body_failed(self: *Session, account: core.id.AccountId, folder: Target, id: MessageId) void {
         if (self.state.opened != id) return;
+        if (self.state.opened_account != account) return;
+        if (!core.state.same_folder(self.state.opened_folder, folder)) return;
         self.raw_len = 0;
         self.body_len = 0;
         self.shown_len = 0;
@@ -7946,4 +7952,43 @@ test "the places are a run's own: none of them is written down" {
     full.save("one-too-many", "Sent");
     try testing.expectEqual(@as(u8, Places.entries_max), full.len);
     try testing.expect(!full.load("one-too-many", &out));
+}
+
+test "a folder whose slot is gone caches under no name, not another folder's" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // A stale slot: the list was re-listed and this one no longer exists.
+    const key = rig.session.folder_key(.{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 9 } });
+    try testing.expectEqualStrings("", key);
+    // A mailbox keeps its own name, which no server folder can shadow.
+    try testing.expectEqualStrings("Inbox", rig.session.folder_key(.{ .mailbox = .inbox }));
+}
+
+test "a body that fails for another folder's message leaves this one alone" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    rig.session.body_loaded = true;
+    rig.session.body_len = 7;
+    rig.session.state.opened = MessageId.from_int(1);
+    rig.session.state.opened_account = core.id.AccountId.from_int(1);
+    rig.session.state.opened_folder = .{ .mailbox = .inbox };
+
+    // The failure is for 1 in "Clients", and the reader is showing 1 in INBOX.
+    rig.session.body_failed(
+        core.id.AccountId.from_int(1),
+        .{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 0 } },
+        MessageId.from_int(1),
+    );
+    try testing.expectEqual(@as(u32, 7), rig.session.body_len);
+
+    // Its own failure clears the page, and says nothing rather than everything.
+    rig.session.body_failed(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1));
+    try testing.expectEqual(@as(u32, 0), rig.session.body_len);
+    try testing.expect(rig.session.body_loaded);
 }
