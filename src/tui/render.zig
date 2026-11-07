@@ -235,8 +235,9 @@ pub fn frame(inputs: Inputs, out: *Screen) void {
 pub const back_x: u16 = 0;
 pub const back_y: u16 = 0;
 pub const back_width: u16 = 3;
-/// Blank columns between the chip and the line it shares a row with.
-pub const back_gap: u16 = 2;
+/// Blank columns between the button and the line it shares a row with: the slack
+/// cell of the button is the space, so nothing more is needed.
+pub const back_gap: u16 = 0;
 
 /// Whether a cell is on the chip: one rectangle, so the pointer and the click
 /// cannot disagree about where the button is.
@@ -3351,6 +3352,8 @@ test "the corner says there is a way back, and the list does not" {
     try testing.expect(!in_back(back_x, back_y + 1));
     try testing.expect(shows_back(&f.state, false));
     try testing.expectEqual(back_x + back_width + back_gap, subject_x(&f.state, false));
+    // And it is close: one blank cell after the arrow, not a gap of three.
+    try testing.expectEqual(@as(u16, 1), subject_x(&f.state, false) - (back_x + back_width / 2 + 1));
     // The subject itself starts after the gap, on the same row as the chip.
     try testing.expectEqual(@as(u16, 1), subject_x(&f.state, true));
 
