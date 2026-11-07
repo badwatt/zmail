@@ -1243,6 +1243,15 @@ fn hints_for(state: *const State) []const Hint {
     };
 }
 
+/// The current filter, as `/words`, when one is applied and not being typed: while
+/// typing, the prompt row already says more.
+fn filter_badge(state: *const State, buffer: []u8) ?[]const u8 {
+    if (state.mode == .search) return null;
+    if (state.view == .reader or state.view == .compose) return null;
+    if (state.query.is_empty()) return null;
+    return std.fmt.bufPrint(buffer, "/{s}", .{state.query.slice()}) catch null;
+}
+
 fn render_footer(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const y = lay.footer_y;
     var right_buffer: [16]u8 = undefined;
@@ -1250,9 +1259,14 @@ fn render_footer(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     // A refresh in progress turns the position into "⠹ 3/24": no new row, no
     // transient message, just the spinner next to where you are.
     var spinner_buffer: [32]u8 = undefined;
+    var filter_buffer: [core.limits.filter_max + 24]u8 = undefined;
     const right = if (inputs.state.busy()) blk: {
         const glyph = spinner_frames[inputs.state.spinner % spinner_frames.len];
         break :blk std.fmt.bufPrint(&spinner_buffer, "{s} {s}", .{ glyph, position }) catch position;
+    } else if (filter_badge(inputs.state, &filter_buffer)) |badge| blk: {
+        // The list says it is filtered where a status message cannot cover it: a
+        // reader must never wonder why the message they are looking for is not here.
+        break :blk std.fmt.bufPrint(&spinner_buffer, "{s}  {s}", .{ badge, position }) catch position;
     } else position;
     const right_width = screen.text_columns(right);
     const limit = lay.columns -| (right_width + 3);
@@ -3624,4 +3638,43 @@ test "the selected row of the sidebar is one colour, letters included" {
     for (other) |cell| {
         try testing.expect(!std.meta.eql(theme.selection.bg, cell.style.bg));
     }
+}
+
+test "a filtered list says so in the corner, next to the position" {
+    var f = try fixture();
+    defer f.deinit();
+
+    var out: Screen = .{};
+    frame(f.inputs(100, 24), &out);
+    var buffer: [512]u8 = undefined;
+    var line: u16 = 0;
+    while (line < out.rows) : (line += 1) {
+        try testing.expect(std.mem.indexOf(u8, out.row_text(line, &buffer), "/Invoice") == null);
+    }
+
+    // A filter is applied: the footer carries it, beside the count, where a status
+    // message cannot cover it.
+    f.state.query.set("Invoice");
+    f.state.rebuild(&f.store);
+    frame(f.inputs(100, 24), &out);
+    var found = false;
+    line = 0;
+    while (line < out.rows) : (line += 1) {
+        const text = out.row_text(line, &buffer);
+        if (std.mem.indexOf(u8, text, "/Invoice") != null) found = true;
+    }
+    try testing.expect(found);
+
+    // While it is being typed, the prompt says it, and the corner does not repeat it.
+    f.state.mode = .search;
+    f.state.draft.set("Invoice");
+    frame(f.inputs(100, 24), &out);
+    const last = out.rows - 1;
+    try testing.expect(std.mem.indexOf(u8, out.row_text(last, &buffer), "Invoice") == null);
+    var typed = false;
+    line = 0;
+    while (line < out.rows) : (line += 1) {
+        if (std.mem.indexOf(u8, out.row_text(line, &buffer), "Invoice") != null) typed = true;
+    }
+    try testing.expect(typed);
 }

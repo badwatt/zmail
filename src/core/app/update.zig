@@ -315,8 +315,16 @@ fn apply_dismiss(state: *State, store: *Store) void {
             .accounts => state.view = .list,
             // Nothing closes the program from the list: `q` goes back one
             // layer, and there is no layer under the list. Ctrl+C is a signal,
-            // not a command, and it is the only way out.
-            .list => {},
+            // not a command, and it is the only way out. A filter is a layer: Esc
+            // takes it off, which is what the badge in the footer promises.
+            .list => {
+                if (state.query.is_empty()) return;
+                state.query.clear();
+                state.cursor = 0;
+                state.offset = 0;
+                state.rebuild(store);
+                state.set_status("Filter cleared", .{});
+            },
         },
     }
 }
@@ -2333,4 +2341,30 @@ test "the number keys follow the sidebar, not the order of the six in the code" 
     const before = fixture.state.mailbox;
     _ = apply(&fixture.state, &fixture.store, .{ .select_folder = 20 });
     try testing.expectEqual(before, fixture.state.mailbox);
+}
+
+test "Esc takes the filter off the list, and says so" {
+    var fixture_state = State{};
+    var store = try Store.init(testing.allocator, 8);
+    defer store.deinit(testing.allocator);
+    var message = Message{ .id = MessageId.from_int(1), .account = AccountId.from_int(1), .mailbox = .inbox };
+    message.subject.set("Invoice 4");
+    try store.insert(&message);
+    fixture_state.rebuild(&store);
+    try testing.expectEqual(@as(u32, 1), fixture_state.visible_len);
+
+    fixture_state.query.set("nothing matches this");
+    fixture_state.rebuild(&store);
+    try testing.expectEqual(@as(u32, 0), fixture_state.visible_len);
+
+    // Esc is one layer back, and the filter is one.
+    _ = apply(&fixture_state, &store, .dismiss);
+    try testing.expect(fixture_state.query.is_empty());
+    try testing.expectEqual(@as(u32, 1), fixture_state.visible_len);
+    try testing.expectEqualStrings("Filter cleared", fixture_state.status.slice());
+
+    // With no filter there is nothing to take off, and the status is left alone.
+    fixture_state.status.clear();
+    _ = apply(&fixture_state, &store, .dismiss);
+    try testing.expect(fixture_state.status.is_empty());
 }

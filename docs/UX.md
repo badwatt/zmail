@@ -155,7 +155,9 @@ them.
 | `Enter` / `Esc` | use this account / close |
 
 Search is live: typing filters as you go, `Enter` keeps the filter, `Esc`
-cancels it. `↑`/`↓` still move the cursor while typing. Inside the help overlay,
+cancels it. A filter that stays on says so in the footer's right corner — `/words`,
+beside the count — so a message that is not in the list is never a mystery, and `Esc`
+on the list takes it off. `↑`/`↓` still move the cursor while typing. Inside the help overlay,
 `/` starts the same kind of filter over the key map itself; `Enter` keeps it and
 `Esc` clears it.
 
