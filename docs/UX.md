@@ -414,8 +414,8 @@ name, whatever order the config file uses. The choice is remembered in
 `~/.config/zmail/scope`, so the next start opens on the same account — or on all
 of them, if that is what you picked last.
 
-Every place also keeps the folder it was reading, in `~/.config/zmail/folder-<account>`
-(and `~/.config/zmail/folder` for "All accounts", which has a place of its own):
-going from `work` on Sent to `home` on Drafts and back to `work` puts you on Sent
-again, and the next start opens on it. A place nobody has opened yet opens on its
-first folder.
+Every place — each account, and "All accounts", which is a place of its own — keeps
+the folder it was reading while the app is open: going from `work` on Sent to
+`home` on Drafts and back to `work` puts you on Sent again. Nothing about it is
+written down, though: a restart opens on the first folder, so the morning starts in
+the same place every time.
