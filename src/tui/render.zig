@@ -33,6 +33,9 @@ pub const Inputs = struct {
     /// Links in `body`, as byte ranges: one scan for the whole message, so a
     /// URL split by the wrapper is still one link.
     links: []const core.links.Link = &.{},
+    /// The anchors of the HTML view: their words are a link, and the address they
+    /// go to is not in the text -- the mark has to ask for it.
+    anchors: []const core.html.Anchor = &.{},
     /// The link the pointer is over, if any: lit up so a click is not a guess.
     hovered: ?core.links.Link = null,
     /// Where that link goes, shown in a popup while the pointer is on it.
@@ -972,9 +975,20 @@ pub const mail_mark = "\u{1F4E7}";
 /// what keeps the layout independent of what kind of link it is.
 pub const tel_mark = "\u{1F4DE}";
 
+/// The address a span goes to. An anchor's words carry theirs in `anchors`; a
+/// written-out address is its own text.
+fn address_of(inputs: Inputs, span: core.links.Link, line: []const u8, line_start: usize) []const u8 {
+    for (inputs.anchors) |anchor| {
+        if (anchor.span.start != span.start or anchor.span.end != span.end) continue;
+        if (anchor.target.len > 0) return anchor.target;
+    }
+    const start = @max(span.start, @as(u32, @intCast(line_start))) - @as(u32, @intCast(line_start));
+    const end = @min(span.end, @as(u32, @intCast(line_start + line.len))) - @as(u32, @intCast(line_start));
+    return line[@min(start, line.len)..@min(end, line.len)];
+}
+
 /// The glyph in front of a link, by where it goes: a chain for a page, an envelope
-/// for `mailto:`, a handset for `tel:`. The text of the link is its address in the
-/// text view, which is where the question is asked.
+/// for `mailto:`, a handset for `tel:`.
 pub fn mark_for(address: []const u8) []const u8 {
     if (std.ascii.startsWithIgnoreCase(address, "mailto:")) return mail_mark;
     if (std.ascii.startsWithIgnoreCase(address, "tel:")) return tel_mark;
@@ -1023,7 +1037,7 @@ fn draw_line_with_links(inputs: Inputs, out: *Screen, line: []const u8, y: u16, 
             const starts_here = link.start >= line_start;
             if (starts_here) {
                 const at = screen.text_columns(line[0 .. start - line_start]) + mark_shift(inputs, line_start, line_end, start);
-                const mark = mark_for(line[start - line_start .. end - line_start]);
+                const mark = mark_for(address_of(inputs, link, line, line_start));
                 _ = out.put_text(1 + at, y, mark, width -| at, inputs.theme.accent.with_bold());
             }
             draw_segment_kind(inputs, out, line, cursor - line_start, end - line_start, y, width, .link, starts_here);
@@ -3479,4 +3493,37 @@ test "a mailbox in the body wears an envelope, and a phone a handset" {
     try testing.expect(seen_mail);
     try testing.expect(seen_tel);
     try testing.expect(!seen_chain);
+}
+
+test "an anchor's words wear the mark of where the anchor goes" {
+    var store = try core.store.Store.init(testing.allocator, 2);
+    defer store.deinit(testing.allocator);
+
+    // The words say nothing about the destination: only the anchor knows.
+    const body = "Write to us (me@example.com)";
+    var wrapped: wrap.Wrapped = .{};
+    wrap.wrap(body, 60, &wrapped);
+
+    // "Write to us" is the anchor's words, and it goes to a mailbox.
+    const span = core.links.Link{ .start = 0, .end = "Write to us".len };
+    var anchors = [_]core.html.Anchor{.{ .span = span, .target = "mailto:me@example.com" }};
+    var links = [_]core.links.Link{span};
+
+    var canvas: Screen = .{};
+    canvas.resize(70, 4);
+    const state = State{};
+    const theme = Theme.dark();
+    draw_line_with_links(.{
+        .state = &state,
+        .store = &store,
+        .theme = &theme,
+        .body = body,
+        .links = &links,
+        .anchors = &anchors,
+    }, &canvas, wrapped.at(0, body), 0, 66);
+
+    var buffer: [256]u8 = undefined;
+    const row = canvas.row_text(0, &buffer);
+    try testing.expect(std.mem.indexOf(u8, row, mail_mark) != null);
+    try testing.expect(std.mem.indexOf(u8, row, link_mark) == null);
 }

@@ -2848,6 +2848,7 @@ pub const Session = struct {
             .show_details = self.show_details,
             .wrapped = if (self.body_loaded) &self.wrapped else null,
             .links = self.reader_links(),
+            .anchors = self.html_anchors[0..self.html_anchor_count],
             .hovered = self.hovered,
             .hover_url = if (self.hover_url.is_empty()) null else self.hover_url.slice(),
             .kinds = self.html_kinds[0..self.html_kind_count],
@@ -8156,4 +8157,29 @@ test "the pointer is a hand over the corner, and an arrow everywhere else" {
     try testing.expect(rig.session.over_back);
     _ = rig.session.apply(.dismiss);
     try testing.expect(!rig.session.over_back);
+}
+
+test "an HTML mailbox reaches the screen with an envelope" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    // The words of the anchor say nothing about where it goes; the mark has to.
+    try rig.open_reader("Content-Type: text/html\r\n\r\n<p><a href=\"mailto:me@example.com\">write to me</a></p>");
+    rig.session.needs_render = true;
+    rig.session.invalidate_screen();
+    rig.session.render();
+
+    var buffer: [512]u8 = undefined;
+    var row: u16 = 0;
+    var envelope = false;
+    var chain = false;
+    while (row < rig.session.screen.rows) : (row += 1) {
+        const text = rig.session.screen.row_text(row, &buffer);
+        if (std.mem.indexOf(u8, text, render_mod.mail_mark) != null) envelope = true;
+        if (std.mem.indexOf(u8, text, render_mod.link_mark) != null) chain = true;
+    }
+    try testing.expect(envelope);
+    try testing.expect(!chain);
 }
