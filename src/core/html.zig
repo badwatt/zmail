@@ -322,7 +322,13 @@ const State = struct {
         var start = self.anchor_text_start;
         var end = text.len;
         while (start < end and (text[start] == ' ' or text[start] == '\t' or text[start] == '\n')) start += 1;
-        while (end > start and (text[end - 1] == ' ' or text[end - 1] == '\t' or text[end - 1] == '\n')) end -= 1;
+        // A comma the writer put inside the anchor is the sentence's, not the
+        // address's: underlining it says the comma is part of the URL.
+        while (end > start and (text[end - 1] == ' ' or text[end - 1] == '\t' or
+            text[end - 1] == '\n' or links.is_trailing_punctuation(text[end - 1])))
+        {
+            end -= 1;
+        }
         const text_start = start;
         if (end <= start) return;
 
@@ -1023,4 +1029,23 @@ test "an anchor's span does not include the space before it" {
         "Contact our team",
         rendered.text[rendered.links[0].start..rendered.links[0].end],
     );
+}
+
+test "a comma the writer put inside the anchor is not underlined" {
+    // What a notary's newsletter says: the address, and then the sentence's comma.
+    const source = "<p>Entra en <a href=\"https://www.portalnotarial.es/x/\">" ++
+        "www.portalnotarial.es/portal/web/guest/credito-inmobiliario/,</a> y pide cita.</p>";
+    var text: [2048]u8 = undefined;
+    var link_buffer: [8]links.Link = undefined;
+    var kind_buffer: [8]Kind = undefined;
+    var anchor_buffer: [8]Anchor = undefined;
+    const rendered = render(source, &text, &link_buffer, &kind_buffer, &anchor_buffer);
+    try testing.expectEqual(@as(usize, 1), rendered.links.len);
+
+    const span = rendered.links[0];
+    const words = span.text(rendered.text);
+    try testing.expectEqualStrings("www.portalnotarial.es/portal/web/guest/credito-inmobiliario/", words);
+    // The comma is still there, right after the link, and outside it.
+    try testing.expectEqual(@as(u8, ','), rendered.text[span.end]);
+    try testing.expectEqualStrings("https://www.portalnotarial.es/x/", rendered.anchors[0].target);
 }

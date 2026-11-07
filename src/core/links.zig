@@ -46,6 +46,15 @@ pub const Link = struct {
 /// other: a phone number a reader can click.
 const prefixes = [_][]const u8{ "https://", "http://", "www.", "mailto:", "tel:" };
 
+/// Whether a byte ends a sentence rather than an address: the comma after a link is
+/// the writer's, and underlining it says the comma is part of the URL.
+pub fn is_trailing_punctuation(byte: u8) bool {
+    return switch (byte) {
+        '.', ',', ';', ':', '!', '?', '>', '"', '\'' => true,
+        else => false,
+    };
+}
+
 /// Records the links in `text`, in order. Returns how many were written; links
 /// beyond `out.len` are dropped rather than truncated.
 pub fn scan(text: []const u8, out: []Link) usize {
@@ -60,9 +69,7 @@ pub fn scan(text: []const u8, out: []Link) usize {
         // unbalanced closing bracket is the writer's, not the link's.
         while (end > found.start) {
             const last = text[end - 1];
-            if (last == '.' or last == ',' or last == ';' or last == ':' or
-                last == '!' or last == '?' or last == '>' or last == '"' or last == '\'')
-            {
+            if (is_trailing_punctuation(last)) {
                 end -= 1;
                 continue;
             }
@@ -470,4 +477,14 @@ test "a phone number is a link, and so is a mailbox" {
     try testing.expectEqual(@as(usize, 2), count);
     try testing.expectEqualStrings("tel:+34985456789", found[0].text(body));
     try testing.expectEqualStrings("mailto:alvaro@example.com", found[1].text(body));
+}
+
+test "a comma after an address is the sentence's, not the URL's" {
+    const body = "mira www.portalnotarial.es/portal/web/guest/credito-inmobiliario/, y luego";
+    var found: [4]Link = undefined;
+    const count = scan(body, &found);
+    try testing.expectEqual(@as(usize, 1), count);
+    // The address stops at the slash: the comma belongs to the sentence.
+    try testing.expectEqualStrings("www.portalnotarial.es/portal/web/guest/credito-inmobiliario/", found[0].text(body));
+    try testing.expectEqual(@as(u8, ','), body[found[0].end]);
 }
