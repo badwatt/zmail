@@ -9,6 +9,7 @@
 //! the app has no place for.
 
 const std = @import("std");
+const Message = @import("message.zig").Message;
 const assert = std.debug.assert;
 const Text = @import("text.zig").Text;
 const Mailbox = @import("mailbox.zig").Mailbox;
@@ -43,6 +44,29 @@ pub const Entry = struct {
         return self.name.slice();
     }
 };
+
+/// Where mail can be: one of the six, or one of the account's own folders.
+pub const MoveTarget = union(enum) {
+    mailbox: Mailbox,
+    named: Ref,
+};
+
+/// The folder a message is in.
+pub fn of(message: *const Message) MoveTarget {
+    return if (message.named == none)
+        .{ .mailbox = message.mailbox }
+    else
+        .{ .named = .{ .account = message.account, .slot = message.named } };
+}
+
+/// Whether two targets name the same folder.
+pub fn same(first: MoveTarget, second: MoveTarget) bool {
+    if (first != std.meta.activeTag(second)) return false;
+    return switch (first) {
+        .mailbox => |mailbox| mailbox == second.mailbox,
+        .named => |ref| ref.eql(second.named),
+    };
+}
 
 /// Identifies one named folder: whose, and which slot of its list.
 pub const Ref = struct {

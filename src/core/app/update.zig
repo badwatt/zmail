@@ -466,7 +466,7 @@ fn delete_forever(state: *State, store: *Store, effects: *Effects) void {
 
     const account = message.account;
     const id = message.id;
-    _ = store.remove_by_id(account, id);
+    _ = store.remove_by_id(account, folder_of(message), id);
     state.rebuild(store);
     if (state.view == .reader) {
         state.view = .list;
@@ -507,15 +507,7 @@ fn empty_trash(state: *State, store: *Store, effects: *Effects) void {
         _ = store.remove_in(filter, .trash);
     } else {
         // Whatever account a trashed message belongs to, it goes.
-        var index: u32 = 0;
-        while (index < store.len) {
-            const message = store.at(index);
-            if (message.mailbox == .trash) {
-                _ = store.remove_by_id(message.account, message.id);
-                continue;
-            }
-            index += 1;
-        }
+        _ = store.remove(.{ .mailbox_any = .trash });
     }
     state.rebuild(store);
     if (state.view == .reader) state.view = .list;

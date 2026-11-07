@@ -80,8 +80,8 @@ test "replace_mailbox swaps one mailbox and preserves the others" {
     try testing.expectEqual(@as(u32, 3), store.len);
     try testing.expectEqual(@as(u32, 2), store.count_in(.inbox, null));
     try testing.expectEqual(@as(u32, 1), store.count_in(.sent, null));
-    try testing.expect(store.get(test_account, MessageId.from_int(1)) == null);
-    try testing.expect(store.get(test_account, MessageId.from_int(3)) != null);
+    try testing.expect(store.get(test_account, .{ .mailbox = .inbox }, MessageId.from_int(1)) == null);
+    try testing.expect(store.get(test_account, .{ .mailbox = .inbox }, MessageId.from_int(3)) != null);
 }
 
 test "replace_mailbox with nothing truncates the mailbox to empty" {
@@ -122,8 +122,8 @@ test "replace_mailbox leaves another account's mailbox alone" {
     try store.insert(&theirs);
 
     replace_mailbox(&store, test_account, .inbox, &.{});
-    try testing.expect(store.get(test_account, MessageId.from_int(1)) == null);
-    try testing.expect(store.get(other_account, MessageId.from_int(9)) != null);
+    try testing.expect(store.get(test_account, .{ .mailbox = .inbox }, MessageId.from_int(1)) == null);
+    try testing.expect(store.get(other_account, .{ .mailbox = .inbox }, MessageId.from_int(9)) != null);
 }
 
 test "replace_named files messages in one of the account's folders" {

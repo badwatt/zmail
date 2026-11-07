@@ -11,6 +11,7 @@ const MessageId = @import("id.zig").MessageId;
 const AccountId = @import("id.zig").AccountId;
 const Mailbox = @import("mailbox.zig").Mailbox;
 const folder = @import("folder.zig");
+const MoveTarget = folder.MoveTarget;
 const Flags = @import("message.zig").Flags;
 
 pub const Store = struct {
@@ -65,30 +66,30 @@ pub const Store = struct {
         return &self.messages[index];
     }
 
-    pub fn index_of(self: *const Store, account: AccountId, id: MessageId) ?u32 {
+    /// Where a message is: a UID means something only in its folder, so the
+    /// folder is part of the question and never an afterthought.
+    pub fn index_of(self: *const Store, account: AccountId, target: MoveTarget, id: MessageId) ?u32 {
         assert(account.is_known());
         var index: u32 = 0;
         while (index < self.len) : (index += 1) {
             const message = &self.messages[index];
-            if (message.id == id and message.account == account) return index;
+            if (message.account != account) continue;
+            if (message.id != id) continue;
+            if (!folder.same(folder.of(message), target)) continue;
+            return index;
         }
         return null;
     }
 
-    pub fn get(self: *Store, account: AccountId, id: MessageId) ?*Message {
-        const index = self.index_of(account, id) orelse return null;
+    pub fn get(self: *Store, account: AccountId, target: MoveTarget, id: MessageId) ?*Message {
+        const index = self.index_of(account, target, id) orelse return null;
         return self.at(index);
-    }
-
-    pub fn get_const(self: *const Store, account: AccountId, id: MessageId) ?*const Message {
-        const index = self.index_of(account, id) orelse return null;
-        return self.at_const(index);
     }
 
     /// Removes and returns the message, shifting the tail down and zeroing the
     /// vacated slot.
-    pub fn remove_by_id(self: *Store, account: AccountId, id: MessageId) ?Message {
-        const index = self.index_of(account, id) orelse return null;
+    pub fn remove_by_id(self: *Store, account: AccountId, target: MoveTarget, id: MessageId) ?Message {
+        const index = self.index_of(account, target, id) orelse return null;
         const removed = self.messages[index];
 
         var cursor = index;
@@ -100,33 +101,34 @@ pub const Store = struct {
         return removed;
     }
 
-    /// Removes every message of one account, compacting in one pass.
-    pub fn remove_account(self: *Store, account: AccountId) u32 {
-        assert(account.is_known());
-        var read: u32 = 0;
-        var write: u32 = 0;
-        while (read < self.len) : (read += 1) {
-            if (self.messages[read].account == account) continue;
-            self.messages[write] = self.messages[read];
-            write += 1;
-        }
-        const removed = self.len - write;
-        while (self.len > write) {
-            self.len -= 1;
-            self.messages[self.len] = std.mem.zeroes(Message);
-        }
-        return removed;
-    }
+    /// What to remove: every message that matches, in one compacting pass.
+    pub const Removal = union(enum) {
+        account: AccountId,
+        mailbox: struct { account: AccountId, mailbox: Mailbox },
+        /// Every account's copy: what "empty Trash" means when the list is not
+        /// narrowed to one account.
+        mailbox_any: Mailbox,
+        named: struct { account: AccountId, slot: u8 },
 
-    /// Removes every message of `account` in `mailbox`, compacting in one pass.
-    pub fn remove_in(self: *Store, account: AccountId, mailbox: Mailbox) u32 {
-        assert(account.is_known());
+        fn matches(self: Removal, message: *const Message) bool {
+            return switch (self) {
+                .account => |account| message.account == account,
+                .mailbox => |want| message.account == want.account and
+                    message.mailbox == want.mailbox and message.named == folder.none,
+                .mailbox_any => |want| message.mailbox == want and message.named == folder.none,
+                .named => |want| message.account == want.account and message.named == want.slot,
+            };
+        }
+    };
+
+    /// Removes every message the rule matches, compacting in one pass, and says
+    /// how many went. One loop for all of the ways a message leaves.
+    pub fn remove(self: *Store, why: Removal) u32 {
         var read: u32 = 0;
         var write: u32 = 0;
         while (read < self.len) : (read += 1) {
-            const message = &self.messages[read];
-            if (message.account == account and message.mailbox == mailbox and message.named == folder.none) continue;
-            if (write != read) self.messages[write] = self.messages[read];
+            if (why.matches(&self.messages[read])) continue;
+            self.messages[write] = self.messages[read];
             write += 1;
         }
         const removed = self.len - write;
@@ -136,13 +138,18 @@ pub const Store = struct {
         return removed;
     }
 
-    pub fn set_flags(self: *Store, account: AccountId, id: MessageId, flags: Flags) bool {
-        const message = self.get(account, id) orelse return false;
-        message.flags = flags;
-        return true;
+    pub fn remove_account(self: *Store, account: AccountId) u32 {
+        return self.remove(.{ .account = account });
     }
 
-    /// Removes every message of `account` in one of its own folders.
+    pub fn remove_in(self: *Store, account: AccountId, mailbox: Mailbox) u32 {
+        return self.remove(.{ .mailbox = .{ .account = account, .mailbox = mailbox } });
+    }
+
+    pub fn remove_named(self: *Store, account: AccountId, slot: u8) u32 {
+        return self.remove(.{ .named = .{ .account = account, .slot = slot } });
+    }
+
     /// Renumbers one account's named folder: a slot is a position in the list the
     /// server last sent, and that list can change order under the mail.
     pub fn reslot(self: *Store, account: AccountId, from: u8, to: u8) void {
@@ -154,51 +161,27 @@ pub const Store = struct {
         }
     }
 
-    pub fn remove_named(self: *Store, account: AccountId, slot: u8) u32 {
-        var read: u32 = 0;
-        var write: u32 = 0;
-        var removed: u32 = 0;
-        while (read < self.len) : (read += 1) {
-            const message = &self.messages[read];
-            if (message.account == account and message.named == slot) {
-                removed += 1;
-                continue;
-            }
-            self.messages[write] = self.messages[read];
-            write += 1;
-        }
-        self.len = write;
-        return removed;
-    }
-
     /// Counts messages in `mailbox`, optionally only one account (null = the
-    /// unified view).
-    pub fn count_in(self: *const Store, mailbox: Mailbox, account: ?AccountId) u32 {
+    /// unified view), and optionally only the unread ones.
+    fn count_where(self: *const Store, mailbox: Mailbox, account: ?AccountId, unread_only: bool) u32 {
         var count: u32 = 0;
-        var index: u32 = 0;
-        while (index < self.len) : (index += 1) {
-            const message = &self.messages[index];
+        for (self.messages[0..self.len]) |*message| {
             if (message.mailbox != mailbox or message.named != folder.none) continue;
             if (account) |filter| {
                 if (message.account != filter) continue;
             }
+            if (unread_only and !message.is_unread()) continue;
             count += 1;
         }
         return count;
     }
 
+    pub fn count_in(self: *const Store, mailbox: Mailbox, account: ?AccountId) u32 {
+        return self.count_where(mailbox, account, false);
+    }
+
     pub fn unread_in(self: *const Store, mailbox: Mailbox, account: ?AccountId) u32 {
-        var count: u32 = 0;
-        var index: u32 = 0;
-        while (index < self.len) : (index += 1) {
-            const message = &self.messages[index];
-            if (message.mailbox != mailbox or message.named != folder.none) continue;
-            if (account) |filter| {
-                if (message.account != filter) continue;
-            }
-            if (message.is_unread()) count += 1;
-        }
-        return count;
+        return self.count_where(mailbox, account, true);
     }
 };
 
@@ -286,11 +269,11 @@ test "Store: the same uid in two accounts is two messages" {
     try store.insert(&two);
 
     try testing.expectEqual(@as(u32, 2), store.len);
-    try testing.expectEqual(@as(u32, 1), store.index_of(account_one, MessageId.from_int(7)).?);
-    try testing.expectEqual(@as(u32, 0), store.index_of(account_two, MessageId.from_int(7)).?);
-    try testing.expect(store.index_of(account_two, MessageId.from_int(8)) == null);
-    try testing.expect(store.get(account_one, MessageId.from_int(7)) != null);
-    try testing.expect(store.get_const(account_two, MessageId.from_int(7)) != null);
+    try testing.expectEqual(@as(u32, 1), store.index_of(account_one, .{ .mailbox = .inbox }, MessageId.from_int(7)).?);
+    try testing.expectEqual(@as(u32, 0), store.index_of(account_two, .{ .mailbox = .inbox }, MessageId.from_int(7)).?);
+    try testing.expect(store.index_of(account_two, .{ .mailbox = .inbox }, MessageId.from_int(8)) == null);
+    try testing.expect(store.get(account_one, .{ .mailbox = .inbox }, MessageId.from_int(7)) != null);
+    try testing.expect(store.get(account_two, .{ .mailbox = .inbox }, MessageId.from_int(7)) != null);
 }
 
 test "Store: remove_account removes every mailbox of one account" {
@@ -320,12 +303,12 @@ test "Store: remove_by_id removes the right account's copy" {
     try store.insert(&one);
     try store.insert(&two);
 
-    const removed = store.remove_by_id(account_two, MessageId.from_int(7)).?;
+    const removed = store.remove_by_id(account_two, .{ .mailbox = .inbox }, MessageId.from_int(7)).?;
     try testing.expectEqual(account_two, removed.account);
     try testing.expectEqual(@as(u32, 1), store.len);
-    try testing.expect(store.get(account_one, MessageId.from_int(7)) != null);
-    try testing.expect(store.get(account_two, MessageId.from_int(7)) == null);
-    try testing.expect(store.remove_by_id(account_two, MessageId.from_int(7)) == null);
+    try testing.expect(store.get(account_one, .{ .mailbox = .inbox }, MessageId.from_int(7)) != null);
+    try testing.expect(store.get(account_two, .{ .mailbox = .inbox }, MessageId.from_int(7)) == null);
+    try testing.expect(store.remove_by_id(account_two, .{ .mailbox = .inbox }, MessageId.from_int(7)) == null);
 
     const zeroed = store.messages[1];
     try testing.expectEqual(MessageId.unknown, zeroed.id);
@@ -341,25 +324,60 @@ test "Store: remove_by_id works at the head and the tail" {
     try store.insert(&oldest);
     try store.insert(&newest);
 
-    _ = store.remove_by_id(account_one, MessageId.from_int(2));
+    _ = store.remove_by_id(account_one, .{ .mailbox = .inbox }, MessageId.from_int(2));
     try testing.expectEqual(@as(u32, 1), store.len);
     try testing.expectEqual(MessageId.from_int(1), store.at(0).id);
 
-    _ = store.remove_by_id(account_one, MessageId.from_int(1));
+    _ = store.remove_by_id(account_one, .{ .mailbox = .inbox }, MessageId.from_int(1));
     try testing.expectEqual(@as(u32, 0), store.len);
 }
 
-test "Store: set_flags updates the right account's message" {
-    var store = try new_store(2);
+test "Store: the small questions a caller asks before it acts" {
+    var store = try new_store(4);
+    defer store.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 4), store.capacity());
+
+    var named: Message = message_with(1, .inbox, 100);
+    named.named = 0;
+    try store.insert(&named);
+    try testing.expectEqual(Mailbox.inbox, store.at_const(0).mailbox);
+
+    // A message that is not there answers null rather than the nearest one.
+    try testing.expect(store.get(account_one, .{ .mailbox = .sent }, MessageId.from_int(1)) == null);
+    try testing.expect(store.get(account_one, .{ .named = .{ .account = account_one, .slot = 0 } }, MessageId.from_int(1)) != null);
+
+    // Moving a folder onto itself is not a change.
+    store.reslot(account_one, 0, 0);
+    try testing.expectEqual(@as(u8, 0), store.at(0).named);
+}
+
+test "Store: a message goes by its folder, and Trash empties for every account" {
+    var store = try new_store(6);
     defer store.deinit(testing.allocator);
 
-    const message = message_with(1, .inbox, 100);
-    try store.insert(&message);
+    // The same number in two folders: 5 in INBOX is one message, 5 in Trash the one
+    // the reader deleted -- and they are not the same message.
+    const inbox = message_with(5, .inbox, 400);
+    const trashed = message_with(5, .trash, 300);
+    try store.insert(&inbox);
+    try store.insert(&trashed);
 
-    try testing.expect(store.set_flags(account_one, MessageId.from_int(1), .{ .unread = false }));
-    try testing.expect(!store.at(0).is_unread());
-    try testing.expect(!store.set_flags(account_two, MessageId.from_int(1), .{ .unread = false }));
-    try testing.expect(!store.set_flags(account_one, MessageId.from_int(2), .{ .unread = false }));
+    try testing.expect(store.remove_by_id(account_one, .{ .mailbox = .trash }, MessageId.from_int(5)) != null);
+    try testing.expectEqual(@as(u32, 1), store.len);
+    try testing.expectEqual(Mailbox.inbox, store.at(0).mailbox);
+    // Nothing else has that number now, and the folder it is in is the one asked.
+    try testing.expect(store.remove_by_id(account_one, .{ .mailbox = .trash }, MessageId.from_int(5)) == null);
+
+    // A named folder is a folder too: its trash is not the canonical Trash.
+    var named: Message = message_with(6, .inbox, 200);
+    named.named = 1;
+    try store.insert(&named);
+
+    // Emptying every account's Trash leaves the named folder alone.
+    try testing.expectEqual(@as(u32, 0), store.remove(.{ .mailbox_any = .trash }));
+    try testing.expectEqual(@as(u32, 2), store.len);
+    _ = store.remove(.{ .account = account_one });
+    try testing.expectEqual(@as(u32, 0), store.len);
 }
 
 test "Store: remove_in removes one account's mailbox only" {
@@ -376,8 +394,8 @@ test "Store: remove_in removes one account's mailbox only" {
 
     try testing.expectEqual(@as(u32, 1), store.remove_in(account_one, .inbox));
     try testing.expectEqual(@as(u32, 2), store.len);
-    try testing.expect(store.get(account_one, MessageId.from_int(1)) == null);
-    try testing.expect(store.get(account_two, MessageId.from_int(2)) != null);
+    try testing.expect(store.get(account_one, .{ .mailbox = .inbox }, MessageId.from_int(1)) == null);
+    try testing.expect(store.get(account_two, .{ .mailbox = .inbox }, MessageId.from_int(2)) != null);
     try testing.expectEqual(@as(u32, 0), store.remove_in(account_one, .inbox));
 }
 

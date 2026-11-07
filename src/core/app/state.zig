@@ -162,28 +162,11 @@ pub const Accounts = struct {
 };
 pub const Mode = enum { normal, search, help_search };
 
-/// Where mail can be put: one of the six, or one of the account's own folders.
-pub const MoveTarget = union(enum) {
-    mailbox: Mailbox,
-    named: folder.Ref,
-};
-
-/// The folder a message is in, as a move target.
-pub fn folder_of(message: *const Message) MoveTarget {
-    return if (message.named == folder.none)
-        .{ .mailbox = message.mailbox }
-    else
-        .{ .named = .{ .account = message.account, .slot = message.named } };
-}
-
-/// Whether two targets name the same folder.
-pub fn same_folder(first: MoveTarget, second: MoveTarget) bool {
-    if (first != std.meta.activeTag(second)) return false;
-    return switch (first) {
-        .mailbox => |mailbox| mailbox == second.mailbox,
-        .named => |ref| ref.eql(second.named),
-    };
-}
+/// Where mail can be: the domain's word for it, so the store and the update rules
+/// speak the same one.
+pub const MoveTarget = folder.MoveTarget;
+pub const folder_of = folder.of;
+pub const same_folder = folder.same;
 
 /// One row of the "move to" chooser.
 pub const MoveRow = struct {
