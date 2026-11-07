@@ -1797,13 +1797,33 @@ pub const Session = struct {
                 // It waits by getting in line, not by stopping the loop: a key must
                 // answer while the accounts are being fetched.
                 else => {
-                    if (self.refreshing) {
+                    if (self.connection_busy()) {
                         self.defer_effect(effect);
                         continue;
                     }
                     self.run_effect(effect);
                 },
             }
+        }
+    }
+
+    /// Whether a worker is using the connection right now. The account's port is one
+    /// socket: a `STORE` on it from this thread while a refresh reads it is a read on
+    /// a file descriptor somebody else is closing, which is a panic, not a race you
+    /// can retry.
+    fn connection_busy(self: *const Session) bool {
+        return self.refreshing or self.body_in_flight or self.image_in_flight;
+    }
+
+    /// Waits for every worker to be done, for the one corner where an effect has
+    /// nowhere to be kept. The loop stops there, and only there.
+    fn wait_connection(self: *Session) void {
+        while (true) {
+            self.poll_refresh();
+            self.poll_body();
+            self.poll_images();
+            if (!self.connection_busy()) return;
+            std.atomic.spinLoopHint();
         }
     }
 
@@ -1833,7 +1853,7 @@ pub const Session = struct {
         if (self.pending_len == self.pending_effects.len) {
             // Full: there is nowhere to put it, and dropping a move or a delete would
             // be worse than waiting for one. The loop stops only in this corner.
-            self.wait_refresh();
+            self.wait_connection();
             self.run_effect(effect);
             return;
         }
@@ -1844,7 +1864,7 @@ pub const Session = struct {
 
     /// Starts the next thing that was waiting for the connection.
     fn poll_pending(self: *Session) void {
-        if (self.pending_len == 0 or self.refreshing) return;
+        if (self.pending_len == 0 or self.connection_busy()) return;
         const effect = self.pending_effects[0];
         var index: u8 = 1;
         while (index < self.pending_len) : (index += 1) {
@@ -7599,4 +7619,31 @@ test "a body that lands for another folder's message is not painted on this one"
     // INBOX is opened, and the reader is not shown a message it did not ask for.
     try testing.expect(rig.session.shown_message == null);
     try testing.expectEqual(@as(u32, 0), rig.session.body_len);
+}
+
+test "a flag change waits for the body that is using the connection" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    const account = core.id.AccountId.from_int(1);
+    rig.session.pending_effects[0] = .{ .sync_flags = .{
+        .account = account,
+        .id = MessageId.from_int(1),
+        .flags = (core.message.Flags{}).mark_read(),
+        .folder = .{ .mailbox = .inbox },
+    } };
+    rig.session.pending_len = 1;
+
+    // A body is on the wire: the socket belongs to that worker, and a STORE on it
+    // from this thread is how a read lands on a closed file descriptor.
+    rig.session.body_in_flight = true;
+    rig.session.poll_pending();
+    try testing.expectEqual(@as(u8, 1), rig.session.pending_len);
+
+    // The body landed: the flag change goes through.
+    rig.session.body_in_flight = false;
+    rig.session.poll_pending();
+    try testing.expectEqual(@as(u8, 0), rig.session.pending_len);
 }
