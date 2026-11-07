@@ -413,3 +413,8 @@ The accounts overlay (`A`) lists "All accounts" first and then your accounts by
 name, whatever order the config file uses. The choice is remembered in
 `~/.config/zmail/scope`, so the next start opens on the same account — or on all
 of them, if that is what you picked last.
+
+Each account also keeps the folder it was reading, in `~/.config/zmail/folder-<account>`:
+going from `work` on Sent to `home` on Drafts and back to `work` puts you on Sent
+again, and the next start opens on it. An account nobody has opened yet opens on
+its first folder.

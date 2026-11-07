@@ -150,6 +150,21 @@ pub const Table = struct {
     }
 
     /// The server's name for a canonical mailbox, when `LIST` named it.
+    /// The slot of a folder by the name it was saved under: the one the server
+    /// called it, or the words the sidebar showed. What a restart writes down is
+    /// a name, and this is how a name becomes a folder again.
+    pub fn slot_named(self: *const Table, account: AccountId, saved: []const u8) ?u8 {
+        const used = self.len[index(account)];
+        var slot: u8 = 0;
+        while (slot < used) : (slot += 1) {
+            const entry = &self.entries[index(account)][slot];
+            if (entry.canonical != null) continue;
+            if (std.mem.eql(u8, entry.name.slice(), saved)) return slot;
+            if (std.mem.eql(u8, entry.display(), saved)) return slot;
+        }
+        return null;
+    }
+
     pub fn name_of(self: *const Table, account: AccountId, mailbox: Mailbox) ?[]const u8 {
         const slot = self.slot_of(account, mailbox) orelse return null;
         return self.entries[index(account)][slot].name.slice();
@@ -161,6 +176,20 @@ pub const Table = struct {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "folder: a saved name finds its folder again" {
+    var table: Table = .{};
+    const account = AccountId.from_int(1);
+    _ = table.add(account, "INBOX", .inbox);
+    _ = table.add_counted(account, "[Gmail]/Sent Mail", "Sent Mail", .sent, 0);
+    const clients = table.add(account, "Clients", null).?;
+
+    try testing.expectEqual(clients, table.slot_named(account, "Clients").?);
+    try testing.expectEqual(@as(?u8, null), table.slot_named(account, "Sent Mail"));
+    try testing.expectEqual(@as(?u8, null), table.slot_named(account, "Missing"));
+    // Another account's name means nothing here.
+    try testing.expectEqual(@as(?u8, null), table.slot_named(AccountId.from_int(2), "Clients"));
+}
 
 test "folder: a listed folder keeps its slot, and a repeated name keeps it too" {
     var table: Table = .{};

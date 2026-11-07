@@ -1218,6 +1218,7 @@ pub const Session = struct {
         std.debug.assert(entry.canonical == null);
         self.state.select_named(&self.store, ref);
         self.load_cached(.{ .named = ref }, false);
+        self.remember_folder(ref.account);
         self.start_refresh();
         self.repaint();
         return true;
@@ -1226,10 +1227,12 @@ pub const Session = struct {
     /// The scope is the filter the list is built from. Changing it alone still
     /// changes the list, so it rebuilds even when the mailbox stays put.
     fn select_scope(self: *Session, account: ?core.id.AccountId) void {
-        if (self.state.account_filter == account) return;
+        const before = self.state.account_filter;
+        if (std.meta.eql(before, account)) return;
         self.state.account_filter = account;
         self.state.cursor = 0;
         self.state.offset = 0;
+        self.settle_scope_change(before);
         self.state.rebuild(&self.store);
         self.needs_render = true;
         // A scope change reads the disk and nothing else: the folders of the
@@ -1238,6 +1241,14 @@ pub const Session = struct {
         // list becomes a fresh one.
         self.load_cached_folders();
         self.repaint();
+    }
+
+    /// Two things happen when the scope changes, and neither can wait: the account
+    /// being left keeps the folder it was reading, and the one being opened goes
+    /// back to its own -- or to its first folder, the first time it is opened.
+    fn settle_scope_change(self: *Session, before: ?core.id.AccountId) void {
+        if (before) |id| self.remember_folder(id);
+        self.restore_folder();
     }
 
     /// The whole message as another program would show it: the browser for the
@@ -1635,6 +1646,8 @@ pub const Session = struct {
     }
 
     fn apply(self: *Session, command: core.command.Command) bool {
+        const scope_before = self.state.account_filter;
+        const folder_before = self.screen_target();
         const effects = core.update.apply(&self.state, &self.store, command);
         // Leaving the reader abandons whatever body was on its way: the bytes are
         // worth caching when they land, and worth showing to nobody.
@@ -1647,8 +1660,18 @@ pub const Session = struct {
         // A scope is a preference, however it was changed: the picker or the
         // `a` key both end up here, and the next start opens where this one is.
         switch (command) {
-            .accounts_select, .cycle_account => self.remember_scope(),
-            else => {},
+            .accounts_select, .cycle_account => {
+                self.remember_scope();
+                if (!std.meta.eql(self.state.account_filter, scope_before)) {
+                    self.settle_scope_change(scope_before);
+                }
+            },
+            else => {
+                // A folder is a place in one account's list, and each keeps its own.
+                if (!core.state.same_folder(folder_before, self.screen_target())) {
+                    if (self.state.account_filter) |id| self.remember_folder(id);
+                }
+            },
         }
         return true;
     }
@@ -1698,6 +1721,48 @@ pub const Session = struct {
         else
             "";
         scope.save(label) catch {};
+    }
+
+    /// Where one account was in its own folder list. The key is the one the cache
+    /// uses: the six by their title, a folder of the account's own by its name.
+    fn remember_folder(self: *Session, account: core.id.AccountId) void {
+        const scope = self.deps.scope orelse return;
+        const label = self.state.accounts.label_for(account);
+        if (label.len == 0) return;
+        const target = self.screen_target();
+        // A folder of the account's own belongs to one account; one of the six
+        // belongs to all of them, and then it is the caller's account that names it.
+        if (target == .named and target.named.account != account) return;
+        scope.save_folder(label, self.folder_key(target)) catch {};
+    }
+
+    /// Puts the reader back where this account was, or on its first folder the
+    /// first time: an account that has never been opened has no place to keep.
+    fn restore_folder(self: *Session) void {
+        const account = self.state.account_filter orelse {
+            // All accounts share one list, and it starts at its first folder.
+            _ = self.apply(.{ .select_mailbox = .inbox });
+            return;
+        };
+        const label = self.state.accounts.label_for(account);
+        var saved: core.text.Text(core.folder.name_max) = .{};
+        const remembered = label.len > 0 and if (self.deps.scope) |scope|
+            scope.load_folder(label, &saved)
+        else
+            false;
+        if (remembered) {
+            for (core.mailbox.Mailbox.all) |mailbox| {
+                if (!std.ascii.eqlIgnoreCase(mailbox.title(), saved.slice())) continue;
+                _ = self.apply(.{ .select_mailbox = mailbox });
+                return;
+            }
+            if (self.state.folders.slot_named(account, saved.slice())) |slot| {
+                _ = self.open_named(.{ .account = account, .slot = slot });
+                return;
+            }
+        }
+        // First time, or a folder that is gone: the first folder of the account.
+        _ = self.apply(.{ .select_mailbox = .inbox });
     }
 
     /// The tab's progress bar, if the terminal has one.
@@ -6879,6 +6944,8 @@ test "a click in the sidebar opens that folder, and the scopes say whose folders
     defer rig.deinit();
     _ = rig.session.step();
     rig.session.sidebar = true;
+    var memory: core.scope_port.Memory = .{};
+    rig.session.deps.scope = memory.scope();
 
     // Rows: 0 all accounts, 1 the account, 2 the rule, 3 its inbox, 4 sent.
     _ = rig.session.handle_mouse(.{ .x = 4, .y = 4, .kind = .press, .button = .left });
@@ -6887,10 +6954,32 @@ test "a click in the sidebar opens that folder, and the scopes say whose folders
     // change the scope: the unified list is still unified.
     try testing.expect(rig.session.state.account_filter == null);
 
-    // The account row narrows the scope and leaves the mailbox alone.
+    // The account row narrows the scope and opens that account's place: the first
+    // time, its first folder.
     _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
-    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
     try testing.expect(rig.session.state.account_filter != null);
+
+    // And each account keeps its own: choose Sent here, leave, come back.
+    var rows: [render_mod.max_sidebar_rows]render_mod.SidebarRow = undefined;
+    const row_count = render_mod.sidebar_rows(&rig.session.state.accounts, &rig.session.state.folders, rig.session.state.account_filter, &rows);
+    var sent_y: u16 = 0;
+    for (rows[0..row_count]) |row| {
+        switch (row.entry) {
+            .folder => |folder| if (folder.mailbox == .sent) {
+                sent_y = row.y;
+            },
+            else => {},
+        }
+    }
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = sent_y, .kind = .press, .button = .left });
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    const account = rig.session.state.account_filter;
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 0, .kind = .press, .button = .left });
+    try testing.expect(rig.session.state.account_filter == null);
+    _ = rig.session.handle_mouse(.{ .x = 4, .y = 1, .kind = .press, .button = .left });
+    try testing.expect(std.meta.eql(account, rig.session.state.account_filter));
+    try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
     // One account on screen needs no column saying which account every row is from.
     try testing.expectEqual(@as(u8, 0), rig.session.tag_width());
 
@@ -7660,4 +7749,62 @@ test "a flag change waits for the body that is using the connection" {
     rig.session.body_in_flight = false;
     rig.session.poll_pending();
     try testing.expectEqual(@as(u8, 0), rig.session.pending_len);
+}
+
+test "an account keeps its place in its own folder list, across sessions" {
+    var memory: core.scope_port.Memory = .{};
+
+    {
+        var rig: Rig = .{};
+        try rig.start();
+        defer rig.deinit();
+        rig.session.deps.scope = memory.scope();
+        rig.session.sidebar = true;
+        const account = rig.session.state.accounts.items[0].id;
+
+        // The first time an account is opened it has no place to keep: its first
+        // folder, which is where a list begins.
+        _ = rig.session.apply(.cycle_account);
+        try testing.expect(std.meta.eql(account, rig.session.state.account_filter.?));
+        try testing.expectEqual(Mailbox.inbox, rig.session.state.mailbox);
+
+        // Where the reader leaves it, it stays.
+        _ = rig.session.apply(.{ .select_mailbox = .sent });
+        try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    }
+
+    {
+        var rig: Rig = .{};
+        try rig.start();
+        defer rig.deinit();
+        rig.session.deps.scope = memory.scope();
+        rig.session.sidebar = true;
+
+        // A new session opens the same account on the folder it was reading.
+        _ = rig.session.apply(.cycle_account);
+        try testing.expectEqual(Mailbox.sent, rig.session.state.mailbox);
+    }
+}
+
+test "a folder of the account's own is remembered by its name" {
+    var memory: core.scope_port.Memory = .{};
+    _ = try memory.scope().save_folder("account", "Clients");
+
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    rig.session.deps.scope = memory.scope();
+    rig.session.sidebar = true;
+    const slot = try rig.fake_mail.inner.add_folder("Clients", null);
+    try testing.expectEqual(@as(u8, 0), slot);
+    rig.session.start_refresh_for_test();
+    rig.session.settle_refresh_for_test();
+
+    _ = rig.session.apply(.cycle_account);
+    const named = rig.session.state.named orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Clients", rig.session.state.folders.at(named.account, named.slot).?.display());
+    // And it is saved again, under the name the sidebar knows it by.
+    var saved: core.text.Text(core.folder.name_max) = .{};
+    try testing.expect(memory.scope().load_folder("account", &saved));
+    try testing.expectEqualStrings("Clients", saved.slice());
 }

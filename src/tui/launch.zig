@@ -377,7 +377,12 @@ const FileScope = struct {
     config_path: []const u8,
 
     fn scope(self: *FileScope) core.scope_port.Scope {
-        return .{ .context = self, .vtable = &.{ .load = loadThunk, .save = saveThunk } };
+        return .{ .context = self, .vtable = &.{
+            .load = loadThunk,
+            .save = saveThunk,
+            .load_folder = loadFolderThunk,
+            .save_folder = saveFolderThunk,
+        } };
     }
 
     fn file_path(self: *FileScope, buffer: []u8) []const u8 {
@@ -398,6 +403,46 @@ const FileScope = struct {
         if (trimmed.len == 0) return false;
         out.set(trimmed);
         return true;
+    }
+
+    /// One file per account, named after it: the folder it was reading. A label
+    /// that cannot be a file name keeps no folder, and opens on the first one.
+    fn folder_path(self: *FileScope, label: []const u8, buffer: []u8) []const u8 {
+        const dir = cli.parent_dir(self.config_path);
+        if (dir.len == 0 or label.len == 0) return "";
+        if (std.mem.indexOfAny(u8, label, "/\\:") != null) return "";
+        return std.fmt.bufPrint(buffer, "{s}/folder-{s}", .{ dir, label }) catch "";
+    }
+
+    fn loadFolderThunk(
+        context: *anyopaque,
+        label: []const u8,
+        out: *core.text.Text(core.limits.mailbox_name_max),
+    ) bool {
+        const self: *FileScope = @ptrCast(@alignCast(context));
+        var path_buffer: [512]u8 = undefined;
+        const path = self.folder_path(label, &path_buffer);
+        if (path.len == 0) return false;
+
+        var buffer: [core.limits.mailbox_name_max + 8]u8 = undefined;
+        const text = read_file(self.io, path, &buffer) catch return false;
+        const trimmed = std.mem.trim(u8, text, " \t\r\n");
+        if (trimmed.len == 0) return false;
+        out.set(trimmed);
+        return true;
+    }
+
+    fn saveFolderThunk(
+        context: *anyopaque,
+        label: []const u8,
+        folder: []const u8,
+    ) core.scope_port.Error!void {
+        const self: *FileScope = @ptrCast(@alignCast(context));
+        var path_buffer: [512]u8 = undefined;
+        const path = self.folder_path(label, &path_buffer);
+        if (path.len == 0) return error.Unavailable;
+        write_file(self.io, path, std.mem.trim(u8, folder, " \t\r\n")) catch
+            return error.Unavailable;
     }
 
     fn saveThunk(context: *anyopaque, label: []const u8) core.scope_port.Error!void {
