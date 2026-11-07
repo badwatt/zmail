@@ -165,6 +165,15 @@ fn select_folder(state: *State, store: *Store, effects: *Effects, index: u8) voi
     go_to(state, store, effects, rows[index].target);
 }
 
+/// The message the reader is on, or the status line saying there is none: the
+/// same three lines at the top of every rule that acts on one.
+fn selected_or_say(state: *State, store: *Store) ?*Message {
+    return state.selected(store) orelse {
+        state.set_status("No message selected", .{});
+        return null;
+    };
+}
+
 /// The folder on screen, as a target.
 fn current_folder(state: *const State) MoveTarget {
     if (state.named) |ref| return .{ .named = ref };
@@ -270,10 +279,7 @@ fn scroll_reader(state: *State, move: Move) void {
 fn apply_open(state: *State, store: *Store, effects: *Effects) void {
     if (state.view != .list) return;
 
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     state.opened = message.id;
     state.opened_account = message.account;
@@ -334,10 +340,7 @@ fn switch_mailbox(state: *State, store: *Store, mailbox: Mailbox, effects: *Effe
 }
 
 fn toggle_unread(state: *State, store: *Store, effects: *Effects) void {
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     message.flags = message.flags.toggle_unread();
     effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags, .folder = folder_of(message) } });
@@ -349,10 +352,7 @@ fn toggle_unread(state: *State, store: *Store, effects: *Effects) void {
 }
 
 fn toggle_flag(state: *State, store: *Store, effects: *Effects) void {
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     message.flags = message.flags.toggle_flagged();
     effects.add(.{ .sync_flags = .{ .account = message.account, .id = message.id, .flags = message.flags, .folder = folder_of(message) } });
@@ -459,10 +459,7 @@ fn delete_forever(state: *State, store: *Store, effects: *Effects) void {
         state.set_status("Only in Trash: d moves a message here first", .{});
         return;
     }
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     const account = message.account;
     const id = message.id;
@@ -515,10 +512,7 @@ fn empty_trash(state: *State, store: *Store, effects: *Effects) void {
 }
 
 fn begin_move(state: *State, store: *Store) void {
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
     var rows: [8]MoveRow = undefined;
     if (state.move_rows(message, &rows) == 0) {
         state.set_status("No folders to move to", .{});
@@ -558,9 +552,29 @@ fn confirm_move(state: *State, store: *Store, effects: *Effects) void {
         return;
     }
     const index = @min(@as(usize, state.move_cursor), count - 1);
-    const target = rows[index].target;
+    state.moving = false;
+    // The chooser does not offer the folder the message is already in, so this
+    // moves: its answer is only ever true.
+    _ = move_to(state, store, message, rows[index].target, effects);
+    state.set_status("Moved to {s}", .{rows[index].title});
+}
 
+fn move_selected(state: *State, store: *Store, target: Mailbox, status_text: []const u8, effects: *Effects) void {
+    const message = selected_or_say(state, store) orelse return;
+    if (!move_to(state, store, message, .{ .mailbox = target }, effects)) {
+        state.set_status("Already in {s}", .{target.title()});
+        return;
+    }
+    state.set_status("{s}", .{status_text});
+}
+
+/// A message goes to a folder: the store says so now, the server is told on a later
+/// tick, and the reader goes back to the list -- the message it was reading is not
+/// where it was. The keys, the archive and the chooser all land here, and the answer
+/// is whether it moved: a message already there is not news, and the caller says so.
+fn move_to(state: *State, store: *Store, message: *Message, target: MoveTarget, effects: *Effects) bool {
     const from = folder_of(message);
+    if (same_folder(from, target)) return false;
     switch (target) {
         .mailbox => |mailbox| {
             message.mailbox = mailbox;
@@ -574,41 +588,12 @@ fn confirm_move(state: *State, store: *Store, effects: *Effects) void {
         .from = from,
         .to = target,
     } });
-    state.moving = false;
     if (state.view == .reader) {
         state.view = .list;
         state.reader_scroll = 0;
     }
     state.rebuild(store);
-    state.set_status("Moved to {s}", .{rows[index].title});
-}
-
-fn move_selected(state: *State, store: *Store, target: Mailbox, status_text: []const u8, effects: *Effects) void {
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
-
-    if (message.mailbox == target) {
-        state.set_status("Already in {s}", .{target.title()});
-        return;
-    }
-
-    const from = folder_of(message);
-    message.mailbox = target;
-    message.named = folder.none;
-    effects.add(.{ .move_message = .{
-        .account = message.account,
-        .id = message.id,
-        .from = from,
-        .to = .{ .mailbox = target },
-    } });
-    if (state.view == .reader) {
-        state.view = .list;
-        state.reader_scroll = 0;
-    }
-    state.rebuild(store);
-    state.set_status("{s}", .{status_text});
+    return true;
 }
 
 fn begin_search(state: *State) void {
@@ -668,10 +653,7 @@ fn start_compose(state: *State, store: *Store) void {
 }
 
 fn start_reply(state: *State, store: *Store) void {
-    const message = state.selected(store) orelse {
-        state.set_status("No message selected", .{});
-        return;
-    };
+    const message = selected_or_say(state, store) orelse return;
 
     state.compose.reset();
     var address_buffer: [limits.address_max]u8 = undefined;
