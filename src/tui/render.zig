@@ -987,12 +987,12 @@ fn address_of(inputs: Inputs, span: core.links.Link) []const u8 {
     return inputs.body[span.start..end];
 }
 
-/// The columns a link's mark takes. A chain hugs the address -- it is part of the
-/// link the way a bullet is part of a line -- while an envelope or a handset is a
-/// symbol about the link, and one blank cell after it is what makes it read as one.
+/// The columns a link's mark takes: the glyph and one blank cell. A mark is a symbol
+/// *about* the link, never part of the address -- a chain that touches the URL reads
+/// as its first character, and an address with a glyph glued to it is not a link a
+/// reader can copy with the eye.
 pub fn mark_columns(mark: []const u8) u16 {
-    const glyph: u16 = @intCast(screen.text_columns(mark));
-    return if (std.mem.eql(u8, mark, link_mark)) glyph else glyph + 1;
+    return @as(u16, @intCast(screen.text_columns(mark))) + 1;
 }
 
 /// The glyph in front of a link, by where it goes: a chain for a page, an envelope
@@ -2421,9 +2421,12 @@ test "a link that wraps is drawn without gaps or doubled spaces" {
     var writer = std.Io.Writer.fixed(&expected);
     writer.writeAll(link_mark) catch unreachable;
     // The cells the chain continues into are the wide glyph's second half: the screen
-    // keeps them as zero, and skips them when it writes the row.
-    var pad: u16 = 0;
-    while (pad + 1 < mark_width) : (pad += 1) writer.writeByte(0) catch unreachable;
+    // keeps them as zero, and skips them when it writes the row. Then the blank cell
+    // that keeps the mark off the address.
+    const glyph: u16 = @intCast(screen.text_columns(link_mark));
+    var pad: u16 = 1;
+    while (pad < glyph) : (pad += 1) writer.writeByte(0) catch unreachable;
+    writer.writeByte(' ') catch unreachable;
     writer.writeAll(wrapped.at(0, body)) catch unreachable;
     try testing.expectEqualStrings(writer.buffered(), std.mem.trimStart(u8, first, " "));
     var second: [64]u8 = undefined;
@@ -3536,14 +3539,15 @@ test "an anchor's words wear the mark of where the anchor goes" {
     try testing.expect(std.mem.indexOf(u8, row, link_mark) == null);
 }
 
-test "an envelope stands a cell clear of the address, a chain hugs it" {
-    const chain: u16 = mark_columns(link_mark);
-    try testing.expectEqual(chain, mark_columns(mark_for("https://example.com")));
-    // One blank cell after the symbol: it is about the link, not part of it.
-    try testing.expectEqual(chain + 1, mark_columns(mark_for("mailto:me@example.com")));
-    try testing.expectEqual(chain + 1, mark_columns(mark_for("tel:+34985456789")));
+test "every mark stands a cell clear of the address it marks" {
+    const glyph: u16 = @intCast(screen.text_columns(link_mark));
+    // The mark, and one blank cell, whatever the mark is.
+    try testing.expectEqual(glyph + 1, mark_columns(link_mark));
+    try testing.expectEqual(glyph + 1, mark_columns(mark_for("https://example.com")));
+    try testing.expectEqual(glyph + 1, mark_columns(mark_for("mailto:me@example.com")));
+    try testing.expectEqual(glyph + 1, mark_columns(mark_for("tel:+34985456789")));
 
-    // And the body is drawn that way: the address starts one cell after the over.
+    // And a chain is drawn that way too: the address starts one cell after it.
     const body = "write mailto:me@example.com";
     var wrapped: wrap.Wrapped = .{};
     wrap.wrap(body, 60, &wrapped);
