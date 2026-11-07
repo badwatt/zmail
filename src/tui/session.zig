@@ -779,9 +779,10 @@ pub const Session = struct {
         self.refresh_count = count;
         self.refresh_target = self.screen_target();
         self.refresh_key = core.text.Text(core.folder.name_max).init(self.folder_key(self.refresh_target));
+        const places = self.places_for(self.refresh_target, &self.refresh_places) orelse return false;
         self.refresh_job.start(
             self.refresh_sources[0..count],
-            self.places_for(self.refresh_target, &self.refresh_places),
+            places,
             self.refresh_scratch,
             &self.folder_scratch,
             list_only,
@@ -1150,38 +1151,39 @@ pub const Session = struct {
         return .{ .mailbox = self.state.mailbox };
     }
 
-    fn place_of(self: *Session, want: Target) core.mail_port.Place {
-        return self.place_for(null, want);
-    }
-
     /// The port's name for a folder, with the account's saved list to say what the
     /// server calls it: "Sent" is "[Gmail]/Sent Mail" on one server and "Sent" on
     /// the next, and the sidebar already knows which.
-    fn place_for(self: *Session, account: ?core.id.AccountId, want: Target) core.mail_port.Place {
+    ///
+    /// Null when the folder is one of an account's own and its slot is gone: a slot
+    /// is a position in a list the server can re-send, and moving mail into Inbox
+    /// because the numbering shifted is losing mail, not being helpful.
+    fn place_for(self: *Session, account: ?core.id.AccountId, want: Target) ?core.mail_port.Place {
         return switch (want) {
-            .mailbox => |mailbox| blk: {
-                const id = account orelse break :blk .{ .mailbox = mailbox };
-                const name = self.state.folders.name_of(id, mailbox) orelse break :blk .{ .mailbox = mailbox };
-                break :blk .{ .mailbox = mailbox, .name = name };
+            .mailbox => |mailbox| .{
+                .mailbox = mailbox,
+                .name = if (account) |id| self.state.folders.name_of(id, mailbox) orelse "" else "",
             },
             .named => |ref| if (self.state.folders.at(ref.account, ref.slot)) |entry|
                 .named(entry.name.slice())
             else
-                .{ .mailbox = self.state.mailbox },
+                null,
         };
     }
 
     /// The folder each source in scope is asked for, named the way that account's
-    /// server names it.
-    fn places_for(self: *Session, want: Target, places: []core.mail_port.Place) []const core.mail_port.Place {
+    /// server names it. Null when one of them cannot be named at all.
+    fn places_for(self: *Session, want: Target, places: []core.mail_port.Place) ?[]const core.mail_port.Place {
         for (self.refresh_sources[0..self.refresh_count], 0..) |source, index| {
-            places[index] = self.place_for(source.id, want);
+            places[index] = self.place_for(source.id, want) orelse return null;
         }
         return places[0..self.refresh_count];
     }
 
-    /// The key the caches keep a folder under: a canonical mailbox by its title,
-    /// a named folder by the name the server gave it.
+    fn place_of(self: *Session, want: Target) ?core.mail_port.Place {
+        return self.place_for(null, want);
+    }
+
     /// The cache key of a folder. Never a mailbox's title for a named folder whose
     /// slot is gone: that would file one folder's mail under another's, and the
     /// next visit would read somebody else's messages out of the cache.
@@ -2070,11 +2072,17 @@ pub const Session = struct {
             self.state.set_alert("That account is not connected", .{});
             return;
         };
+        // Named before the request is written: an `orelse return` inside the struct
+        // literal leaves a half-written optional behind, and the tag says some.
+        const place = self.place_for(account, folder) orelse {
+            self.body_failed(account, folder, id);
+            return;
+        };
         self.body_request = .{
             .account = account,
             .folder = folder,
             .key = core.text.Text(core.folder.name_max).init(self.folder_key(folder)),
-            .place = self.place_for(account, folder),
+            .place = place,
             .id = id,
             .mail = mail,
         };
@@ -2245,7 +2253,11 @@ pub const Session = struct {
             self.state.set_alert("That account is not connected", .{});
             return;
         };
-        mail.delete_message(self.place_of(folder), id) catch {
+        const place = self.place_of(folder) orelse {
+            self.state.set_alert("That folder is gone", .{});
+            return;
+        };
+        mail.delete_message(place, id) catch {
             self.state.set_alert("Could not delete on the server", .{});
             return;
         };
@@ -2258,7 +2270,8 @@ pub const Session = struct {
             if (account) |filter| {
                 if (source.id != filter) continue;
             }
-            source.mail.empty_mailbox(self.place_of(folder)) catch {
+            const place = self.place_of(folder) orelse continue;
+            source.mail.empty_mailbox(place) catch {
                 self.state.set_alert("Could not empty {s} on the server", .{self.folder_key(folder)});
                 return;
             };
@@ -2650,30 +2663,29 @@ pub const Session = struct {
 
     fn sync_flags(self: *Session, account: core.id.AccountId, id: MessageId, flags: core.message.Flags, folder: Target) void {
         const mail = self.source_for(account) orelse return;
-        mail.set_flags(self.place_of(folder), id, flags) catch {
+        const place = self.place_of(folder) orelse return;
+        mail.set_flags(place, id, flags) catch {
             self.state.set_alert("Could not update the server", .{});
         };
     }
 
     fn move_message(self: *Session, account: core.id.AccountId, id: MessageId, from: MoveTarget, to: MoveTarget) void {
         const mail = self.source_for(account) orelse return;
-        mail.move_message(self.place_named(from), id, self.place_named(to)) catch {
+        const source = self.place_of(from) orelse {
+            self.state.set_alert("That folder is gone", .{});
+            return;
+        };
+        const destination = self.place_of(to) orelse {
+            self.state.set_alert("That folder is gone", .{});
+            return;
+        };
+        mail.move_message(source, id, destination) catch {
             self.state.set_alert("Could not move the message", .{});
         };
     }
 
     /// The port's name for a move target: a canonical mailbox, or the server's
     /// name of one of the account's own folders.
-    fn place_named(self: *Session, target: MoveTarget) core.mail_port.Place {
-        return switch (target) {
-            .mailbox => |mailbox| .{ .mailbox = mailbox },
-            .named => |ref| if (self.state.folders.at(ref.account, ref.slot)) |entry|
-                .named(entry.name.slice())
-            else
-                .{ .mailbox = .inbox },
-        };
-    }
-
     fn mask_bit(account_index: u8, mailbox_index: u8) u32 {
         return @as(u32, 1) << @intCast(@as(u16, account_index) * 6 + mailbox_index);
     }
@@ -2713,7 +2725,8 @@ pub const Session = struct {
         }
         defer self.splash_painter.finish();
 
-        const count = source.mail.fetch(self.place_of(.{ .mailbox = mailbox }), self.scratch) catch |err| {
+        const place = self.place_of(.{ .mailbox = mailbox }).?;
+        const count = source.mail.fetch(place, self.scratch) catch |err| {
             self.reload_failed = true;
             if (err == error.Rejected) self.reload_login_failed = true;
             return;
@@ -7156,17 +7169,19 @@ test "a folder the six do not cover keeps its own mail, and a canonical one jump
     try testing.expect(std.mem.indexOf(u8, rig.session.state.status.slice(), "Clients") != null);
 }
 
-test "a move target whose folder is gone falls back to a mailbox" {
+test "a folder whose slot is gone has no name, and nothing is moved into Inbox" {
     var rig: Rig = .{};
     try rig.start();
     defer rig.deinit();
     _ = rig.session.step();
 
+    // A slot is a position in the server's list, and that list can be re-sent: a
+    // stale one names nothing. Answering "Inbox" would move somebody's mail there.
     try testing.expectEqual(
-        core.mail_port.Place.inbox,
-        rig.session.place_named(.{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 20 } }),
+        @as(?core.mail_port.Place, null),
+        rig.session.place_for(null, .{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 20 } }),
     );
-    try testing.expectEqual(core.mail_port.Place.sent, rig.session.place_named(.{ .mailbox = .sent }));
+    try testing.expectEqual(core.mail_port.Place.sent, rig.session.place_for(null, .{ .mailbox = .sent }).?);
 }
 
 test "the folders load in the order J walks them, and the sidebar says when they are coming" {
@@ -7961,4 +7976,46 @@ test "a body that fails for another folder's message leaves this one alone" {
     rig.session.body_failed(core.id.AccountId.from_int(1), .{ .mailbox = .inbox }, MessageId.from_int(1));
     try testing.expectEqual(@as(u32, 0), rig.session.body_len);
     try testing.expect(rig.session.body_loaded);
+}
+
+test "a folder that is gone refuses, and says so, instead of touching another" {
+    var rig: Rig = .{};
+    try rig.start();
+    defer rig.deinit();
+    _ = rig.session.step();
+
+    const account = core.id.AccountId.from_int(1);
+    const gone: MoveTarget = .{ .named = .{ .account = account, .slot = 20 } };
+    const id = MessageId.from_int(1);
+
+    try testing.expect(rig.session.body_request == null);
+    // The reader is on a message in that folder, so a failed body is its to report.
+    rig.session.state.opened = id;
+    rig.session.state.opened_account = account;
+    rig.session.state.opened_folder = gone;
+    rig.session.run_effects_for_test(&.{.{ .fetch_body = .{
+        .account = account,
+        .id = id,
+        .folder = gone,
+    } }});
+    try testing.expect(rig.session.body_loaded);
+    try testing.expect(rig.session.body_request == null);
+
+    // Deleting, moving from it, moving into it: each refuses out loud.
+    rig.session.delete_message(account, id, gone);
+    try testing.expectEqualStrings("That folder is gone", rig.session.state.status.slice());
+
+    rig.session.state.status.clear();
+    rig.session.move_message(account, id, gone, .{ .mailbox = .archive });
+    try testing.expectEqualStrings("That folder is gone", rig.session.state.status.slice());
+
+    rig.session.state.status.clear();
+    rig.session.move_message(account, id, .{ .mailbox = .archive }, gone);
+    try testing.expectEqualStrings("That folder is gone", rig.session.state.status.slice());
+
+    // Emptying it skips that account and says nobody was there, rather than
+    // emptying Inbox because a number moved.
+    rig.session.state.status.clear();
+    rig.session.empty_mailbox(null, gone);
+    try testing.expectEqualStrings("That account is not connected", rig.session.state.status.slice());
 }

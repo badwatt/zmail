@@ -281,10 +281,6 @@ pub const State = struct {
     }
 
     /// The folder on screen, canonical or named.
-    pub fn folder_on_screen(self: *const State) ?folder.Ref {
-        return self.named;
-    }
-
     /// The folders the sidebar shows for the scope on screen, in its order: the
     /// account's own list when the server gave one, the six the app knows when
     /// it did not.
