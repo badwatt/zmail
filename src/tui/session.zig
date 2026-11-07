@@ -754,8 +754,20 @@ pub const Session = struct {
             return;
         }
 
-        // The worker takes exactly the accounts in scope: refreshing never wakes
-        // an account the reader is not looking at.
+        // Paint what the cache has first: switching mailboxes stays instant.
+        self.load_cached(self.screen_target(), false);
+        // The disk first: a folder list is small, and the account you were in an
+        // hour ago should not make you wait for a round trip to see its folders.
+        self.load_cached_folders();
+        _ = self.launch_refresh(false);
+    }
+
+    /// Starts the worker over the accounts in scope, on the folder on screen. A
+    /// refresh asks for the folders as well as the mail, which is what makes going
+    /// to a folder work the first time: the name the sidebar holds may be older than
+    /// the folder itself, and a fetch through an old name lands on an empty list. It
+    /// is one round trip plus a handful, on the worker, and the frame never waits.
+    fn launch_refresh(self: *Session, list_only: bool) bool {
         var count: u8 = 0;
         for (self.live_sources(), 0..) |source, index| {
             if (!self.in_scope(source.id)) continue;
@@ -763,34 +775,22 @@ pub const Session = struct {
             self.refresh_index[count] = @intCast(index);
             count += 1;
         }
-        if (count == 0) return;
+        if (count == 0) return false;
         self.refresh_count = count;
-
-        // Paint what the cache has first: switching mailboxes stays instant.
-        self.load_cached(self.screen_target(), false);
-
         self.refresh_target = self.screen_target();
         self.refresh_key = core.text.Text(core.folder.name_max).init(self.folder_key(self.refresh_target));
-        // The disk first: a folder list is small, and the account you were in an
-        // hour ago should not make you wait for a round trip to see its folders.
-        self.load_cached_folders();
-        // A refresh asks for the folders as well as the mail, which is what makes
-        // going to a folder work the first time: the name the sidebar holds may be
-        // older than the folder itself, and a fetch through an old name lands on an
-        // empty list. It is one round trip plus a handful, on the worker, and the
-        // frame never waits for it.
-        const need_listing = true;
         self.refresh_job.start(
             self.refresh_sources[0..count],
             self.places_for(self.refresh_target, &self.refresh_places),
             self.refresh_scratch,
             &self.folder_scratch,
-            false,
-            need_listing,
+            list_only,
+            true,
         );
         self.refreshing = true;
         self.state.refreshing = true;
         self.repaint();
+        return true;
     }
 
     fn poll_refresh(self: *Session) void {
@@ -935,29 +935,7 @@ pub const Session = struct {
         }
         // The disk had them all: nothing to do, and the sidebar already says so.
         if (!missing) return;
-
-        var count: u8 = 0;
-        for (self.live_sources(), 0..) |source, index| {
-            if (!self.in_scope(source.id)) continue;
-            self.refresh_sources[count] = .{ .id = source.id, .mail = source.mail };
-            self.refresh_index[count] = @intCast(index);
-            count += 1;
-        }
-        if (count == 0) return;
-        self.refresh_count = count;
-        self.refresh_target = self.screen_target();
-        self.refresh_key = core.text.Text(core.folder.name_max).init(self.folder_key(self.refresh_target));
-        self.refresh_job.start(
-            self.refresh_sources[0..count],
-            self.places_for(self.refresh_target, &self.refresh_places),
-            self.refresh_scratch,
-            &self.folder_scratch,
-            true,
-            true,
-        );
-        self.refreshing = true;
-        self.state.refreshing = true;
-        self.repaint();
+        _ = self.launch_refresh(true);
     }
 
     /// Fills the sidebar from the folder list kept on disk, for the accounts in
@@ -2038,15 +2016,11 @@ pub const Session = struct {
         return true;
     }
 
-    /// A body was asked for. If it is not the message already on screen, the
-    /// page is blanked before the network is touched: the reader must never show
-    /// one message's words under another message's subject, not even for the
-    /// second the fetch takes.
-    fn begin_body(self: *Session, account: core.id.AccountId, folder: Target, id: MessageId) void {
-        if (self.shown_message) |shown| {
-            if (shown.matches(account, folder, id)) return;
-        }
-
+    /// Everything the reader knows about the message it was showing: the bytes,
+    /// both views, the links, the headers and the pictures that came with it. One
+    /// list, because three places start a message over and they must forget the
+    /// same things -- a field left behind is a body under somebody else's subject.
+    fn forget_body(self: *Session) void {
         self.raw_len = 0;
         self.body_len = 0;
         self.shown_len = 0;
@@ -2061,6 +2035,17 @@ pub const Session = struct {
         self.html_anchor_count = 0;
         self.body_loaded = false;
         self.wrapped = .{};
+    }
+
+    /// A body was asked for. If it is not the message already on screen, the
+    /// page is blanked before the network is touched: the reader must never show
+    /// one message's words under another message's subject, not even for the
+    /// second the fetch takes.
+    fn begin_body(self: *Session, account: core.id.AccountId, folder: Target, id: MessageId) void {
+        if (self.shown_message) |shown| {
+            if (shown.matches(account, folder, id)) return;
+        }
+        self.forget_body();
     }
 
     /// The reader is on screen with its placeholder, the footer turns and the
@@ -2159,13 +2144,8 @@ pub const Session = struct {
         if (self.state.opened != id) return;
         if (self.state.opened_account != account) return;
         if (!core.state.same_folder(self.state.opened_folder, folder)) return;
-        self.raw_len = 0;
-        self.body_len = 0;
-        self.shown_len = 0;
-        self.image_slot_count = 0;
-        self.html_len = 0;
+        self.forget_body();
         self.body_loaded = true;
-        self.wrapped = .{};
         self.repaint();
     }
 
@@ -2173,8 +2153,8 @@ pub const Session = struct {
     /// by default) and, when there is an HTML part, the reading view made from
     /// it. `H` switches between them without touching the network.
     fn set_raw(self: *Session, account: core.id.AccountId, folder: Target, id: MessageId, raw: []const u8) void {
+        self.forget_body();
         self.shown_message = .{ .account = account, .folder = folder, .id = id };
-        self.html_view = false;
         const length = @min(raw.len, self.raw.len);
         if (raw.ptr != &self.raw) @memcpy(self.raw[0..length], raw[0..length]);
         self.raw_len = @intCast(length);
@@ -2190,10 +2170,6 @@ pub const Session = struct {
 
         self.text_link_count = core.links.scan(self.shown[0..self.shown_len], &self.text_links);
 
-        // Pictures belong to the message that carried them: "r0" in another mail
-        // is another picture, and keeping the slot hands back the previous bytes.
-        self.image_slot_count = 0;
-        self.image_painted = 0;
         if (self.hovered != null) {
             self.deps.system.write(core.osc.Pointer.default.sequence()) catch {};
         }
@@ -2201,15 +2177,9 @@ pub const Session = struct {
         self.hover_url.clear();
 
         self.details = core.headers.parse(self.raw[0..self.raw_len]);
-        self.html_len = 0;
-        self.html_ready = false;
-        self.html_link_count = 0;
-        self.html_kind_count = 0;
-        self.html_anchor_count = 0;
         self.render_html_view();
         self.prefer_html();
         self.body_loaded = true;
-        self.wrapped = .{};
         self.repaint();
     }
 
