@@ -169,15 +169,18 @@ pub const ImapMail = struct {
             const name = if (place.name.len > 0) place.name else self.serverName(mailbox) orelse return false;
             self.exists = self.client.select_name(name) catch |err| switch (err) {
                 error.NotFound => blk: {
-                    // A name the caller gave us is the sidebar's, and the sidebar's
-                    // list came from this server: a refusal is the folder being
-                    // gone, not a guess to check. A name we guessed from the title
-                    // is a guess, and asking the server what it has is how it
-                    // becomes the folder instead of an empty list.
-                    if (place.name.len > 0) return false;
+                    // A refused name is not an empty folder: it may be wrong even
+                    // when it came from the saved list, because a folder can be
+                    // renamed between two runs. One more LIST is what tells the
+                    // difference, and it costs a round trip on the worker -- which
+                    // is cheaper than a folder that shows nothing and never says
+                    // why.
                     self.listed = false;
                     self.listOnce();
-                    const retry = self.serverName(mailbox) orelse return false;
+                    const retry = self.serverName(mailbox) orelse blk2: {
+                        if (place.name.len > 0) break :blk2 place.name;
+                        return false;
+                    };
                     break :blk self.client.select_name(retry) catch |second| return mapError(second);
                 },
                 else => return mapError(err),
@@ -803,4 +806,31 @@ test "a folder the caller can name is selected by that name, without a LIST" {
     ));
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "SELECT \"[Gmail]/Sent Mail\"") != null);
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "LIST") == null);
+}
+
+test "a saved name that no longer selects is re-listed, not shown as empty" {
+    var scripted: Scripted = .{
+        .input = login_ok ++
+            // The name the sidebar remembered: the folder has been renamed since.
+            "a2 NO [TRYCREATE] Unknown mailbox\r\n" ++
+            // The listing says what it is now, with the special-use flag.
+            "* LIST (\\HasNoChildren \\Sent) \"/\" \"Sent Items\"\r\n" ++
+            "a3 OK LIST completed\r\n" ++
+            "* SELECT \"Sent Items\"\r\n" ++
+            "* 1 EXISTS\r\n" ++
+            "a4 OK [READ-WRITE] selected\r\n" ++
+            "* 1 FETCH (UID 7 ENVELOPE (NIL \"hello\" ((\"Me\" NIL \"me\" \"example.com\")) NIL NIL NIL NIL NIL NIL NIL))\r\n" ++
+            "a5 OK FETCH completed\r\n",
+    };
+
+    const imap = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(imap);
+    try ImapMail.open(imap, scripted.transport(), AccountId.from_int(1), "me", "pw");
+    defer imap.close();
+
+    var messages: [2]Message = undefined;
+    const count = try imap.mail().fetch(.{ .mailbox = .sent, .name = "Sent Items Old" }, &messages);
+    try testing.expectEqual(@as(u32, 1), count);
+    try testing.expectEqualStrings("hello", messages[0].subject.slice());
+    try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "LIST \"\" \"*\"") != null);
 }

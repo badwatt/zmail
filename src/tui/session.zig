@@ -350,6 +350,9 @@ pub const Session = struct {
     /// What each source is asked for, named the way that account's server names
     /// it. A field, not a local: the worker reads it after the call returns.
     refresh_places: [refresh_mod.max_accounts]core.mail_port.Place = @splat(.inbox),
+    /// A refresh was asked for while one was out. It is not dropped: the job that
+    /// is out is followed by another the moment it lands.
+    refresh_again: bool = false,
     /// Where a folder list read from disk lands before it goes into the table.
     cached_folders: [core.folder.per_account_max]core.cache_port.Folder = @splat(.{}),
     /// Where the worker writes the folders each account listed.
@@ -695,7 +698,13 @@ pub const Session = struct {
     /// the folders those accounts have. It runs on the worker, so `Ctrl+R` and a
     /// folder switch are the same call -- and neither of them blocks the frame.
     fn start_refresh(self: *Session) void {
-        if (self.refreshing) return;
+        // A refresh is already out: remember that another one was asked for, and it
+        // will be the job after this one. Dropping it left the folder you switched to
+        // showing nothing until something else asked again -- and nothing else does.
+        if (self.refreshing) {
+            self.refresh_again = true;
+            return;
+        }
 
         // The worker takes exactly the accounts in scope: refreshing never wakes
         // an account the reader is not looking at.
@@ -793,6 +802,10 @@ pub const Session = struct {
         self.state.booting = false;
         self.refreshing = false;
         self.state.refreshing = false;
+        // The folder on screen moved while this one was out, or a refresh was asked
+        // for and had nowhere to go: the screen always gets the folder it shows.
+        const stale = self.refresh_again or !core.state.same_folder(self.refresh_target, self.screen_target());
+        self.refresh_again = false;
         self.state.rebuild(&self.store);
         self.repaint();
 
@@ -803,6 +816,7 @@ pub const Session = struct {
 
         // A body asked for while the worker was busy gets its turn now; the reader
         // keeps showing its placeholder until it lands.
+        if (stale) self.start_refresh();
         self.poll_body();
     }
 
