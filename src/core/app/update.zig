@@ -279,6 +279,7 @@ fn apply_open(state: *State, store: *Store, effects: *Effects) void {
     state.opened_account = message.account;
     state.opened_subject.set(message.subject.slice());
     state.opened_from = message.from;
+    state.opened_folder = folder_of(message);
     state.opened_time = message.timestamp_unix;
     state.opened_size = message.size_bytes;
     state.view = .reader;

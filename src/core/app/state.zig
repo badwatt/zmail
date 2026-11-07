@@ -220,6 +220,9 @@ pub const State = struct {
 
     opened: MessageId = .unknown,
     opened_account: AccountId = .unknown,
+    /// The folder the message on screen came from: a UID is unique in its folder
+    /// and nowhere else, so the store can hold two messages with the same number.
+    opened_folder: MoveTarget = .{ .mailbox = .inbox },
     reader_scroll: u32 = 0,
     reader_rows: u16 = 1,
     body_rows: u32 = 0,
@@ -438,6 +441,23 @@ pub const State = struct {
     pub fn selected_const(self: *const State, store: *const Store) ?*const Message {
         const index = self.selected_index(store) orelse return null;
         return store.at_const(index);
+    }
+
+    /// The message the reader is showing, from the live store: the one in the
+    /// folder it was opened from. A refresh can drop it, and then the reader keeps
+    /// the snapshot it took -- but it never borrows another folder's message with
+    /// the same number, which is a different message that happens to count the same.
+    pub fn opened_message(self: *const State, store: *const Store) ?*const Message {
+        if (!self.opened_account.is_known()) return null;
+        var index: u32 = 0;
+        while (index < store.len) : (index += 1) {
+            const message = store.at_const(index);
+            if (message.account != self.opened_account) continue;
+            if (message.id != self.opened) continue;
+            if (!same_folder(folder_of(message), self.opened_folder)) continue;
+            return message;
+        }
+        return null;
     }
 
     pub fn max_reader_scroll(self: *const State) u32 {

@@ -772,10 +772,7 @@ fn render_reader(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     // The store is the live copy, but a refresh can drop a message while it is
     // on screen: what the reader shows comes from the snapshot taken when it was
     // opened, so the page never blanks under the cursor.
-    const stored = if (inputs.state.opened_account.is_known())
-        inputs.store.get_const(inputs.state.opened_account, inputs.state.opened)
-    else
-        null;
+    const stored = inputs.state.opened_message(inputs.store);
 
     const header = Header{
         .subject = if (stored) |message| message.subject.slice() else inputs.state.opened_subject.slice(),
@@ -1321,10 +1318,7 @@ fn render_accounts(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
 fn render_details(inputs: Inputs, lay: layout_mod.Layout, out: *Screen) void {
     const details = inputs.details;
     var from_buffer: [core.limits.address_max]u8 = undefined;
-    const stored = if (inputs.state.opened_account.is_known())
-        inputs.store.get_const(inputs.state.opened_account, inputs.state.opened)
-    else
-        null;
+    const stored = inputs.state.opened_message(inputs.store);
     const from = if (stored) |message| message.from else inputs.state.opened_from;
     const from_address = from.addr_spec(&from_buffer);
     const card_width: u16 = @min(76, lay.columns - 4);
@@ -3120,4 +3114,55 @@ test "a server that calls the inbox INBOX still lights the folder you are in" {
     try row_contains(&out, 3, "Inbox");
     try testing.expectEqual(f.theme.selection.bg, out.cells[3][1].style.bg);
     try testing.expect(!std.meta.eql(out.cells[4][1].style.bg, f.theme.selection.bg));
+}
+
+test "the reader's header is the message in the folder it was opened from" {
+    var store = try core.store.Store.init(testing.allocator, 4);
+    defer store.deinit(testing.allocator);
+    // The same number in two folders: a UID is unique in its own folder and
+    // nowhere else, so 7 in INBOX is one message and 7 in "Importantes" another.
+    var inbox: core.message.Message = .{
+        .id = MessageId.from_int(7),
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+    };
+    inbox.subject.set("tune my music");
+    try store.insert(&inbox);
+
+    var label: core.message.Message = .{
+        .id = MessageId.from_int(7),
+        .account = core.id.AccountId.from_int(1),
+        .mailbox = .inbox,
+    };
+    label.named = 0;
+    label.subject.set("GitHub: a new sign-in");
+    try store.insert(&label);
+
+    var state: State = .{ .list_rows = 20 };
+    state.view = .reader;
+    state.opened_account = core.id.AccountId.from_int(1);
+    state.opened = MessageId.from_int(7);
+    state.opened_folder = .{ .named = .{ .account = core.id.AccountId.from_int(1), .slot = 0 } };
+    state.opened_subject.set("GitHub: a new sign-in");
+
+    var out: Screen = .{};
+    frame(.{
+        .state = &state,
+        .store = &store,
+        .theme = &Theme.dark(),
+        .body = "",
+        .wrapped = null,
+        .columns = 100,
+        .rows = 24,
+        .now_unix = 1_700_000_000,
+    }, &out);
+
+    var row_buffer: [512]u8 = undefined;
+    var line: u16 = 0;
+    var found = false;
+    while (line < out.rows) : (line += 1) {
+        if (std.mem.indexOf(u8, out.row_text(line, &row_buffer), "GitHub: a new sign-in") != null) found = true;
+        try testing.expect(std.mem.indexOf(u8, out.row_text(line, &row_buffer), "tune my music") == null);
+    }
+    try testing.expect(found);
 }
