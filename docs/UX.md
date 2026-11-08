@@ -401,6 +401,22 @@ No colon command line, no tabs-within-tabs, no threading view, no HTML
 rendering. Each of those adds a mode or a pane, and the next milestone is live
 mail, not more surface area.
 
+## In the background
+
+`zmail watch` is the client without the window: it looks at the accounts once every
+`--interval` seconds (a minute by default, five at the floor) and tells the desktop when
+Inbox's unread count grows. One poll is one round trip — the folder list already carries
+the numbers — and the envelopes are fetched only when the count moved, to name the
+message that arrived.
+
+```sh
+zmail watch --detach     # no terminal attached; the shell can close
+zmail watch --once       # cron: one look, one line per account, out
+```
+
+`notify-send` on Linux, `osascript` on macOS, always as an argv list: nothing about a
+message can become a command. With no desktop to tell, the line goes to standard output.
+
 ## Reading
 
 `j`/`k` scroll, `Space` pages, `q` goes back. Text is what the reader shows by
