@@ -17,6 +17,7 @@ pub const Context = struct {
 pub const Hooks = struct {
     launch: *const fn (std.mem.Allocator, std.Io, cli.Launch) anyerror!u8 = launch_mod.run,
     send: *const fn (std.mem.Allocator, std.Io, cli.Send) anyerror!u8 = launch_mod.send,
+    watch: *const fn (std.mem.Allocator, std.Io, cli.Watch) anyerror!u8 = launch_mod.watch,
 };
 
 pub const Outcome = union(enum) {
@@ -24,6 +25,7 @@ pub const Outcome = union(enum) {
     print_stderr: struct { text: []const u8, exit: u8 },
     launch: cli.Launch,
     send: cli.Send,
+    watch: cli.Watch,
 };
 
 pub fn decide(args: []const []const u8, stdout_buffer: []u8, stderr_buffer: []u8) Outcome {
@@ -36,12 +38,13 @@ pub fn decide(args: []const []const u8, stdout_buffer: []u8, stderr_buffer: []u8
         } },
         .launch => |options| return .{ .launch = options },
         .send => |request| return .{ .send = request },
+        .watch => |request| return .{ .watch = request },
     }
 }
 
 /// Process adapter: `main.zig` calls this and nothing else.
 pub fn main(init: std.process.Init) !u8 {
-    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_buffer: [cli.help_max]u8 = undefined;
     var stderr_buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     var stderr = std.Io.File.stderr().writer(init.io, &stderr_buffer);
@@ -66,7 +69,7 @@ pub fn main_with(context: Context, hooks: Hooks, stdout: *std.Io.Writer, stderr:
         return 2;
     };
 
-    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_buffer: [cli.help_max]u8 = undefined;
     var stderr_buffer: [256]u8 = undefined;
     switch (decide(args, &stdout_buffer, &stderr_buffer)) {
         .print_stdout => |text| {
@@ -88,6 +91,10 @@ pub fn main_with(context: Context, hooks: Hooks, stdout: *std.Io.Writer, stderr:
         },
         .send => |request| return hooks.send(context.gpa, context.io, request) catch |err| {
             try stderr.print("{s}: send failed: {s}\n", .{ meta.name, @errorName(err) });
+            return 1;
+        },
+        .watch => |request| return hooks.watch(context.gpa, context.io, request) catch |err| {
+            try stderr.print("{s}: watch failed: {s}\n", .{ meta.name, @errorName(err) });
             return 1;
         },
     }
@@ -288,6 +295,49 @@ test "main_with sends without a terminal, and reports a failure as exit 1" {
     }, .{ .send = stub_send_boom }, &out, &err);
     try testing.expectEqual(@as(u8, 1), failed);
     try testing.expect(std.mem.indexOf(u8, err.buffered(), "send failed: Boom") != null);
+}
+
+test "decide: watch is a subcommand, and its request reaches the caller" {
+    var out: [cli.help_max]u8 = undefined;
+    var err: [256]u8 = undefined;
+    const outcome = decide(&[_][]const u8{ meta.name, "watch", "--once", "--interval", "15" }, &out, &err);
+    try testing.expect(outcome.watch.once);
+    try testing.expectEqual(@as(u16, 15), outcome.watch.interval_s);
+}
+
+test "main: a watcher runs, and a watcher that fails says so" {
+    var out_buffer: [8]u8 = undefined;
+    var out_writer = std.Io.Writer.fixed(&out_buffer);
+    var ok_buffer: [256]u8 = undefined;
+    var ok_writer = std.Io.Writer.fixed(&ok_buffer);
+
+    const watch_args = [_][*:0]const u8{ meta.name ++ "\x00", "watch" };
+    const ok = try main_with(.{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .args = .{ .vector = &watch_args },
+    }, .{ .watch = stub_watch_ok }, &out_writer, &ok_writer);
+    try testing.expectEqual(@as(u8, 0), ok);
+
+    var err_buffer: [256]u8 = undefined;
+    var err_writer = std.Io.Writer.fixed(&err_buffer);
+    var sink: [8]u8 = undefined;
+    var sink_writer = std.Io.Writer.fixed(&sink);
+    const failed = try main_with(.{
+        .gpa = testing.allocator,
+        .io = testing.io,
+        .args = .{ .vector = &watch_args },
+    }, .{ .watch = stub_watch_boom }, &sink_writer, &err_writer);
+    try testing.expectEqual(@as(u8, 1), failed);
+    try testing.expect(std.mem.indexOf(u8, err_writer.buffered(), "watch failed: Boom") != null);
+}
+
+fn stub_watch_ok(_: std.mem.Allocator, _: std.Io, request: cli.Watch) anyerror!u8 {
+    return if (request.interval_s >= 5) 0 else 9;
+}
+
+fn stub_watch_boom(_: std.mem.Allocator, _: std.Io, _: cli.Watch) !u8 {
+    return error.Boom;
 }
 
 fn stub_send(_: std.mem.Allocator, _: std.Io, request: cli.Send) anyerror!u8 {

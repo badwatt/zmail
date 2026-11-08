@@ -42,6 +42,8 @@ pub const command = @import("app/command.zig");
 pub const effect = @import("app/effect.zig");
 pub const state = @import("app/state.zig");
 pub const update = @import("app/update.zig");
+pub const watch = @import("app/watch.zig");
+pub const notify = @import("notify.zig");
 pub const setup = @import("app/setup.zig");
 pub const sync = @import("app/sync.zig");
 
@@ -87,6 +89,8 @@ test {
     _ = @import("ports/outbox.zig");
     _ = @import("ports/cache.zig");
     _ = @import("ports/prefs.zig");
+    _ = @import("app/watch.zig");
+    _ = @import("notify.zig");
     _ = @import("ports/bodies.zig");
     _ = @import("ports/accounts.zig");
     _ = @import("adapters/memory_mail.zig");
