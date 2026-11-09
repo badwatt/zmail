@@ -99,6 +99,12 @@ smtp_security = tls
 `143`/`587` are asked to upgrade before a password leaves, and a server that never
 agrees ends the connection rather than continuing in clear. `plain` is refused.
 
+Sending goes through `openssl s_client` (465 as it is, 587 with `-starttls smtp`),
+because Google's submission servers refuse the hello Zig's own TLS client sends —
+its IMAP accepts it, its SMTP does not. `openssl` is the one program zmail needs at
+runtime, next to `curl` for pictures; both are run as argv lists, never through a
+shell.
+
 The password is never in the config. It lives in `~/.config/zmail/credentials/<label>`,
 sealed with XChaCha20-Poly1305; `ZMAIL_PASSWORD` overrides it for a single-account
 config, and a password manager can be named instead:
