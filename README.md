@@ -142,6 +142,28 @@ and exits. **0 means the server took it, 1 means it did not**, so a script can t
 from "quietly did nothing". `--body -` reads standard input; `--from` picks an account by
 label or address.
 
+### Knowing when mail arrives
+
+```sh
+zmail watch                      # stays in the terminal, one look a minute
+zmail watch --interval 300       # every five minutes
+zmail watch --detach             # leave it running, no terminal attached
+zmail watch --once               # one look, one line, out — for cron
+```
+
+`watch` reads the same config, opens one connection per account, and asks for the folder
+list: the unread numbers come with it, so a poll is one round trip and no envelope. When
+Inbox's unread count grows, the desktop is told — `notify-send` on Linux, `osascript` on
+macOS — with the sender and subject of the message that arrived. Fewer unread means
+somebody is reading and says nothing; a first run is a baseline, not news, because a
+watcher started at nine in the morning must not announce the mail from before.
+
+A hundred new messages are one notification with three names, not a hundred windows.
+Nothing goes through a shell: the notifier is an argv list, and the subject inside it is
+text, never a command. If no desktop answers, the line is printed instead, so a headless
+box still gets something. `--once` prints `<account>: <n> unread` and exits non-zero when
+an account could not be read — the shape a cron job can use.
+
 ## Keys
 
 The card behind `?` is the whole map, per screen. The short version:

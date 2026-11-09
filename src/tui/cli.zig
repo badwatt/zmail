@@ -45,9 +45,21 @@ pub const Send = struct {
     config_path: ?[]const u8 = null,
 };
 
+/// `zmail watch`: stay in a terminal and say when mail arrives.
+pub const Watch = struct {
+    /// Seconds between two looks. A minute is the rhythm of mail; five is the floor.
+    interval_s: u16 = 60,
+    /// One look, one line, and out: what a cron job and a test want.
+    once: bool = false,
+    /// Leave it running with no terminal attached, and come back.
+    detach: bool = false,
+    config_path: ?[]const u8 = null,
+};
+
 pub const Action = union(enum) {
     launch: Launch,
     send: Send,
+    watch: Watch,
     print_version,
     print_help,
     usage_error: UsageError,
@@ -69,6 +81,7 @@ pub fn outgoing(request: Send, body: []const u8) SendError!core.outgoing.Outgoin
 pub fn parse(args: []const []const u8) Action {
     // A subcommand, not a flag: `send` never opens the terminal.
     if (args.len > 1 and std.mem.eql(u8, args[1], "send")) return parse_send(args[2..]);
+    if (args.len > 1 and std.mem.eql(u8, args[1], "watch")) return parse_watch(args[2..]);
 
     var launch = Launch{};
     var index: usize = 1;
@@ -176,6 +189,62 @@ fn parse_send(args: []const []const u8) Action {
     return .{ .send = send };
 }
 
+/// `zmail watch [--interval SECONDS] [--once] [--detach] [--config PATH]`.
+fn parse_watch(args: []const []const u8) Action {
+    const Flag = enum { interval, config };
+    const names = [_][]const u8{ "--interval", "--config" };
+
+    var watch = Watch{};
+    var seen: [names.len]bool = @splat(false);
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return .print_help;
+        if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) return .print_version;
+
+        if (std.mem.eql(u8, arg, "--once") or std.mem.eql(u8, arg, "--detach")) {
+            const name: []const u8 = if (arg[2] == 'o') "--once" else "--detach";
+            const taken = if (arg[2] == 'o') watch.once else watch.detach;
+            if (taken) return .{ .usage_error = .{ .duplicate_flag = name } };
+            if (arg[2] == 'o') watch.once = true else watch.detach = true;
+            continue;
+        }
+
+        var matched = false;
+        for (names, 0..) |name, slot| {
+            if (!std.mem.startsWith(u8, arg, name)) continue;
+            if (arg.len > name.len and arg[name.len] != '=') continue;
+
+            if (seen[slot]) return .{ .usage_error = .{ .duplicate_flag = name } };
+            seen[slot] = true;
+
+            var value = arg[name.len..];
+            if (value.len == 0) {
+                if (index + 1 == args.len) return .{ .usage_error = .{ .missing_value = name } };
+                index += 1;
+                value = args[index];
+            } else {
+                value = value[1..]; // the '='
+            }
+            if (value.len == 0) return .{ .usage_error = .{ .missing_value = name } };
+
+            switch (@as(Flag, @fromBackingInt(@intCast(slot)))) {
+                .interval => {
+                    const seconds = std.fmt.parseInt(u16, value, 10) catch
+                        return .{ .usage_error = .{ .missing_value = name } };
+                    // A second between polls is a busy loop with a socket in it.
+                    watch.interval_s = @max(seconds, 5);
+                },
+                .config => watch.config_path = value,
+            }
+            matched = true;
+            break;
+        }
+        if (!matched) return .{ .usage_error = .{ .unknown_flag = arg } };
+    }
+    return .{ .watch = watch };
+}
+
 /// Directory part of a path, or "" when the path has none.
 pub fn parent_dir(path: []const u8) []const u8 {
     const index = std.mem.lastIndexOfScalar(u8, path, '/') orelse return "";
@@ -251,6 +320,10 @@ pub fn render_version(buffer: []u8) []const u8 {
 }
 
 /// Writes the `--help` output. Returns the bytes written.
+/// Room for the help text, and then some: a usage block that stops mid-sentence is
+/// worse than none.
+pub const help_max: u32 = 1400;
+
 pub fn render_help(buffer: []u8) []const u8 {
     var writer = std.Io.Writer.fixed(buffer);
     writer.print(
@@ -258,6 +331,7 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\
         \\Usage: {s} [options]
         \\       {s} send --to ADDR --subject TEXT [--body TEXT|-] [--from LABEL] [--config P]
+        \\       {s} watch [--interval SECONDS] [--once] [--detach] [--config P]
         \\
         \\Options:
         \\  -h, --help       Show this help and exit
@@ -269,12 +343,15 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\      --password      Ask for the password once and seal it
         \\      --oauth         Sign in with OAuth2 (browser or QR)
         \\
+        \\watch says when mail arrives: notify-send (Linux) or osascript (macOS).
+        \\--once is one look and out, for cron; --detach needs no terminal.
+        \\
         \\Accounts live in P as [account <label>] sections; add more with
         \\--add-account or by hand. The password is never in the config.
         \\Inside zmail, press ? for the key map.
         \\
     ,
-        .{ meta.name, meta.version, meta.name, meta.name },
+        .{ meta.name, meta.version, meta.name, meta.name, meta.name },
     ) catch return "";
     return writer.buffered();
 }
@@ -525,7 +602,7 @@ test "send: the outgoing message carries the address, subject, and body" {
 }
 
 test "render_help documents every option and the demo default" {
-    var buffer: [1024]u8 = undefined;
+    var buffer: [help_max]u8 = undefined;
     const output = render_help(&buffer);
     var expected_buffer: [64]u8 = undefined;
     const expected = std.fmt.bufPrint(&expected_buffer, "{s} {s} - a calm terminal mail client", .{
@@ -574,6 +651,48 @@ test "collect_args copies the process vector into plain slices" {
     try testing.expectEqual(@as(usize, 2), args.len);
     try testing.expectEqualStrings(core.meta.name, args[0]);
     try testing.expectEqualStrings("--version", args[1]);
+}
+
+test "parse: watch takes an interval, one look, or no terminal" {
+    const once = parse(&[_][]const u8{ meta.name, "watch", "--once" });
+    try testing.expect(once.watch.once);
+    try testing.expectEqual(@as(u16, 60), once.watch.interval_s);
+    try testing.expect(!once.watch.detach);
+
+    // Both spellings of a value, and a floor: a second between polls is a socket
+    // in a busy loop.
+    const spaced = parse(&[_][]const u8{ meta.name, "watch", "--interval", "30" });
+    try testing.expectEqual(@as(u16, 30), spaced.watch.interval_s);
+    const joined = parse(&[_][]const u8{ meta.name, "watch", "--interval=2" });
+    try testing.expectEqual(@as(u16, 5), joined.watch.interval_s);
+
+    const both = parse(&[_][]const u8{ meta.name, "watch", "--detach", "--config=/tmp/c" });
+    try testing.expect(both.watch.detach);
+    try testing.expectEqualStrings("/tmp/c", both.watch.config_path.?);
+
+    // And the ways it can be wrong.
+    try testing.expectEqualStrings("--interval", parse(&[_][]const u8{
+        meta.name, "watch", "--interval", "soon",
+    }).usage_error.missing_value);
+    try testing.expectEqualStrings("--interval", parse(&[_][]const u8{
+        meta.name, "watch", "--interval",
+    }).usage_error.missing_value);
+    try testing.expectEqualStrings("--once", parse(&[_][]const u8{
+        meta.name, "watch", "--once", "--once",
+    }).usage_error.duplicate_flag);
+    try testing.expectEqualStrings("--nope", parse(&[_][]const u8{
+        meta.name, "watch", "--nope",
+    }).usage_error.unknown_flag);
+    try testing.expectEqual(Action.print_help, parse(&[_][]const u8{ meta.name, "watch", "-h" }));
+    try testing.expectEqual(Action.print_version, parse(&[_][]const u8{ meta.name, "watch", "-V" }));
+}
+
+test "parse: watch's own flags are not the client's" {
+    // `--config` for the watcher does not turn on `--live` for the client, and
+    // `--demo` is not a watcher flag: the two grammars stay apart.
+    try testing.expectEqualStrings("--demo", parse(&[_][]const u8{
+        meta.name, "watch", "--demo",
+    }).usage_error.unknown_flag);
 }
 
 test "collect_args refuses more arguments than the buffer holds" {

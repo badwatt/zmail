@@ -832,6 +832,195 @@ pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
     return 0;
 }
 
+/// `zmail watch`: one look every so often, and a notification when the mail grows.
+///
+/// This is the process boundary, like `send`: a socket, a clock and a subprocess.
+/// What it decides -- when a number is news, and what to call the message -- lives
+/// in `core.watch`, with no clock and no socket, and is tested there.
+pub fn watch(gpa: std.mem.Allocator, io: std.Io, request: cli.Watch) !u8 {
+    ignore_sigpipe();
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
+    const stderr = &stderr_writer.interface;
+    defer stderr.flush() catch {};
+
+    var path_buffer: [512]u8 = undefined;
+    const path = config_path_in(&path_buffer, request.config_path);
+    if (path.len == 0) {
+        try stderr.print("{s}: no config path: pass --config or set XDG_CONFIG_HOME\n", .{core.meta.name});
+        return 1;
+    }
+    var config_buffer: [8193]u8 = undefined;
+    const config_text = read_file(io, path, &config_buffer) catch {
+        try stderr.print("{s}: no config at {s}\n", .{ core.meta.name, path });
+        return 1;
+    };
+    const file = core.config.parse(config_text) catch |err| {
+        try stderr.print("{s}: {s}\n", .{ core.meta.name, config_message(err) });
+        return 1;
+    };
+    if (file.len == 0) {
+        try stderr.print("{s}: no accounts in {s}\n", .{ core.meta.name, path });
+        return 1;
+    }
+
+    // One detached process, no terminal: a watcher that needs a window is not a
+    // watcher. The child is this same program with the same question.
+    if (request.detach) return detach_watch(io, request, path);
+
+    const live = gpa.create(Live) catch return 1;
+    defer gpa.destroy(live);
+    live.* = .{};
+    defer live.close();
+
+    var index: u8 = 0;
+    while (index < file.len and index < max_accounts) : (index += 1) {
+        const account = live.reserve(gpa, io) orelse break;
+        const entry = &file.entries[index];
+        wire_account(account, gpa, io, core.id.AccountId.from_int(index + 1), entry);
+        read_password(
+            gpa,
+            io,
+            path,
+            entry.label.slice(),
+            file.len == 1,
+            entry.password_command.slice(),
+            &account.password,
+        ) catch {};
+        account.password_ready = !account.password.is_empty();
+        live.add(account);
+    }
+
+    var watcher: core.watch.Watcher = .{};
+    var folders: [core.limits.mailboxes_max]core.mail_port.Listed = undefined;
+    const scratch = gpa.alloc(core.message.Message, core.limits.messages_max) catch return 1;
+    defer gpa.free(scratch);
+
+    var notifier = Notifier{ .io = io };
+    while (true) {
+        var account_index: u8 = 0;
+        while (account_index < live.mail_count) : (account_index += 1) {
+            const source = live.sources[account_index];
+            const label = source.label;
+
+            const count = source.mail.folders(&folders) catch 0;
+            const inbox = inbox_of(folders[0..count]) orelse continue;
+            const unread = inbox.unread;
+
+            // The mail itself only when there is more of it: a poll that fetches
+            // every envelope every minute is a poll that keeps the server awake.
+            var messages: []const core.message.Message = &.{};
+            if (source.mail.fetch(.{ .mailbox = .inbox, .name = inbox.name }, scratch)) |fetched| {
+                messages = scratch[0..fetched];
+            } else |_| {}
+
+            var reports: [core.watch.reports_max]core.message.Message = undefined;
+            const growth = watcher.observe(source.id, label, unread, messages, &reports) orelse continue;
+
+            if (request.once) {
+                print_count(source.label, growth.unread);
+                continue;
+            }
+            notifier.tell(&growth);
+        }
+
+        if (request.once) return 0;
+        os.sleep_ms(@as(u64, request.interval_s) * 1000);
+    }
+}
+
+/// The Inbox row of a folder list: the server may call it `INBOX` and flag it, or
+/// call it something else and flag it; either way there is one.
+fn inbox_of(listed: []const core.mail_port.Listed) ?core.mail_port.Listed {
+    for (listed) |folder| {
+        if (folder.canonical) |mailbox| {
+            if (mailbox == .inbox) return folder;
+        }
+    }
+    for (listed) |folder| {
+        if (std.ascii.eqlIgnoreCase(folder.name, "INBOX")) return folder;
+    }
+    return null;
+}
+
+/// One line to standard output: what a cron job or a script reads.
+fn print_count(label: []const u8, unread: u32) void {
+    var buffer: [128]u8 = undefined;
+    const line = std.fmt.bufPrint(&buffer, "{s}: {d} unread\n", .{ label, unread }) catch return;
+    std.Io.File.stdout().writeStreamingAll(std.Io.Threaded.global_single_threaded.io(), line) catch {};
+}
+
+/// The desktop notification: a command, no shell, and a fallback that is a line of
+/// text when there is nothing to tell.
+const Notifier = struct {
+    io: std.Io,
+    buffers: core.notify.Buffers = .{},
+
+    fn tell(self: *Notifier, growth: *const core.watch.Growth) void {
+        var title: [96]u8 = undefined;
+        const summary = if (growth.reports.len > 0)
+            std.fmt.bufPrint(&title, "{d} new in {s}", .{ growth.reports.len, growth.label }) catch growth.label
+        else
+            std.fmt.bufPrint(&title, "{d} unread in {s}", .{ growth.unread, growth.label }) catch growth.label;
+
+        // The newest message names itself; a count with no name is still news.
+        var body: [256]u8 = undefined;
+        const text = if (growth.reports.len > 0) blk: {
+            const message = growth.reports[0];
+            break :blk std.fmt.bufPrint(&body, "{s} — {s}", .{
+                message.from.label(),
+                message.subject.slice(),
+            }) catch "";
+        } else "";
+
+        const kind: core.notify.Kind = switch (@import("builtin").os.tag) {
+            .macos => .osascript,
+            else => .notify_send,
+        };
+        const command_line = core.notify.command(kind, summary, text, &self.buffers) catch return;
+        _ = spawn_quiet(self.io, command_line.slice()) orelse {
+            // No desktop to talk to: the line is the notification.
+            var line: [320]u8 = undefined;
+            const fallback = std.fmt.bufPrint(&line, "{s}: {s}\n", .{ summary, text }) catch return;
+            std.Io.File.stdout().writeStreamingAll(self.io, fallback) catch {};
+        };
+    }
+};
+
+/// Runs a command with nothing attached, and says whether it worked. The only way
+/// a program is ever started here: an argv list, never a string for a shell.
+fn spawn_quiet(io: std.Io, argv: []const []const u8) ?void {
+    if (argv.len == 0) return null;
+    var child = std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return null;
+    const status = child.wait(io) catch return null;
+    return switch (status) {
+        .exited => |code| if (code == 0) {} else null,
+        else => null,
+    };
+}
+
+/// Same program, same question, no terminal: this one returns and the child goes on.
+fn detach_watch(io: std.Io, request: cli.Watch, path: []const u8) u8 {
+    var interval: [8]u8 = undefined;
+    const seconds = std.fmt.bufPrint(&interval, "{d}", .{request.interval_s}) catch "60";
+    const argv = [_][]const u8{
+        core.meta.name, "watch", "--interval", seconds, "--config", path,
+    };
+    var child = std.process.spawn(io, .{
+        .argv = &argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return 1;
+    _ = child.wait(io) catch return 1;
+    return 0;
+}
+
 /// The account `--from` names: a label, or the address it sends from. Empty
 /// means the first one, which is what a one-account config always wants.
 fn pick_account(file: *const core.config.File, wanted: []const u8) ?*const core.config.Entry {
