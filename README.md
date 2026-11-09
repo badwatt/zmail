@@ -95,6 +95,10 @@ smtp_port     = 465
 smtp_security = tls
 ```
 
+`tls` and `starttls` are both accepted, on both servers: `993`/`465` start encrypted,
+`143`/`587` are asked to upgrade before a password leaves, and a server that never
+agrees ends the connection rather than continuing in clear. `plain` is refused.
+
 The password is never in the config. It lives in `~/.config/zmail/credentials/<label>`,
 sealed with XChaCha20-Poly1305; `ZMAIL_PASSWORD` overrides it for a single-account
 config, and a password manager can be named instead:
