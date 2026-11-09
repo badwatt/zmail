@@ -17,9 +17,7 @@ pub const OpenError = error{
 
 pub const PlainTransport = struct {
     stream: std.Io.net.Stream = undefined,
-    reader: std.Io.net.Stream.Reader = undefined,
     writer: std.Io.net.Stream.Writer = undefined,
-    read_buffer: [4096]u8 = undefined,
     write_buffer: [4096]u8 = undefined,
 
     pub fn open(self: *PlainTransport, io: std.Io, host: []const u8, port: u16) OpenError!void {
@@ -27,7 +25,6 @@ pub const PlainTransport = struct {
         const host_name = std.Io.net.HostName.init(host) catch return error.InvalidHost;
         self.stream = host_name.connect(io, port, .{ .mode = .stream, .timeout = .none }) catch
             return error.ConnectFailed;
-        self.reader = self.stream.reader(io, &self.read_buffer);
         self.writer = self.stream.writer(io, &self.write_buffer);
     }
 
@@ -52,6 +49,11 @@ pub const PlainTransport = struct {
         return stream;
     }
 
+    /// A raw read, never a buffered one: whatever is pulled here belongs to the
+    /// plaintext conversation, and anything read ahead would be lost the moment
+    /// the socket changes hands -- which is exactly where the TLS ServerHello
+    /// arrives. `read_buffer` exists only because the field was needed once; the
+    /// socket is read directly, so no byte can hide in a reader.
     fn readThunk(context: *anyopaque, buffer: []u8, timeout_ms: u32) transport_mod.Error!usize {
         const self: *PlainTransport = @ptrCast(@alignCast(context));
         var fds = [1]std.posix.pollfd{
@@ -60,7 +62,7 @@ pub const PlainTransport = struct {
         const ready = std.posix.poll(&fds, @intCast(timeout_ms)) catch return error.Unavailable;
         if (ready == 0) return 0;
         if ((fds[0].revents & std.posix.POLL.HUP) != 0) return error.Closed;
-        return self.reader.interface.readSliceShort(buffer) catch return error.Unavailable;
+        return std.posix.read(self.stream.socket.handle, buffer) catch return error.Unavailable;
     }
 
     fn writeThunk(context: *anyopaque, bytes: []const u8) transport_mod.Error!void {

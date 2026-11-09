@@ -72,7 +72,15 @@ pub const TlsTransport = struct {
         self.stream_reader = self.stream.reader(io, &self.net_read_buffer);
         self.stream_writer = self.stream.writer(io, &self.net_write_buffer);
 
-        self.ca.rescan(gpa, io, std.Io.Timestamp.now(io, .real)) catch return error.TlsFailed;
+        self.ca.rescan(gpa, io, std.Io.Timestamp.now(io, .real)) catch |err| {
+            // The bundle grew before it failed: the caller cannot free what it
+            // does not know about, so the half-filled bundle is freed here.
+            self.ca.deinit(gpa);
+            return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.TlsFailed,
+            };
+        };
         io.random(&self.entropy);
 
         self.tls = std.crypto.tls.Client.init(&self.stream_reader.interface, &self.stream_writer.interface, .{

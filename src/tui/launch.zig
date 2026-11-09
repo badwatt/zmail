@@ -551,7 +551,10 @@ const UpgradeContext = struct {
                 self.account.io,
                 self.host,
                 stream,
-            ) catch return null;
+            ) catch {
+                self.account.imap_transport.deinit();
+                return null;
+            };
             return self.account.imap_transport.transport();
         }
         self.account.smtp_plain.flush();
@@ -561,7 +564,10 @@ const UpgradeContext = struct {
             self.account.io,
             self.host,
             stream,
-        ) catch return null;
+        ) catch {
+            self.account.smtp_transport.deinit();
+            return null;
+        };
         return self.account.smtp_transport.transport();
     }
 };
@@ -637,6 +643,7 @@ const LiveAccount = struct {
         }
 
         self.imap_transport.open(self.gpa, self.io, self.host.slice(), self.port) catch {
+            self.imap_transport.deinit();
             self.failure = "Could not connect to an IMAP server over TLS";
             return error.Unavailable;
         };
@@ -703,8 +710,10 @@ const LiveAccount = struct {
                 return error.Unavailable;
             };
         } else {
-            self.smtp_transport.open(self.gpa, self.io, self.smtp_host.slice(), self.smtp_port) catch
+            self.smtp_transport.open(self.gpa, self.io, self.smtp_host.slice(), self.smtp_port) catch {
+                self.smtp_transport.deinit();
                 return error.Unavailable;
+            };
             self.smtp_client = core.smtp_outbox.SmtpOutbox.connect(
                 self.smtp_transport.transport(),
                 "localhost",
@@ -910,8 +919,11 @@ pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
     }
 
     const outbox = LiveAccount.openOutbox(account) catch {
+        // The number dialled, not the one in the file: the two differ when implicit
+        // TLS was asked for on a STARTTLS port, and blaming the wrong port sends the
+        // reader to fix a line that was already right.
         try stderr.print("{s}: could not connect to {s}:{d}\n", .{
-            core.meta.name, smtp.host.slice(), smtp.port,
+            core.meta.name, account.smtp_host.slice(), account.smtp_port,
         });
         return 1;
     };
