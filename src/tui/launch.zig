@@ -124,10 +124,10 @@ fn onInterrupt(_: std.posix.SIG) callconv(.c) void {
 fn run_inside(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: SessionSystem) ?Failure {
     if (options.set_password) return run_set_password(io, options, system);
     if (options.add_account) return run_add_account(io, options, system);
-    return switch (options.mode) {
-        .demo => run_demo(gpa, io, system),
-        .live => run_live(gpa, io, options, system),
-    };
+    // The demo is the one thing the client is not by default, and it is asked for by
+    // name: there is no flag for "be what you are".
+    if (options.demo) return run_demo(gpa, io, system);
+    return run_live(gpa, io, options, system);
 }
 
 const SessionSystem = @import("system.zig").System;

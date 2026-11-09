@@ -140,16 +140,13 @@ test "decide: no arguments launches the client" {
     var out: [1024]u8 = undefined;
     var err: [256]u8 = undefined;
     const outcome = decide(&[_][]const u8{meta.name}, &out, &err);
-    try testing.expectEqual(cli.Mode.live, outcome.launch.mode);
+    try testing.expect(!outcome.launch.demo);
 }
 
 fn stub_launch(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch) anyerror!u8 {
     _ = gpa;
     _ = io;
-    return switch (options.mode) {
-        .demo => 7,
-        .live => 8,
-    };
+    return if (options.demo) 7 else 8;
 }
 
 test "main_with reports a missing terminal without a stack trace" {

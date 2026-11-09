@@ -34,7 +34,7 @@ The port exists; this milestone fills it in.
   greeting that arrives with the handshake is not lost.
 - **Account setup (done: M2.3, first run in M3.2).** A strict `key = value`
   config parsed in `core/config.zig` (unknown keys and passwords are refused),
-  `--live` and `--config` in the CLI. If the config is missing, a setup
+  `--config` in the CLI. If the config is missing, a setup
   assistant asks for the account fields, validates them with the same parser,
   and writes the config plus a `0600` credential file next to it.
 - **STARTTLS (next).** Upgrade a plaintext connection on 143/587 with the same

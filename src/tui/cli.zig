@@ -18,9 +18,9 @@ pub const Mode = enum { demo, live };
 
 /// What to start, and with which config.
 pub const Launch = struct {
-    /// Live is the default: `zmail` with a config is a real client, and
-    /// without one it opens the setup assistant.
-    mode: Mode = .live,
+    /// Live is what `zmail` is; the demo is the one other thing it can be, and only
+    /// when asked for by name.
+    demo: bool = false,
     /// `--add-account`: run the assistant and append the account to the config.
     add_account: bool = false,
     /// `--password`: ask for the password once and seal it.
@@ -92,11 +92,7 @@ pub fn parse(args: []const []const u8) Action {
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) return .print_version;
 
         if (std.mem.eql(u8, arg, "--demo")) {
-            launch.mode = .demo;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--live")) {
-            launch.mode = .live;
+            launch.demo = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--add-account")) {
@@ -116,7 +112,6 @@ pub fn parse(args: []const []const u8) Action {
             index += 1;
             if (index == args.len) return .{ .usage_error = .{ .missing_value = arg } };
             launch.config_path = args[index];
-            launch.mode = .live;
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--config=")) {
@@ -124,7 +119,6 @@ pub fn parse(args: []const []const u8) Action {
             const value = arg["--config=".len..];
             if (value.len == 0) return .{ .usage_error = .{ .missing_value = "--config" } };
             launch.config_path = value;
-            launch.mode = .live;
             continue;
         }
         if (is_flag(arg)) return .{ .usage_error = .{ .unknown_flag = arg } };
@@ -337,8 +331,7 @@ pub fn render_help(buffer: []u8) []const u8 {
         \\  -h, --help       Show this help and exit
         \\  -V, --version    Show the version and exit
         \\      --demo          Open the built-in demo mailbox
-        \\      --live          Connect to the accounts in the config (default)
-        \\      --config P      Use config file P (implies --live)
+        \\      --config P      Use config file P
         \\      --add-account   Append another account to the config
         \\      --password      Ask for the password once and seal it
         \\      --oauth         Sign in with OAuth2 (browser or QR)
@@ -379,29 +372,29 @@ const demo_args = [_][]const u8{ meta.name, "--demo" };
 
 test "no arguments launches live, which falls back to setup without a config" {
     const action = parse(&no_args);
-    try testing.expectEqual(Mode.live, action.launch.mode);
+    try testing.expect(!action.launch.demo);
     try testing.expect(action.launch.config_path == null);
 }
 
 test "--demo launches the demo client" {
-    try testing.expectEqual(Mode.demo, parse(&demo_args).launch.mode);
+    try testing.expect(parse(&demo_args).launch.demo);
 }
 
-test "--live launches with a config, without a path" {
-    const action = parse(&[_][]const u8{ meta.name, "--live" });
-    try testing.expectEqual(Mode.live, action.launch.mode);
-    try testing.expect(action.launch.config_path == null);
+test "--live is gone: the client is live unless told otherwise" {
+    // A flag that only says what happens anyway is a flag to be forgotten; an old
+    // alias that carries it fails loudly instead of being quietly wrong.
+    try testing.expectEqualStrings("--live", parse(&[_][]const u8{ meta.name, "--live" }).usage_error.unknown_flag);
 }
 
 test "--oauth starts the browser sign-in instead of a password" {
     const launch = parse(&[_][]const u8{ meta.name, "--oauth" }).launch;
     try testing.expect(launch.oauth);
-    try testing.expectEqual(Mode.live, launch.mode);
+    try testing.expect(!launch.demo);
 }
 
-test "--config takes the next argument and implies live" {
+test "--config takes the next argument" {
     const action = parse(&[_][]const u8{ meta.name, "--config", "/tmp/zmail.conf" });
-    try testing.expectEqual(Mode.live, action.launch.mode);
+    try testing.expect(!action.launch.demo);
     try testing.expectEqualStrings("/tmp/zmail.conf", action.launch.config_path.?);
 }
 
@@ -413,18 +406,18 @@ test "--config=path works too" {
 test "--password asks for the password once" {
     const action = parse(&[_][]const u8{ meta.name, "--password" });
     try testing.expect(action.launch.set_password);
-    try testing.expectEqual(Mode.live, action.launch.mode);
+    try testing.expect(!action.launch.demo);
 }
 
 test "--add-account asks the assistant to append an account" {
     const action = parse(&[_][]const u8{ meta.name, "--add-account" });
     try testing.expect(action.launch.add_account);
-    try testing.expectEqual(Mode.live, action.launch.mode);
+    try testing.expect(!action.launch.demo);
 }
 
-test "--demo after --live returns to the demo" {
-    const action = parse(&[_][]const u8{ meta.name, "--live", "--demo" });
-    try testing.expectEqual(Mode.demo, action.launch.mode);
+test "--demo is the only mode there is" {
+    const action = parse(&[_][]const u8{ meta.name, "--demo", "--config", "/tmp/zmail.conf" });
+    try testing.expect(action.launch.demo);
 }
 
 test "--config without a value and repeated --config are usage errors" {
@@ -528,9 +521,8 @@ test "a positional argument is a usage error" {
     try testing.expectEqualStrings("inbox", action.usage_error.unexpected_argument);
 }
 
-test "repeated --demo and --live are harmless" {
-    try testing.expectEqual(Mode.demo, parse(&[_][]const u8{ meta.name, "--demo", "--demo" }).launch.mode);
-    try testing.expectEqual(Mode.live, parse(&[_][]const u8{ meta.name, "--live", "--live" }).launch.mode);
+test "repeated --demo is harmless" {
+    try testing.expect(parse(&[_][]const u8{ meta.name, "--demo", "--demo" }).launch.demo);
 }
 
 test "render_version names the product and its semver" {
