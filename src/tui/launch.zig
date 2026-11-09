@@ -538,37 +538,21 @@ fn wire_account(
 const UpgradeContext = struct {
     account: *LiveAccount,
     host: []const u8,
-    /// Which of the two plaintext legs to finish: the reading one or the sending one.
-    mail: bool = false,
 
     fn upgrade(context: *anyopaque) ?core.transport_port.Transport {
         const self: *UpgradeContext = @ptrCast(@alignCast(context));
-        if (self.mail) {
-            self.account.imap_plain.flush();
-            const stream = self.account.imap_plain.detach();
-            self.account.imap_transport.adopt(
-                self.account.gpa,
-                self.account.io,
-                self.host,
-                stream,
-            ) catch {
-                self.account.imap_transport.deinit();
-                return null;
-            };
-            return self.account.imap_transport.transport();
-        }
-        self.account.smtp_plain.flush();
-        const stream = self.account.smtp_plain.detach();
-        self.account.smtp_transport.adopt(
+        self.account.imap_plain.flush();
+        const stream = self.account.imap_plain.detach();
+        self.account.imap_transport.adopt(
             self.account.gpa,
             self.account.io,
             self.host,
             stream,
         ) catch {
-            self.account.smtp_transport.deinit();
+            self.account.imap_transport.deinit();
             return null;
         };
-        return self.account.smtp_transport.transport();
+        return self.account.imap_transport.transport();
     }
 };
 
@@ -596,10 +580,11 @@ const LiveAccount = struct {
     /// The plaintext leg of an IMAP STARTTLS exchange, alive only until the swap.
     imap_plain: net.plain.PlainTransport = undefined,
     imap_starttls: bool = false,
-    smtp_transport: net.tls.TlsTransport = undefined,
-    /// The plaintext leg of a STARTTLS exchange, alive only until the swap.
-    smtp_plain: net.plain.PlainTransport = undefined,
-    /// Whether TLS starts mid-conversation on this server's port.
+    /// SMTP goes through `openssl s_client`: Google's submission servers refuse the
+    /// hello Zig's TLS client sends, and the one Google accepts is the system's.
+    smtp_process: net.smtp_openssl.ProcessTransport = undefined,
+    /// Whether the server must be asked to upgrade (587) instead of speaking TLS
+    /// from the first byte (465).
     smtp_starttls: bool = false,
     imap: core.imap_mail.ImapMail = undefined,
     smtp_client: core.smtp_outbox.SmtpOutbox = undefined,
@@ -624,7 +609,7 @@ const LiveAccount = struct {
                 self.failure = "Could not connect to an IMAP server";
                 return error.Unavailable;
             };
-            var upgrader: UpgradeContext = .{ .account = self, .host = self.host.slice(), .mail = true };
+            var upgrader: UpgradeContext = .{ .account = self, .host = self.host.slice() };
             core.imap_mail.ImapMail.open_starttls(
                 &self.imap,
                 self.imap_plain.transport(),
@@ -690,41 +675,42 @@ const LiveAccount = struct {
         if (self.has_smtp) return self.smtp_client.outbox();
         if (!self.smtp_enabled or !self.password_ready) return error.Unavailable;
 
-        if (self.smtp_starttls) {
-            self.smtp_plain.open(self.io, self.smtp_host.slice(), self.smtp_port) catch
-                return error.Unavailable;
-            var upgrader: UpgradeContext = .{
-                .account = self,
-                .host = self.smtp_host.slice(),
+        self.smtp_process.open(
+            self.io,
+            self.smtp_host.slice(),
+            self.smtp_port,
+            self.smtp_starttls,
+        ) catch |err| {
+            self.failure = switch (err) {
+                error.NotFound => "openssl is not installed, and SMTP needs it",
+                else => "Could not start openssl for the SMTP connection",
             };
-            self.smtp_client = core.smtp_outbox.SmtpOutbox.connect_starttls(
-                self.smtp_plain.transport(),
-                "localhost",
-                self.username.slice(),
-                self.password.expose(),
-                UpgradeContext.upgrade,
-                &upgrader,
-                os.now_unix,
-            ) catch {
-                self.smtp_plain.flush();
-                return error.Unavailable;
-            };
-        } else {
-            self.smtp_transport.open(self.gpa, self.io, self.smtp_host.slice(), self.smtp_port) catch {
-                self.smtp_transport.deinit();
-                return error.Unavailable;
-            };
-            self.smtp_client = core.smtp_outbox.SmtpOutbox.connect(
-                self.smtp_transport.transport(),
+            return error.Unavailable;
+        };
+        // `-starttls smtp` reads the greeting, says EHLO and STARTTLS, and hands over a
+        // socket where the conversation restarts at the client: no `220` is coming.
+        self.smtp_client = if (self.smtp_starttls)
+            core.smtp_outbox.SmtpOutbox.connect_open(
+                self.smtp_process.transport(),
                 "localhost",
                 self.username.slice(),
                 self.password.expose(),
                 os.now_unix,
             ) catch {
-                self.smtp_transport.deinit();
+                self.smtp_process.close();
+                return error.Unavailable;
+            }
+        else
+            core.smtp_outbox.SmtpOutbox.connect(
+                self.smtp_process.transport(),
+                "localhost",
+                self.username.slice(),
+                self.password.expose(),
+                os.now_unix,
+            ) catch {
+                self.smtp_process.close();
                 return error.Unavailable;
             };
-        }
         self.has_smtp = true;
         return self.smtp_client.outbox();
     }
@@ -733,7 +719,7 @@ const LiveAccount = struct {
         const self: *LiveAccount = @ptrCast(@alignCast(context));
         if (!self.has_smtp) return;
         self.smtp_client.close();
-        self.smtp_transport.deinit();
+        self.smtp_process.close();
         self.has_smtp = false;
     }
 };

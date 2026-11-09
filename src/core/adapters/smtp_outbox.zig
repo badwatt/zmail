@@ -46,6 +46,20 @@ pub const SmtpOutbox = struct {
         return adapter;
     }
 
+    /// The same, on a socket something else has already greeted: the SMTP
+    /// conversation begins with `EHLO`, not with a `220`.
+    pub fn connect_open(
+        transport: transport_mod.Transport,
+        domain: []const u8,
+        user: []const u8,
+        password: []const u8,
+        now: Now,
+    ) client_mod.Error!SmtpOutbox {
+        var adapter = SmtpOutbox{ .client = client_mod.Client.init(transport), .now = now };
+        try adapter.client.connectFrom(domain, user, password, .already_open);
+        return adapter;
+    }
+
     pub fn outbox(self: *SmtpOutbox) port.Outbox {
         return .{ .context = self, .vtable = &.{ .send = sendThunk } };
     }
@@ -162,5 +176,20 @@ test "connect_starttls asks for the upgrade before the password" {
     try testing.expect(std.mem.indexOf(u8, plain.output_text(), "STARTTLS") != null);
     try testing.expect(std.mem.indexOf(u8, plain.output_text(), "secret") == null);
     try testing.expect(std.mem.indexOf(u8, tls.output_text(), "PLAIN") != null);
+    adapter.client.close();
+}
+
+test "connect_open begins at EHLO, because the greeting already happened" {
+    var peer = Scripted{ .input = "250-smtp.example.com\r\n250 AUTH PLAIN\r\n235 ok\r\n" };
+    var adapter = try SmtpOutbox.connect_open(
+        peer.transport(),
+        "example.test",
+        "me",
+        "secret",
+        fixed_now,
+    );
+    const seen = peer.output_text();
+    try testing.expect(std.mem.startsWith(u8, seen, "EHLO"));
+    try testing.expect(std.mem.indexOf(u8, seen, "PLAIN") != null);
     adapter.client.close();
 }

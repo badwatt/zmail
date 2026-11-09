@@ -36,7 +36,23 @@ pub const Client = struct {
 
     /// Greeting, EHLO, and AUTH PLAIN.
     pub fn connect(self: *Client, domain: []const u8, user: []const u8, password: []const u8) Error!void {
-        try self.expect(220);
+        return self.connectFrom(domain, user, password, .after_greeting);
+    }
+
+    /// Whether the server is about to speak first. It is not, when something in
+    /// between has already done the greeting: `openssl -starttls smtp` reads the
+    /// `220`, says `EHLO` and `STARTTLS`, and hands over a socket where the SMTP
+    /// conversation restarts at the client.
+    pub const Hello = enum { after_greeting, already_open };
+
+    pub fn connectFrom(
+        self: *Client,
+        domain: []const u8,
+        user: []const u8,
+        password: []const u8,
+        hello: Hello,
+    ) Error!void {
+        if (hello == .after_greeting) try self.expect(220);
         try self.ehlo(domain);
         try self.authenticate(user, password);
     }
