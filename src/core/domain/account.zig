@@ -44,6 +44,28 @@ pub const RuleError = error{
     PlaintextForbidden,
 };
 
+/// The port actually dialled for a server, given how it is protected.
+///
+/// 587 and 25 are the plaintext submission ports: TLS there starts with
+/// `STARTTLS`, which this client does not speak yet, so a config that asks for
+/// implicit TLS on one of them cannot connect -- not rarely, never. The port that
+/// can is 465, and the setup assistant used to write exactly the pair that cannot
+/// work. Answering 465 is not a guess: it is the only port on which the security
+/// the user chose means anything.
+pub fn dialPort(server: Server) u16 {
+    if (server.security != .tls) return server.port;
+    return switch (server.port) {
+        25, 587 => 465,
+        else => server.port,
+    };
+}
+
+/// Whether the port had to be corrected, so the caller can say so instead of
+/// connecting to a number the user never wrote.
+pub fn portCorrected(server: Server) bool {
+    return dialPort(server) != server.port;
+}
+
 pub fn validate(account: *const Account, policy: Policy) RuleError!void {
     try validate_server(&account.imap, policy);
     try validate_server(&account.smtp, policy);
@@ -157,4 +179,34 @@ test "validate_server accepts IP literals and bracketed IPv6 hosts" {
     try validate_server(&ipv6, .{});
     var internal = make_server("mail.internal_lan", 993, .tls);
     try validate_server(&internal, .{});
+}
+
+test "the port dialled is the one the security can work on" {
+    var implicit = Server{ .port = 465 };
+    implicit.host.set("smtp.example.com");
+    try testing.expectEqual(@as(u16, 465), dialPort(implicit));
+    try testing.expect(!portCorrected(implicit));
+
+    // The pair the assistant wrote for Gmail, and which cannot connect: a TLS
+    // handshake on a plaintext submission port.
+    var broken = implicit;
+    broken.port = 587;
+    try testing.expectEqual(@as(u16, 465), dialPort(broken));
+    try testing.expect(portCorrected(broken));
+
+    broken.port = 25;
+    try testing.expectEqual(@as(u16, 465), dialPort(broken));
+
+    // Something that is not a submission port is left alone: a server may really
+    // speak implicit TLS on a number of its own.
+    var custom = implicit;
+    custom.port = 8465;
+    try testing.expectEqual(@as(u16, 8465), dialPort(custom));
+    try testing.expect(!portCorrected(custom));
+
+    // STARTTLS is a different security, and the port is the user's.
+    var upgrade = implicit;
+    upgrade.security = .starttls;
+    upgrade.port = 587;
+    try testing.expectEqual(@as(u16, 587), dialPort(upgrade));
 }

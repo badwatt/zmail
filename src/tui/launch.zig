@@ -523,7 +523,9 @@ fn wire_account(
     account.username.set(entry.account.username.slice());
     if (entry.smtp) |smtp| {
         account.smtp_host.set(smtp.host.slice());
-        account.smtp_port = smtp.port;
+        // The port the security can work on, here as everywhere: implicit TLS on
+        // 587 is a handshake nobody answers.
+        account.smtp_port = core.account.dialPort(smtp);
     }
 }
 
@@ -791,11 +793,21 @@ pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
     wire_account(account, gpa, io, core.id.AccountId.from_int(1), entry);
     const smtp = entry.smtp.?;
     if (smtp.security != .tls) {
-        try stderr.print("{s}: only implicit TLS for SMTP (smtp_port = 465) today\n", .{core.meta.name});
+        try stderr.print("{s}: only implicit TLS for SMTP (smtp_port = 465) today; " ++
+            "{s}:{d} asks for STARTTLS\n", .{ core.meta.name, smtp.host.slice(), smtp.port });
         return 1;
     }
+    // A pair that cannot work -- implicit TLS on a plaintext submission port -- is
+    // dialled as 465, which is the port the security the user chose means.
+    if (core.account.portCorrected(smtp)) {
+        try stderr.print("{s}: smtp_port {d} is a STARTTLS port; using 465 for implicit TLS\n", .{
+            core.meta.name, smtp.port,
+        });
+    }
     account.smtp_host.set(smtp.host.slice());
-    account.smtp_port = smtp.port;
+    // Implicit TLS on 587 never connects: the port is dialled as the security can
+    // work on it, and the caller says so instead of pretending.
+    account.smtp_port = core.account.dialPort(smtp);
 
     read_password(
         gpa,
@@ -1126,7 +1138,8 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
         }
         if (entry.smtp) |smtp| {
             if (smtp.security != .tls) {
-                return .{ .message = "Only implicit TLS for SMTP (smtp_port = 465) is supported today" };
+                return .{ .message = "Only implicit TLS for SMTP is supported today: " ++
+                    "STARTTLS on 587 is next, and 465 with smtp_security = tls works now" };
             }
         }
 
