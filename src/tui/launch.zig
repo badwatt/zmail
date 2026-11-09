@@ -533,14 +533,14 @@ fn wire_account(
     }
 }
 
-/// What the SMTP client needs to finish a STARTTLS exchange: the plaintext leg to
+/// What the IMAP client needs to finish a STARTTLS exchange: the plaintext leg to
 /// flush, the socket it leaves behind, and where to put the encrypted one.
-const UpgradeContext = struct {
+const ImapUpgrade = struct {
     account: *LiveAccount,
     host: []const u8,
 
     fn upgrade(context: *anyopaque) ?core.transport_port.Transport {
-        const self: *UpgradeContext = @ptrCast(@alignCast(context));
+        const self: *ImapUpgrade = @ptrCast(@alignCast(context));
         self.account.imap_plain.flush();
         const stream = self.account.imap_plain.detach();
         self.account.imap_transport.adopt(
@@ -609,14 +609,14 @@ const LiveAccount = struct {
                 self.failure = "Could not connect to an IMAP server";
                 return error.Unavailable;
             };
-            var upgrader: UpgradeContext = .{ .account = self, .host = self.host.slice() };
+            var upgrader: ImapUpgrade = .{ .account = self, .host = self.host.slice() };
             core.imap_mail.ImapMail.open_starttls(
                 &self.imap,
                 self.imap_plain.transport(),
                 self.id,
                 self.username.slice(),
                 self.password.expose(),
-                UpgradeContext.upgrade,
+                ImapUpgrade.upgrade,
                 &upgrader,
             ) catch {
                 self.failure = "Could not start TLS with the IMAP server";

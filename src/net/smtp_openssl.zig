@@ -96,10 +96,17 @@ pub const ProcessTransport = struct {
     }
 
     fn readThunk(context: *anyopaque, buffer: []u8, timeout_ms: u32) transport_mod.Error!usize {
-        _ = timeout_ms;
         const self: *ProcessTransport = @ptrCast(@alignCast(context));
         if (!self.alive) return error.Closed;
         const stdout = self.child.stdout orelse return error.Closed;
+        // Poll first, like every other transport: a child that stops talking must
+        // become the protocol's timeout, not a thread asleep on a pipe forever.
+        var fds = [1]std.posix.pollfd{
+            .{ .fd = stdout.handle, .events = std.posix.POLL.IN, .revents = 0 },
+        };
+        const ready = std.posix.poll(&fds, @intCast(timeout_ms)) catch return error.Unavailable;
+        if (ready == 0) return 0;
+        if ((fds[0].revents & std.posix.POLL.HUP) != 0) return error.Closed;
         const slices = [_][]u8{buffer};
         return stdout.readStreaming(self.io, &slices) catch return error.Unavailable;
     }
