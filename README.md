@@ -57,7 +57,8 @@ catches up.
 - **Safe by default.** Mail is attacker-controlled text: control characters are
   neutralised on ingress, every buffer is bounded, secrets zero on drop and print as
   `<redacted>`, and only implicit TLS is accepted.
-- **Keyboard, arrows, and the mouse.** Nothing is keyboard-only or mouse-only.
+- **Keyboard, arrows, and the mouse.** Nothing is keyboard-only or mouse-only. The `←`
+  in the corner is the way back for a mouse, and the pointer becomes a hand over it.
 - **One static binary.** Linux (musl, static) and macOS, x86_64 and aarch64.
 
 > [!IMPORTANT]
@@ -171,13 +172,14 @@ The card behind `?` is the whole map, per screen. The short version:
 | | |
 |---|---|
 | `j` `k` `g` `G`, arrows | move, first, last |
+| `Space` | a page |
 | `Enter` `l` | open the message |
 | `/` | search the list |
 | `c` / `r` | compose / reply |
 | `u` / `s` | read or unread / star |
 | `d` / `#` | archive / move to Trash |
 | `m` | move to another folder |
-| `H` `i` `\` | HTML view, pictures, every header |
+| `H` `i` `\` | HTML view, pictures (also in the list, and kept), every header |
 | `J` / `K` | next / previous folder |
 | `1`–`9` | the folder in that position, as the sidebar shows them |
 | `a` / `A` | next account / accounts overlay |

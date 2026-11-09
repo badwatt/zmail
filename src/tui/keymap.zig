@@ -109,6 +109,9 @@ fn char_command(codepoint: u21, view: View) ?Command {
     return switch (codepoint) {
         'j' => .{ .move = .down },
         'k' => .{ .move = .up },
+        // The card has promised a page on this key since the first release; it did
+        // nothing, in the list and in the reader alike.
+        ' ' => .{ .move = .page_down },
         'g' => .{ .move = .top },
         'G' => .{ .move = .bottom },
         'l', 'o' => .open_selected,
@@ -223,6 +226,15 @@ test "vim movement keys" {
         .{ .key = .{ .char = 'G' }, .expected = .{ .move = .bottom } },
     };
     for (cases) |case| try check(case);
+}
+
+test "space pages down, which is what the card promises" {
+    const views = [_]View{ .list, .reader };
+    for (views) |view| {
+        try check(.{ .key = .{ .char = ' ' }, .context = .{ .view = view }, .expected = .{ .move = .page_down } });
+    }
+    // Where a space is a space, it is still a space.
+    try check(.{ .key = .{ .char = ' ' }, .context = .{ .view = .compose }, .expected = .{ .compose_char = ' ' } });
 }
 
 test "arrow and navigation keys mirror the vim keys" {
