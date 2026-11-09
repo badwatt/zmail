@@ -516,6 +516,9 @@ fn wire_account(
     account.io = io;
     account.id = id;
     account.from = entry.account.address;
+    // Reading starts encrypted at 993; on 143 the server is asked for STARTTLS and
+    // the password waits for the answer.
+    account.imap_starttls = entry.account.imap.security == .starttls;
     account.port = entry.account.imap.port;
     account.smtp_enabled = entry.smtp != null;
     account.label.set(entry.label.slice());
@@ -535,9 +538,22 @@ fn wire_account(
 const UpgradeContext = struct {
     account: *LiveAccount,
     host: []const u8,
+    /// Which of the two plaintext legs to finish: the reading one or the sending one.
+    mail: bool = false,
 
     fn upgrade(context: *anyopaque) ?core.transport_port.Transport {
         const self: *UpgradeContext = @ptrCast(@alignCast(context));
+        if (self.mail) {
+            self.account.imap_plain.flush();
+            const stream = self.account.imap_plain.detach();
+            self.account.imap_transport.adopt(
+                self.account.gpa,
+                self.account.io,
+                self.host,
+                stream,
+            ) catch return null;
+            return self.account.imap_transport.transport();
+        }
         self.account.smtp_plain.flush();
         const stream = self.account.smtp_plain.detach();
         self.account.smtp_transport.adopt(
@@ -571,6 +587,9 @@ const LiveAccount = struct {
     smtp_enabled: bool = false,
 
     imap_transport: net.tls.TlsTransport = undefined,
+    /// The plaintext leg of an IMAP STARTTLS exchange, alive only until the swap.
+    imap_plain: net.plain.PlainTransport = undefined,
+    imap_starttls: bool = false,
     smtp_transport: net.tls.TlsTransport = undefined,
     /// The plaintext leg of a STARTTLS exchange, alive only until the swap.
     smtp_plain: net.plain.PlainTransport = undefined,
@@ -592,6 +611,29 @@ const LiveAccount = struct {
         if (self.token.access.is_empty() and !self.password_ready) {
             self.failure = "No password for an account: run setup again or set ZMAIL_PASSWORD";
             return error.Unavailable;
+        }
+
+        if (self.imap_starttls) {
+            self.imap_plain.open(self.io, self.host.slice(), self.port) catch {
+                self.failure = "Could not connect to an IMAP server";
+                return error.Unavailable;
+            };
+            var upgrader: UpgradeContext = .{ .account = self, .host = self.host.slice(), .mail = true };
+            core.imap_mail.ImapMail.open_starttls(
+                &self.imap,
+                self.imap_plain.transport(),
+                self.id,
+                self.username.slice(),
+                self.password.expose(),
+                UpgradeContext.upgrade,
+                &upgrader,
+            ) catch {
+                self.failure = "Could not start TLS with the IMAP server";
+                return error.Unavailable;
+            };
+            self.has_imap = true;
+            self.connected = true;
+            return self.imap.mail();
         }
 
         self.imap_transport.open(self.gpa, self.io, self.host.slice(), self.port) catch {
@@ -1174,9 +1216,10 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
 
     for (file.items(), 0..) |entry, index_u| {
         const index: u8 = @intCast(index_u);
-        // IMAP has no plaintext leg yet: reading starts encrypted or not at all.
-        if (entry.account.imap.security != .tls) {
-            return .{ .message = "Only implicit TLS (imap_security = tls) is supported today" };
+        // Plaintext is still refused: reading a mailbox without TLS is not a trade
+        // this client makes. TLS and STARTTLS both end up encrypted.
+        if (entry.account.imap.security == .plain) {
+            return .{ .message = "imap_security = plain is not supported: the mailbox is read over TLS" };
         }
 
         // Built in place: the struct carries the client and its buffers.

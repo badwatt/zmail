@@ -60,6 +60,23 @@ pub const ImapMail = struct {
         try self.client.login(user, password);
     }
 
+    /// The same login, on a port where TLS starts mid-conversation: the greeting
+    /// and `STARTTLS` go in clear, and neither the user nor the password is sent
+    /// until the socket is encrypted.
+    pub fn open_starttls(
+        self: *ImapMail,
+        transport: transport_mod.Transport,
+        account: AccountId,
+        user: []const u8,
+        password: []const u8,
+        upgrade: client_mod.Client.Upgrade,
+        context: *anyopaque,
+    ) client_mod.Error!void {
+        self.* = .{ .client = client_mod.Client.init(transport), .account = account };
+        try self.client.starttls(upgrade, context);
+        try self.client.login(user, password);
+    }
+
     /// Opens with an OAuth2 token instead of a password.
     pub fn open_token(
         self: *ImapMail,
@@ -833,4 +850,22 @@ test "a saved name that no longer selects is re-listed, not shown as empty" {
     try testing.expectEqual(@as(u32, 1), count);
     try testing.expectEqualStrings("hello", messages[0].subject.slice());
     try testing.expect(std.mem.indexOf(u8, scripted.output_text(), "LIST \"\" \"*\"") != null);
+}
+
+test "open_starttls upgrades before the password, then logs in on the encrypted leg" {
+    var plain = Scripted{ .input = "* OK ready\r\na1 OK begin TLS\r\n" };
+    var tls = Scripted{ .input = "a2 OK LOGIN completed\r\n" };
+    const Peer = struct {
+        fn upgrade(context: *anyopaque) ?transport_mod.Transport {
+            const peer: *Scripted = @ptrCast(@alignCast(context));
+            return peer.transport();
+        }
+    };
+    const mail = try testing.allocator.create(ImapMail);
+    defer testing.allocator.destroy(mail);
+    try mail.open_starttls(plain.transport(), .unknown, "me", "secret", Peer.upgrade, &tls);
+    try testing.expect(std.mem.indexOf(u8, plain.output_text(), "STARTTLS") != null);
+    try testing.expect(std.mem.indexOf(u8, plain.output_text(), "secret") == null);
+    try testing.expect(std.mem.indexOf(u8, tls.output_text(), "LOGIN") != null);
+    mail.close();
 }

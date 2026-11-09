@@ -87,6 +87,35 @@ pub const Client = struct {
         try self.wait_ok(tag);
     }
 
+    /// `STARTTLS` on a plaintext port: the server stops speaking IMAP for a moment
+    /// and the socket becomes TLS. Nothing secret has been sent yet -- no tag, no
+    /// user, no password -- so the only thing the clear leg can leak is the fact
+    /// that somebody connected. If the server does not agree, the connection ends.
+    /// `upgrade` replaces the transport; it answers null when the handshake failed,
+    /// and the password would then have nowhere safe to go.
+    pub const Upgrade = *const fn (context: *anyopaque) ?transport_mod.Transport;
+
+    pub fn starttls(self: *Client, upgrade: Upgrade, context: *anyopaque) Error!void {
+        try self.await_greeting();
+        // PREAUTH means the socket already proved who we are; there is nothing to
+        // upgrade and pretending otherwise would only lose the connection.
+        if (self.greeted == .preauth) return error.Rejected;
+
+        var tag_buffer: [16]u8 = undefined;
+        const tag = self.beginCommand(&tag_buffer);
+        const bytes = std.fmt.bufPrint(self.command_slice(), "{s} STARTTLS\r\n", .{tag}) catch
+            return error.ProtocolError;
+        try self.send(bytes);
+        try self.wait_ok(tag);
+
+        self.transport = upgrade(context) orelse return error.Unavailable;
+        // The framer holds bytes that belong to the plaintext conversation; the TLS
+        // stream starts at a record boundary, not in the middle of a line.
+        self.framer = .{};
+        // The server does not greet again: this connection has been greeted.
+        self.greeted = .ok;
+    }
+
     pub fn login(self: *Client, user: []const u8, password: []const u8) Error!void {
         // The server speaks first. Sending LOGIN before reading the greeting is
         // a protocol violation, and servers react by ignoring the command.
