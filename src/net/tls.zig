@@ -51,6 +51,24 @@ pub const TlsTransport = struct {
         // goes out first.
         self.stream = host_name.connect(io, port, .{ .mode = .stream, .timeout = .none }) catch
             return error.ConnectFailed;
+        try self.handshake(gpa, io, host);
+    }
+
+    /// Takes over a stream that is already open, for STARTTLS: the plaintext
+    /// exchange happened on it, and the handshake starts where that ended. The
+    /// caller has flushed whatever the server was waiting for.
+    pub fn adopt(
+        self: *TlsTransport,
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        stream: std.Io.net.Stream,
+    ) OpenError!void {
+        self.* = .{ .gpa = gpa, .io = io, .stream = stream };
+        try self.handshake(gpa, io, host);
+    }
+
+    fn handshake(self: *TlsTransport, gpa: std.mem.Allocator, io: std.Io, host: []const u8) OpenError!void {
         self.stream_reader = self.stream.reader(io, &self.net_read_buffer);
         self.stream_writer = self.stream.writer(io, &self.net_write_buffer);
 

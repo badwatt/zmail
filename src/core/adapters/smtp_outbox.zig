@@ -29,6 +29,23 @@ pub const SmtpOutbox = struct {
         return adapter;
     }
 
+    /// The same, on a port where TLS starts mid-conversation: the greeting, `EHLO`
+    /// and `STARTTLS` go in clear, and everything that could be stolen -- the
+    /// password, the message -- waits for the upgrade.
+    pub fn connect_starttls(
+        transport: transport_mod.Transport,
+        domain: []const u8,
+        user: []const u8,
+        password: []const u8,
+        upgrade: client_mod.Client.Upgrade,
+        context: *anyopaque,
+        now: Now,
+    ) client_mod.Error!SmtpOutbox {
+        var adapter = SmtpOutbox{ .client = client_mod.Client.init(transport), .now = now };
+        try adapter.client.connect_starttls(domain, user, password, upgrade, context);
+        return adapter;
+    }
+
     pub fn outbox(self: *SmtpOutbox) port.Outbox {
         return .{ .context = self, .vtable = &.{ .send = sendThunk } };
     }
@@ -119,4 +136,31 @@ test "close sends QUIT and closes the transport" {
 test "a refused login fails connect" {
     var scripted: Scripted = .{ .input = "220 hi\r\n250 ok\r\n535 bad\r\n" };
     try testing.expectError(error.Rejected, SmtpOutbox.connect(scripted.transport(), "localhost", "me", "pw", fixed_now));
+}
+
+test "connect_starttls asks for the upgrade before the password" {
+    var plain = Scripted{ .input = "220 ready\r\n" ++
+        "250-smtp.example.com\r\n" ++
+        "250 STARTTLS\r\n" ++
+        "220 go\r\n" };
+    var tls = Scripted{ .input = "250-smtp.example.com\r\n250 AUTH PLAIN\r\n235 ok\r\n" };
+    const Peer = struct {
+        fn upgrade(context: *anyopaque) ?transport_mod.Transport {
+            const peer: *Scripted = @ptrCast(@alignCast(context));
+            return peer.transport();
+        }
+    };
+    var adapter = try SmtpOutbox.connect_starttls(
+        plain.transport(),
+        "example.test",
+        "me",
+        "secret",
+        Peer.upgrade,
+        &tls,
+        fixed_now,
+    );
+    try testing.expect(std.mem.indexOf(u8, plain.output_text(), "STARTTLS") != null);
+    try testing.expect(std.mem.indexOf(u8, plain.output_text(), "secret") == null);
+    try testing.expect(std.mem.indexOf(u8, tls.output_text(), "PLAIN") != null);
+    adapter.client.close();
 }

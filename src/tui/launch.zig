@@ -524,10 +524,31 @@ fn wire_account(
     if (entry.smtp) |smtp| {
         account.smtp_host.set(smtp.host.slice());
         // The port the security can work on, here as everywhere: implicit TLS on
-        // 587 is a handshake nobody answers.
-        account.smtp_port = core.account.dialPort(smtp);
+        // 587 is a handshake nobody answers, and STARTTLS is a plaintext first leg.
+        account.smtp_starttls = smtp.security == .starttls;
+        account.smtp_port = if (account.smtp_starttls) smtp.port else core.account.dialPort(smtp);
     }
 }
+
+/// What the SMTP client needs to finish a STARTTLS exchange: the plaintext leg to
+/// flush, the socket it leaves behind, and where to put the encrypted one.
+const UpgradeContext = struct {
+    account: *LiveAccount,
+    host: []const u8,
+
+    fn upgrade(context: *anyopaque) ?core.transport_port.Transport {
+        const self: *UpgradeContext = @ptrCast(@alignCast(context));
+        self.account.smtp_plain.flush();
+        const stream = self.account.smtp_plain.detach();
+        self.account.smtp_transport.adopt(
+            self.account.gpa,
+            self.account.io,
+            self.host,
+            stream,
+        ) catch return null;
+        return self.account.smtp_transport.transport();
+    }
+};
 
 const LiveAccount = struct {
     gpa: std.mem.Allocator,
@@ -551,6 +572,10 @@ const LiveAccount = struct {
 
     imap_transport: net.tls.TlsTransport = undefined,
     smtp_transport: net.tls.TlsTransport = undefined,
+    /// The plaintext leg of a STARTTLS exchange, alive only until the swap.
+    smtp_plain: net.plain.PlainTransport = undefined,
+    /// Whether TLS starts mid-conversation on this server's port.
+    smtp_starttls: bool = false,
     imap: core.imap_mail.ImapMail = undefined,
     smtp_client: core.smtp_outbox.SmtpOutbox = undefined,
     has_imap: bool = false,
@@ -616,18 +641,39 @@ const LiveAccount = struct {
         if (self.has_smtp) return self.smtp_client.outbox();
         if (!self.smtp_enabled or !self.password_ready) return error.Unavailable;
 
-        self.smtp_transport.open(self.gpa, self.io, self.smtp_host.slice(), self.smtp_port) catch
-            return error.Unavailable;
-        self.smtp_client = core.smtp_outbox.SmtpOutbox.connect(
-            self.smtp_transport.transport(),
-            "localhost",
-            self.username.slice(),
-            self.password.expose(),
-            os.now_unix,
-        ) catch {
-            self.smtp_transport.deinit();
-            return error.Unavailable;
-        };
+        if (self.smtp_starttls) {
+            self.smtp_plain.open(self.io, self.smtp_host.slice(), self.smtp_port) catch
+                return error.Unavailable;
+            var upgrader: UpgradeContext = .{
+                .account = self,
+                .host = self.smtp_host.slice(),
+            };
+            self.smtp_client = core.smtp_outbox.SmtpOutbox.connect_starttls(
+                self.smtp_plain.transport(),
+                "localhost",
+                self.username.slice(),
+                self.password.expose(),
+                UpgradeContext.upgrade,
+                &upgrader,
+                os.now_unix,
+            ) catch {
+                self.smtp_plain.flush();
+                return error.Unavailable;
+            };
+        } else {
+            self.smtp_transport.open(self.gpa, self.io, self.smtp_host.slice(), self.smtp_port) catch
+                return error.Unavailable;
+            self.smtp_client = core.smtp_outbox.SmtpOutbox.connect(
+                self.smtp_transport.transport(),
+                "localhost",
+                self.username.slice(),
+                self.password.expose(),
+                os.now_unix,
+            ) catch {
+                self.smtp_transport.deinit();
+                return error.Unavailable;
+            };
+        }
         self.has_smtp = true;
         return self.smtp_client.outbox();
     }
@@ -792,22 +838,17 @@ pub fn send(gpa: std.mem.Allocator, io: std.Io, request: cli.Send) !u8 {
     const account = live.reserve(gpa, io) orelse return 1;
     wire_account(account, gpa, io, core.id.AccountId.from_int(1), entry);
     const smtp = entry.smtp.?;
-    if (smtp.security != .tls) {
-        try stderr.print("{s}: only implicit TLS for SMTP (smtp_port = 465) today; " ++
-            "{s}:{d} asks for STARTTLS\n", .{ core.meta.name, smtp.host.slice(), smtp.port });
-        return 1;
-    }
     // A pair that cannot work -- implicit TLS on a plaintext submission port -- is
-    // dialled as 465, which is the port the security the user chose means.
-    if (core.account.portCorrected(smtp)) {
+    // dialled as 465, which is the port the security the user chose means, and the
+    // one line below says so instead of dialling a number nobody typed.
+    if (smtp.security == .tls and core.account.portCorrected(smtp)) {
         try stderr.print("{s}: smtp_port {d} is a STARTTLS port; using 465 for implicit TLS\n", .{
             core.meta.name, smtp.port,
         });
     }
     account.smtp_host.set(smtp.host.slice());
-    // Implicit TLS on 587 never connects: the port is dialled as the security can
-    // work on it, and the caller says so instead of pretending.
-    account.smtp_port = core.account.dialPort(smtp);
+    account.smtp_starttls = smtp.security == .starttls;
+    account.smtp_port = if (account.smtp_starttls) smtp.port else core.account.dialPort(smtp);
 
     read_password(
         gpa,
@@ -1133,14 +1174,9 @@ fn run_live(gpa: std.mem.Allocator, io: std.Io, options: cli.Launch, system: Ses
 
     for (file.items(), 0..) |entry, index_u| {
         const index: u8 = @intCast(index_u);
+        // IMAP has no plaintext leg yet: reading starts encrypted or not at all.
         if (entry.account.imap.security != .tls) {
             return .{ .message = "Only implicit TLS (imap_security = tls) is supported today" };
-        }
-        if (entry.smtp) |smtp| {
-            if (smtp.security != .tls) {
-                return .{ .message = "Only implicit TLS for SMTP is supported today: " ++
-                    "STARTTLS on 587 is next, and 465 with smtp_security = tls works now" };
-            }
         }
 
         // Built in place: the struct carries the client and its buffers.

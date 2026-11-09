@@ -37,12 +37,50 @@ pub const Client = struct {
     /// Greeting, EHLO, and AUTH PLAIN.
     pub fn connect(self: *Client, domain: []const u8, user: []const u8, password: []const u8) Error!void {
         try self.expect(220);
+        try self.ehlo(domain);
+        try self.authenticate(user, password);
+    }
 
+    /// The same, on a port where TLS starts mid-conversation: greet, `EHLO`,
+    /// `STARTTLS`, and then the socket becomes an encrypted one. The password is
+    /// only offered after the upgrade -- if the server never says `STARTTLS`, the
+    /// connection ends here rather than continuing in clear.
+    ///
+    /// `upgrade` replaces the transport and answers null when it could not; it is
+    /// a function so the client stays a protocol, not a socket.
+    pub const Upgrade = *const fn (context: *anyopaque) ?transport_mod.Transport;
+
+    pub fn connect_starttls(
+        self: *Client,
+        domain: []const u8,
+        user: []const u8,
+        password: []const u8,
+        upgrade: Upgrade,
+        context: *anyopaque,
+    ) Error!void {
+        try self.expect(220);
         var buffer: [512]u8 = undefined;
-        const ehlo = command.ehlo(&buffer, domain) catch return error.ProtocolError;
-        try self.write(ehlo);
-        try self.expect(250);
+        const greeting = command.ehlo(&buffer, domain) catch return error.ProtocolError;
+        try self.write(greeting);
+        // The extension list is the last thing sent in clear, and it is the only
+        // thing that says whether an upgrade is possible.
+        if (!try self.offers_starttls()) return error.ProtocolError;
+        try self.write("STARTTLS\r\n");
+        try self.expect(220);
+        self.transport = upgrade(context) orelse return error.Unavailable;
+        self.buffer_len = 0;
+        try self.ehlo(domain);
+        try self.authenticate(user, password);
+    }
 
+    fn ehlo(self: *Client, domain: []const u8) Error!void {
+        var buffer: [512]u8 = undefined;
+        const line = command.ehlo(&buffer, domain) catch return error.ProtocolError;
+        try self.write(line);
+        try self.expect(250);
+    }
+
+    fn authenticate(self: *Client, user: []const u8, password: []const u8) Error!void {
         var auth_buffer: [1200]u8 = undefined;
         const auth = command.auth_plain(&auth_buffer, user, password) catch return error.ProtocolError;
         try self.write(auth);
@@ -52,6 +90,28 @@ pub const Client = struct {
             // 503 "already authenticated" is handled above.
             else => return classify(reply.code),
         }
+    }
+
+    /// Reads a whole `EHLO` answer and says whether one of its lines is `STARTTLS`.
+    fn offers_starttls(self: *Client) Error!bool {
+        var offered = false;
+        var first = true;
+        var last: response.Reply = undefined;
+        while (true) {
+            const line = try self.read_line();
+            const reply = response.parse(line) catch return error.ProtocolError;
+            if (!first and reply.code != last.code) return error.ProtocolError;
+            if (contains_starttls(reply.text)) offered = true;
+            first = false;
+            last = reply;
+            if (reply.final) return offered;
+        }
+    }
+
+    fn contains_starttls(text: []const u8) bool {
+        // "250-STARTTLS" or "250 STARTTLS": the extension is the word, not the
+        // position it keeps on the line.
+        return std.mem.indexOf(u8, text, "STARTTLS") != null;
     }
 
     /// MAIL FROM, RCPT TO, DATA, the message, and the final 250.
@@ -326,4 +386,69 @@ test "a long body is streamed in chunks without losing bytes" {
     const output = scripted.output_text();
     try testing.expect(std.mem.indexOf(u8, output, "\r\n\r\n") != null);
     try testing.expect(std.mem.endsWith(u8, output, "\r\n.\r\n"));
+}
+
+test "starttls: the password only crosses an encrypted wire" {
+    // Two peers in a row: the plaintext one says STARTTLS is there, the other is
+    // what the upgrade hands back. If AUTH had gone out before the swap, the
+    // second script would never be reached and the send would fail.
+    var plain = Scripted{ .input = "220 ready\r\n" ++
+        "250-smtp.example.com\r\n" ++
+        "250-STARTTLS\r\n" ++
+        "250 AUTH PLAIN\r\n" ++
+        "220 go ahead\r\n" };
+    const Peer = struct {
+        tls: Scripted = .{ .input = "250-smtp.example.com\r\n" ++
+            "250 AUTH PLAIN\r\n" ++
+            "235 ok\r\n" },
+        swaps: u8 = 0,
+
+        fn upgrade(context: *anyopaque) ?transport_mod.Transport {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.swaps += 1;
+            return self.tls.transport();
+        }
+    };
+    var state: Peer = .{};
+    var client = Client.init(plain.transport());
+    try client.connect_starttls("example.test", "me", "secret", Peer.upgrade, &state);
+    try testing.expectEqual(@as(u8, 1), state.swaps);
+    try testing.expect(std.mem.indexOf(u8, plain.output_text(), "AUTH") == null);
+    try testing.expect(std.mem.indexOf(u8, state.tls.output_text(), "AUTH") != null);
+}
+
+test "starttls: a server that never offers it is not trusted with the password" {
+    var plain = Scripted{ .input = "220 ready\r\n" ++
+        "250-smtp.example.com\r\n" ++
+        "250 AUTH PLAIN\r\n" };
+    var client = Client.init(plain.transport());
+    var nothing: u8 = 0;
+    try testing.expectError(
+        error.ProtocolError,
+        client.connect_starttls("example.test", "me", "secret", null_upgrade, &nothing),
+    );
+    try testing.expect(std.mem.indexOf(u8, plain.output_text(), "STARTTLS") == null);
+}
+
+/// Refuses every upgrade, which is what a failed handshake looks like from here.
+fn null_upgrade(context: *anyopaque) ?transport_mod.Transport {
+    _ = context;
+    return null;
+}
+
+test "starttls: a handshake that fails stops the send, it does not fall back to clear" {
+    var plain = Scripted{ .input = "220 ready\r\n" ++
+        "250-smtp.example.com\r\n" ++
+        "250 STARTTLS\r\n" ++
+        "220 go ahead\r\n" };
+    var client = Client.init(plain.transport());
+    var nothing: u8 = 0;
+    try testing.expectError(
+        error.Unavailable,
+        client.connect_starttls("example.test", "me", "secret", null_upgrade, &nothing),
+    );
+    // No second EHLO, no AUTH: the conversation ended with the failed upgrade.
+    const seen = plain.output_text();
+    try testing.expect(std.mem.indexOf(u8, seen, "secret") == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, seen, "EHLO"));
 }
